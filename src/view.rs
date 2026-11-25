@@ -3,6 +3,10 @@ use gpui_kit::*;
 use std::path::PathBuf;
 use std::time::Duration;
 
+gpui_kit::assets::icon_assets!(pub PawAssets, [
+    LayoutDashboard, ArrowLeftRight, FolderOpen, Activity, Settings, Clipboard, Cat,
+]);
+
 const BG: u32 = 0xeff6ff;
 const SURFACE: u32 = 0xfafcff;
 const INK: u32 = 0x10243d;
@@ -1196,6 +1200,20 @@ mod tests {
         assert_eq!(destination_label("127.0.0.1", &json!(null)), "127.0.0.1");
         assert_eq!(destination_label("", &json!(123)), "—");
     }
+    #[test]
+    fn every_nav_and_workspace_icon_is_embedded() {
+        use gpui_kit::AssetSource;
+
+        let assets = super::PawAssets;
+        let paths = Page::ALL
+            .into_iter()
+            .map(Page::icon)
+            .chain(["icons/clipboard.svg", "icons/cat.svg"]);
+        for path in paths {
+            assert!(assets.load(path).unwrap().is_some(), "missing SVG: {path}");
+        }
+    }
+
     #[test]
     fn startup_pages_match_the_nav() {
         assert_eq!(Page::ALL.len(), 5);

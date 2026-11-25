@@ -28,7 +28,7 @@ fn main() {
         }
     }
     let binary = std::env::var_os("MEOW_BIN").map(PathBuf::from);
-    let app: Application = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app: Application = gpui_kit::application().with_assets(view::PawAssets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         let bounds = Bounds::centered(None, size(px(1120.), px(738.)), cx);
