@@ -8,6 +8,8 @@ fn main() {
     let mut profile = None;
     let mut page = view::Page::Overview;
     let mut start = false;
+    #[cfg(feature = "visual-test")]
+    let mut screenshot = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--profile") => profile = args.next().map(PathBuf::from),
@@ -17,6 +19,8 @@ fn main() {
                 }
             }
             Some("--start") => start = true,
+            #[cfg(feature = "visual-test")]
+            Some("--screenshot") => screenshot = args.next().map(PathBuf::from),
             _ => {
                 eprintln!("Usage: meow-paw [--profile FILE] [--start] [--page PAGE]");
                 std::process::exit(2);
@@ -28,7 +32,7 @@ fn main() {
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         let bounds = Bounds::centered(None, size(px(1120.), px(738.)), cx);
-        gpui_kit::open_window(
+        let (_handle, _) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
@@ -41,5 +45,24 @@ fn main() {
         )
         .expect("could not open Meow Paw");
         cx.activate(true);
+        #[cfg(feature = "visual-test")]
+        if let Some(path) = screenshot {
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1_400))
+                    .await;
+                let rendered = _handle.update(cx, |_, window, _| {
+                    window
+                        .render_to_image()
+                        .and_then(|image| image.save(&path).map_err(Into::into))
+                });
+                if !matches!(rendered, Ok(Ok(()))) {
+                    eprintln!("Paw visual capture failed: {rendered:?}");
+                    std::process::exit(1);
+                }
+                cx.update(|app| app.quit());
+            })
+            .detach();
+        }
     });
 }

@@ -11,6 +11,7 @@ const LINE: u32 = 0xdce7f6;
 const BLUE: u32 = 0x2d62db;
 const SOFT_BLUE: u32 = 0xe7efff;
 const YELLOW: u32 = 0xffdd78;
+#[cfg(target_os = "linux")]
 const GREEN: u32 = 0x168460;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
