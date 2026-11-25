@@ -1,51 +1,32 @@
-//! Process ownership for a disposable Linux desktop session.
-//! Keep the spawning thread alive for the session: PDEATHSIG tracks that thread.
+//! Shared lifecycle for an isolated Meow instance owned by Paw.
 use crate::{engine::controller::Controller, profile::Profile};
 use std::{
+    ffi::OsStr,
     fmt::Write as _,
     fs,
     io::{self, Error, ErrorKind},
     net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
-    os::unix::process::CommandExt,
     path::Path,
-    process::{Child, Command, ExitStatus, Stdio},
+    process::ExitStatus,
     thread,
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(windows)]
+mod windows;
+#[cfg(target_os = "linux")]
+use linux::OwnedChild;
+#[cfg(windows)]
+use windows::OwnedChild;
 
 pub struct Session {
     pub controller: Controller,
     pub mixed_port: u16,
     process: OwnedChild,
     _directory: TempDir,
-}
-
-struct OwnedChild(Child);
-
-impl OwnedChild {
-    fn stop(&mut self) -> io::Result<()> {
-        if self.0.try_wait()?.is_some() {
-            return Ok(());
-        }
-        // The direct child has not yet been reaped, so its PID cannot be reused.
-        unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM) };
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            if self.0.try_wait()?.is_some() {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        self.0.kill()?;
-        self.0.wait().map(|_| ())
-    }
-}
-
-impl Drop for OwnedChild {
-    fn drop(&mut self) {
-        let _ = self.stop();
-    }
 }
 
 impl Session {
@@ -75,42 +56,25 @@ impl Session {
             .managed(controller_addr, mixed_port, &secret)
             .map_err(Error::other)?;
         fs::write(&config, candidate)?;
-        let build_command = || {
-            let mut cmd = Command::new(&binary);
-            cmd.current_dir(directory.path())
-                .arg("--no-external-plugins")
-                .arg("-d")
-                .arg(directory.path())
-                .arg("-f")
-                .arg(&config)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            let parent = std::process::id() as libc::pid_t;
-            // Do not allocate or lock after fork. getppid covers death before prctl.
-            unsafe {
-                cmd.pre_exec(move || {
-                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0) == -1 {
-                        return Err(Error::last_os_error());
-                    }
-                    if libc::getppid() != parent {
-                        return Err(Error::from_raw_os_error(libc::ECHILD));
-                    }
-                    Ok(())
-                });
-            }
-            cmd
-        };
+        let args = [
+            OsStr::new("--no-external-plugins"),
+            OsStr::new("-d"),
+            directory.path().as_os_str(),
+            OsStr::new("-f"),
+            config.as_os_str(),
+        ];
         if cancelled() {
             return Err(Error::from(ErrorKind::Interrupted));
         }
-        let mut preflight = OwnedChild(build_command().arg("-t").spawn()?);
+        let mut preflight_args = args.to_vec();
+        preflight_args.push(OsStr::new("-t"));
+        let mut preflight = OwnedChild::spawn(&binary, directory.path(), &preflight_args)?;
         let deadline = Instant::now() + Duration::from_secs(6);
         loop {
             if cancelled() {
                 return Err(Error::from(ErrorKind::Interrupted));
             }
-            if let Some(status) = preflight.0.try_wait()? {
+            if let Some(status) = preflight.try_wait()? {
                 if !status.success() {
                     return Err(Error::other(format!(
                         "Meow rejected the candidate configuration ({status})"
@@ -129,14 +93,14 @@ impl Session {
         drop(preflight);
         drop(control_slot);
         drop(mixed_slot);
-        let mut process = OwnedChild(build_command().spawn()?);
+        let mut process = OwnedChild::spawn(&binary, directory.path(), &args)?;
         let controller = Controller::new(controller_addr.into(), secret).map_err(Error::other)?;
         let deadline = Instant::now() + Duration::from_secs(6);
         loop {
             if cancelled() {
                 return Err(Error::from(ErrorKind::Interrupted));
             }
-            if let Some(status) = process.0.try_wait()? {
+            if let Some(status) = process.try_wait()? {
                 return Err(Error::other(format!(
                     "Meow exited before its listeners became ready ({status})"
                 )));
@@ -167,7 +131,7 @@ impl Session {
     }
 
     pub fn status(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.process.0.try_wait()
+        self.process.try_wait()
     }
 
     pub fn stop(mut self) -> io::Result<()> {

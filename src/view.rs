@@ -13,7 +13,7 @@ const SOFT_BLUE: u32 = 0xe7efff;
 const YELLOW: u32 = 0xffdd78;
 const STREAM_DOWN: u32 = 0x2c77d2;
 const STREAM_UP: u32 = 0xb97019;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 const GREEN: u32 = 0x168460;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,9 +73,9 @@ pub struct Paw {
     profile: Option<PathBuf>,
     binary: Option<PathBuf>,
     error: Option<String>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     desktop: Option<meow_paw::app::Desktop>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     snapshot: meow_paw::app::Snapshot,
 }
 
@@ -90,13 +90,13 @@ pub fn open(
         let mut paw = Paw {
             page,
             profile,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             desktop: binary
                 .as_ref()
                 .and_then(|path| meow_paw::app::Desktop::new(path.clone()).ok()),
             binary,
             error: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             snapshot: Default::default(),
         };
         if start {
@@ -127,7 +127,7 @@ pub fn open(
 impl Paw {
     fn start(&mut self) {
         self.error = None;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             let Some(desktop) = self.desktop.as_ref() else {
                 self.error =
@@ -140,21 +140,21 @@ impl Paw {
             };
             self.error = desktop.start(profile).err().map(|e| e.to_string());
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             self.error =
                 Some("Managed engine sessions are not enabled on this platform yet.".into());
         }
     }
     fn stop(&mut self) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         if let Some(desktop) = &self.desktop {
             desktop.stop();
         }
     }
 
     fn refresh(&mut self) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         if let Some(desktop) = &self.desktop {
             let snap = desktop.snapshot();
             if self.snapshot.revision != snap.revision {
@@ -166,7 +166,7 @@ impl Paw {
     }
 
     fn state(&self) -> (&'static str, u32, Option<u16>) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             use meow_paw::app::EngineStatus;
             match &self.snapshot.engine {
@@ -177,14 +177,14 @@ impl Paw {
                 EngineStatus::Stopped => ("Stopped", FAINT, None),
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             ("Not enabled", FAINT, None)
         }
     }
 
     fn issue(&self) -> Option<String> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             if let meow_paw::app::EngineStatus::Error(error) = &self.snapshot.engine {
                 return Some(error.clone());
@@ -315,11 +315,11 @@ impl Paw {
     }
 
     fn desktop_available(&self) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             self.desktop.is_some()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             false
         }
@@ -400,7 +400,7 @@ impl Paw {
                     .child(traffic_legend("Upload", STREAM_UP)),
             );
         let frame = card().child(label);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             use meow_paw::app::TRAFFIC_WINDOW_SECS;
             let samples: Vec<_> = self.snapshot.traffic_history.recent().collect();
@@ -475,7 +475,7 @@ impl Paw {
     }
 
     fn traffic(&self) -> (String, String, String) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         if let Some(t) = self.snapshot.traffic.as_ref() {
             return (
                 format!("{}/s", bytes(t.up)),
@@ -527,7 +527,7 @@ impl Paw {
                 ),
             );
         let page = div().flex().flex_col().gap_4().child(box_);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         if !self.snapshot.diagnostics.is_empty() {
             return page.child(
                 card()
@@ -574,7 +574,7 @@ impl Paw {
     }
 
     fn proxies(&self, cx: &mut Context<Self>) -> Div {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         if let Some(inventory) = self.snapshot.inventory.as_ref() {
             let mut body = div().flex().flex_col().gap_4();
             for (name, group) in inventory.groups.iter().filter(|(_, g)| !g.hidden).take(24) {
@@ -615,7 +615,7 @@ impl Paw {
     }
 
     fn connections(&self) -> Div {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         if let Some(list) = self.snapshot.connections.as_ref().filter(|c| !c.is_empty()) {
             return card()
                 .child(
@@ -784,7 +784,7 @@ fn traffic_legend(label: &'static str, color: u32) -> Div {
         .child(label)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn traffic_bar(value: u64, peak: u64) -> f32 {
     if peak == 0 || value == 0 {
         return 0.;
@@ -792,7 +792,7 @@ fn traffic_bar(value: u64, peak: u64) -> f32 {
     (60. * (value.min(peak) as f64 / peak as f64) as f32).max(1.)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn bytes(value: u64) -> String {
     if value < 1024 {
         return format!("{value} B");

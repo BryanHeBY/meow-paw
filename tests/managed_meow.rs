@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", windows))]
 
 use meow_paw::{engine::session::Session, profile::Profile};
 use std::{
