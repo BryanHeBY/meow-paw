@@ -8,3 +8,6 @@ publish = false
 [dependencies]
 serde_json = { version = "1", features = ["preserve_order"] }
 serde-saphyr = "=2.0.0"
+serde = { version = "1", features = ["derive"] }
+ureq = { version = "3", default-features = false, features = ["json"] }
+url = "2"
