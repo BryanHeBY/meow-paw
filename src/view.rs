@@ -1,3 +1,4 @@
+use crate::preferences::Preferences;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::path::PathBuf;
@@ -78,6 +79,8 @@ pub struct Paw {
     binary: Option<PathBuf>,
     error: Option<String>,
     copied_listener: Option<u16>,
+    preferences: Preferences,
+    preference_warning: Option<String>,
     #[cfg(any(target_os = "linux", windows))]
     desktop: Option<meow_paw::app::Desktop>,
     #[cfg(any(target_os = "linux", windows))]
@@ -91,6 +94,7 @@ pub fn open(
     profile: Option<PathBuf>,
     page: Page,
     start: bool,
+    (preferences, warning): (Preferences, Option<&str>),
     cx: &mut App,
 ) -> Entity<Paw> {
     cx.new(|cx| {
@@ -106,6 +110,8 @@ pub fn open(
             proxy_group: None,
             error: None,
             copied_listener: None,
+            preferences,
+            preference_warning: warning.map(str::to_owned),
             #[cfg(any(target_os = "linux", windows))]
             snapshot: Default::default(),
         };
@@ -689,9 +695,12 @@ impl Paw {
                 let _ = weak.update(cx, |paw: &mut Paw, cx| {
                     if binary {
                         paw.choose_binary(path);
-                    } else {
+                    } else if path.is_file() {
+                        paw.remember_selection(false, &path);
                         paw.profile = Some(path);
                         paw.error = None;
+                    } else {
+                        paw.error = Some("Choose an existing local YAML file.".into());
                     }
                     cx.notify();
                 });
@@ -892,6 +901,7 @@ impl Paw {
             match meow_paw::app::Desktop::new(path.clone()) {
                 Ok(desktop) => {
                     self.desktop = Some(desktop);
+                    self.remember_selection(true, &path);
                     self.binary = Some(path);
                     self.snapshot = Default::default();
                     self.error = None;
@@ -903,6 +913,14 @@ impl Paw {
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         let _ = path;
+    }
+
+    fn remember_selection(&mut self, engine: bool, path: &std::path::Path) {
+        if let Err(err) = self.preferences.remember(engine, path) {
+            self.preference_warning = Some(format!(
+                "Could not save this choice. It will be used for this run only: {err}"
+            ));
+        }
     }
 
     fn can_change_binary(&self) -> bool {
@@ -1008,6 +1026,17 @@ impl Render for Paw {
                                 .bg(rgb(0xffece9))
                                 .text_color(rgb(0xa83a33))
                                 .child(issue),
+                        )
+                    })
+                    .when_some(self.preference_warning.as_ref(), |pane, warning| {
+                        pane.child(
+                            div()
+                                .p_3()
+                                .mb_4()
+                                .rounded_md()
+                                .bg(rgb(0xfff4d5))
+                                .text_color(rgb(0x76571b))
+                                .child(warning.clone()),
                         )
                     })
                     .child(body),

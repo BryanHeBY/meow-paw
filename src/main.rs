@@ -1,6 +1,7 @@
 use gpui_kit::{App, Application, Bounds, WindowBounds, WindowOptions, px, size};
 use std::path::PathBuf;
 
+mod preferences;
 mod view;
 
 fn main() {
@@ -8,6 +9,7 @@ fn main() {
     let mut profile = None;
     let mut page = view::Page::Overview;
     let mut start = false;
+    let mut remember = true;
     #[cfg(feature = "visual-test")]
     let mut screenshot = None;
     while let Some(arg) = args.next() {
@@ -19,15 +21,24 @@ fn main() {
                 }
             }
             Some("--start") => start = true,
+            Some("--no-preferences") => remember = false,
             #[cfg(feature = "visual-test")]
             Some("--screenshot") => screenshot = args.next().map(PathBuf::from),
             _ => {
-                eprintln!("Usage: meow-paw [--profile FILE] [--start] [--page PAGE]");
+                eprintln!(
+                    "Usage: meow-paw [--profile FILE] [--start] [--page PAGE] [--no-preferences]"
+                );
                 std::process::exit(2);
             }
         }
     }
     let binary = std::env::var_os("MEOW_BIN").map(PathBuf::from);
+    #[cfg(feature = "visual-test")]
+    if screenshot.is_some() {
+        remember = false;
+    }
+    let (prefs, warning) = preferences::Preferences::discover(remember);
+    let (binary, profile) = prefs.resolve(binary, profile);
     let app: Application = gpui_kit::application().with_assets(view::PawAssets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
@@ -41,7 +52,7 @@ fn main() {
             cx,
             move |window, cx| {
                 window.set_window_title("Meow Paw");
-                view::open(binary, profile, page, start, cx)
+                view::open(binary, profile, page, start, (prefs, warning), cx)
             },
         )
         .expect("could not open Meow Paw");
