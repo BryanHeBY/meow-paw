@@ -8,6 +8,7 @@ use crate::{
     profile::{Diagnostic, MAX_PROFILE_BYTES, Profile},
 };
 use std::{
+    collections::VecDeque,
     fs::File,
     io::{self, Error, ErrorKind, Read},
     path::PathBuf,
@@ -32,6 +33,52 @@ pub enum EngineStatus {
     Error(String),
 }
 
+pub const TRAFFIC_WINDOW_SECS: usize = 40;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrafficRate {
+    pub up: u64,
+    pub down: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TrafficHistory {
+    // One bucket per elapsed second. Missing samples stay unknown, not zero.
+    entries: VecDeque<Option<TrafficRate>>,
+    origin: Option<Instant>,
+    last_second: u64,
+}
+
+impl TrafficHistory {
+    pub fn recent(&self) -> impl ExactSizeIterator<Item = Option<TrafficRate>> + '_ {
+        self.entries.iter().copied()
+    }
+
+    fn record(&mut self, now: Instant, traffic: Option<TrafficRate>) {
+        let origin = *self.origin.get_or_insert(now);
+        let second = now.saturating_duration_since(origin).as_secs();
+        if second == self.last_second
+            && let Some(current) = self.entries.back_mut()
+        {
+            if traffic.is_some() {
+                *current = traffic;
+            }
+            return;
+        }
+        for _ in 0..second
+            .saturating_sub(self.last_second + 1)
+            .min(TRAFFIC_WINDOW_SECS as u64)
+        {
+            self.entries.push_back(None);
+        }
+        self.entries.push_back(traffic);
+        while self.entries.len() > TRAFFIC_WINDOW_SECS {
+            self.entries.pop_front();
+        }
+        self.last_second = second;
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub revision: u64,
@@ -40,6 +87,7 @@ pub struct Snapshot {
     pub diagnostics: Vec<Diagnostic>,
     pub inventory: Option<Arc<Inventory>>,
     pub traffic: Option<Traffic>,
+    pub traffic_history: TrafficHistory,
     pub connections: Option<Arc<Vec<Connection>>>,
     pub last_update: Option<Instant>,
     pub action_error: Option<String>,
@@ -237,8 +285,16 @@ fn run(
                 continue;
             }
             change(snapshot, |s| {
+                let now = Instant::now();
                 s.last_update = (inventory.is_some() || connections.is_some() || traffic.is_some())
-                    .then(Instant::now);
+                    .then_some(now);
+                s.traffic_history.record(
+                    now,
+                    traffic.as_ref().map(|t| TrafficRate {
+                        up: t.up,
+                        down: t.down,
+                    }),
+                );
                 s.inventory = inventory;
                 s.connections = connections;
                 s.traffic = traffic;
@@ -253,6 +309,7 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>) {
         s.inventory = None;
         s.connections = None;
         s.traffic = None;
+        s.traffic_history = TrafficHistory::default();
         s.last_update = None;
     });
 }
@@ -280,6 +337,30 @@ fn load_profile(path: &PathBuf) -> io::Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traffic_history_bounds_gaps_and_preserves_zero() {
+        let base = Instant::now();
+        let mut series = TrafficHistory::default();
+        let rate = TrafficRate { up: 42, down: 7 };
+        let zero = TrafficRate { up: 0, down: 0 };
+        series.record(base, Some(rate));
+        series.record(base + Duration::from_millis(700), None);
+        series.record(base + Duration::from_secs(2), Some(zero));
+        assert_eq!(
+            series.recent().collect::<Vec<_>>(),
+            vec![Some(rate), None, Some(zero)]
+        );
+        series.record(base + Duration::from_secs(200), Some(rate));
+        let entries = series.recent().collect::<Vec<_>>();
+        assert_eq!(entries.len(), TRAFFIC_WINDOW_SECS);
+        assert!(
+            entries[..TRAFFIC_WINDOW_SECS - 1]
+                .iter()
+                .all(Option::is_none)
+        );
+        assert_eq!(entries.last(), Some(&Some(rate)));
+    }
 
     #[test]
     fn bad_profile_reports_a_revision_without_launching_an_engine() {

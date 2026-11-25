@@ -11,6 +11,8 @@ const LINE: u32 = 0xdce7f6;
 const BLUE: u32 = 0x2d62db;
 const SOFT_BLUE: u32 = 0xe7efff;
 const YELLOW: u32 = 0xffdd78;
+const STREAM_DOWN: u32 = 0x2c77d2;
+const STREAM_UP: u32 = 0xb97019;
 #[cfg(target_os = "linux")]
 const GREEN: u32 = 0x168460;
 
@@ -376,11 +378,104 @@ impl Paw {
                     .child(metric("DOWNLOAD", down))
                     .child(metric("SESSION TOTAL", total)),
             )
+            .child(self.traffic_timeline())
             .child(panel("Profile", self.profile_label()))
             .child(panel(
                 "System proxy",
                 "Unchanged. Use the local listener explicitly.".into(),
             ))
+    }
+
+    fn traffic_timeline(&self) -> Div {
+        let label = div()
+            .flex()
+            .justify_between()
+            .items_center()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Traffic activity"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_4()
+                    .child(traffic_legend("Download", STREAM_DOWN))
+                    .child(traffic_legend("Upload", STREAM_UP)),
+            );
+        let frame = card().child(label);
+        #[cfg(target_os = "linux")]
+        {
+            use meow_paw::app::TRAFFIC_WINDOW_SECS;
+            let samples: Vec<_> = self.snapshot.traffic_history.recent().collect();
+            if samples.iter().any(Option::is_some) {
+                let peak = samples
+                    .iter()
+                    .flatten()
+                    .map(|s| s.up.max(s.down))
+                    .max()
+                    .unwrap_or(0);
+                let pad = TRAFFIC_WINDOW_SECS.saturating_sub(samples.len());
+                let columns = std::iter::repeat_n(None, pad).chain(samples).map(|sample| {
+                    let (up, down) = sample.map_or((0., 0.), |s| {
+                        (traffic_bar(s.up, peak), traffic_bar(s.down, peak))
+                    });
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_end()
+                        .gap(px(1.))
+                        .h_full()
+                        .child(div().flex_1().rounded_sm().h(px(down)).bg(rgb(STREAM_DOWN)))
+                        .child(div().flex_1().rounded_sm().h(px(up)).bg(rgb(STREAM_UP)))
+                });
+                return frame
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .mt_3()
+                            .text_xs()
+                            .text_color(rgb(FAINT))
+                            .child("Shared scale")
+                            .child(format!("{}/s peak", bytes(peak))),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .h(px(61.))
+                            .flex()
+                            .items_end()
+                            .gap(px(2.))
+                            .border_b_1()
+                            .border_color(rgb(LINE))
+                            .children(columns),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .mt_2()
+                            .text_xs()
+                            .text_color(rgb(FAINT))
+                            .child("39 seconds ago")
+                            .child("Now"),
+                    );
+            }
+        }
+        frame.child(
+            div()
+                .mt_4()
+                .h(px(70.))
+                .rounded_lg()
+                .bg(rgb(SOFT_BLUE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(rgb(FAINT))
+                .child("Live activity appears when a session sends its first sample."),
+        )
     }
 
     fn traffic(&self) -> (String, String, String) {
@@ -680,6 +775,25 @@ fn metric(label: &'static str, value: String) -> Div {
                 .font_weight(FontWeight::BOLD)
                 .child(value),
         )
+}
+
+fn traffic_legend(label: &'static str, color: u32) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .text_color(rgb(FAINT))
+        .child(div().size(px(7.)).rounded_full().bg(rgb(color)))
+        .child(label)
+}
+
+#[cfg(target_os = "linux")]
+fn traffic_bar(value: u64, peak: u64) -> f32 {
+    if peak == 0 || value == 0 {
+        return 0.;
+    }
+    (60. * (value.min(peak) as f64 / peak as f64) as f32).max(1.)
 }
 
 #[cfg(target_os = "linux")]
