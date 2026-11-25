@@ -13,8 +13,7 @@ use windows_sys::{
         UI::{
             Shell::{
                 NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION,
-                NIN_KEYSELECT, NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
-                Shell_NotifyIconW,
+                NIN_SELECT, NINF_KEY, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
             },
             WindowsAndMessaging::{
                 CREATESTRUCTW, CreateIcon, CreateWindowExW, DefWindowProcW, DestroyIcon,
@@ -28,6 +27,7 @@ use windows_sys::{
     core::w,
 };
 
+const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const CALLBACK: u32 = WM_APP + 3;
 const ID: u32 = 1;
 
