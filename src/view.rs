@@ -134,12 +134,11 @@ impl Paw {
         #[cfg(any(target_os = "linux", windows))]
         {
             let Some(desktop) = self.desktop.as_ref() else {
-                self.error =
-                    Some("Set MEOW_BIN to an executable Meow binary before starting Paw.".into());
+                self.error = Some("Choose a Meow executable in Settings before starting.".into());
                 return;
             };
             let Some(profile) = self.profile.clone() else {
-                self.error = Some("Start Paw with --profile PATH to select a YAML file.".into());
+                self.error = Some("Choose a local YAML file in Profiles before starting.".into());
                 return;
             };
             self.error = desktop.start(profile).err().map(|e| e.to_string());
@@ -289,7 +288,9 @@ impl Paw {
 
     fn actions(&self, cx: &mut Context<Self>) -> Div {
         let (phase, _, _) = self.state();
-        let enabled = self.desktop_available();
+        let ready = self.desktop_available();
+        let supported = cfg!(any(target_os = "linux", windows));
+        let enabled = supported && phase != "Stopping";
         let running = phase == "Running" || phase == "Starting";
         let action = div()
             .id("session-control")
@@ -301,6 +302,12 @@ impl Paw {
             .font_weight(FontWeight::SEMIBOLD)
             .child(if running {
                 "Stop session"
+            } else if phase == "Stopping" {
+                "Stopping…"
+            } else if supported && !ready {
+                "Choose engine"
+            } else if supported && self.profile.is_none() {
+                "Choose profile"
             } else {
                 "Start session"
             })
@@ -309,6 +316,10 @@ impl Paw {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if running {
                             this.stop();
+                        } else if !ready {
+                            this.page = Page::Settings;
+                        } else if this.profile.is_none() {
+                            this.page = Page::Profiles;
                         } else {
                             this.start();
                         }
@@ -504,32 +515,21 @@ impl Paw {
 
     fn profiles(&self, cx: &mut Context<Self>) -> Div {
         let box_ = card()
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Local YAML"),
-            )
+            .child(section_label("NEXT SESSION"))
             .child(
                 div()
                     .mt_2()
-                    .text_color(rgb(FAINT))
+                    .text_xl()
+                    .font_weight(FontWeight::BOLD)
                     .child(self.profile_label()),
             )
-            .child(
-                div().mt_4().child(
-                    div()
-                        .id("select-profile")
-                        .rounded_md()
-                        .bg(rgb(SOFT_BLUE))
-                        .text_color(rgb(BLUE))
-                        .cursor_pointer()
-                        .px_4()
-                        .py_2()
-                        .child("Choose YAML file")
-                        .on_click(cx.listener(|this, _, _, cx| this.choose_profile(cx))),
-                ),
-            );
+            .child(div().mt_1().text_sm().text_color(rgb(FAINT)).child(
+                "Paw reads a local YAML file and prepares a separate configuration. Your source file is not edited.",
+            ))
+            .child(div().mt_4().flex().child(
+                secondary_button("select-profile", if self.profile.is_some() { "Choose another YAML" } else { "Choose YAML file" })
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_file(false, cx))),
+            ));
         let page = div().flex().flex_col().gap_4().child(box_);
         #[cfg(any(target_os = "linux", windows))]
         if !self.snapshot.diagnostics.is_empty() {
@@ -538,26 +538,37 @@ impl Paw {
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Profile diagnostics"),
+                            .child("Diagnostics from the last start attempt"),
                     )
-                    .children(
-                        self.snapshot
-                            .diagnostics
-                            .iter()
-                            .take(40)
-                            .map(|d| div().mt_1().text_sm().child(format!("{d:?}"))),
-                    ),
+                    .children(self.snapshot.diagnostics.iter().take(40).map(|d| {
+                        div()
+                            .mt_2()
+                            .text_sm()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(d.path.clone()),
+                            )
+                            .child(div().text_color(rgb(FAINT)).child(d.message))
+                    })),
             );
         }
         page
     }
 
-    fn choose_profile(&mut self, cx: &mut Context<Self>) {
+    fn choose_file(&mut self, binary: bool, cx: &mut Context<Self>) {
         let selection = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Choose Meow YAML".into()),
+            prompt: Some(
+                if binary {
+                    "Choose Meow executable"
+                } else {
+                    "Choose Meow YAML"
+                }
+                .into(),
+            ),
         });
         cx.spawn(async move |weak, cx| {
             let path = selection
@@ -568,8 +579,12 @@ impl Paw {
                 .and_then(|paths| paths.into_iter().next());
             if let Some(path) = path {
                 let _ = weak.update(cx, |paw: &mut Paw, cx| {
-                    paw.profile = Some(path);
-                    paw.error = None;
+                    if binary {
+                        paw.choose_binary(path);
+                    } else {
+                        paw.profile = Some(path);
+                        paw.error = None;
+                    }
                     cx.notify();
                 });
             }
@@ -755,28 +770,73 @@ impl Paw {
         )
     }
 
-    fn settings(&self) -> Div {
+    fn choose_binary(&mut self, path: PathBuf) {
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            if !self.can_change_binary() {
+                self.error = Some("Stop the current session before changing the engine.".into());
+                return;
+            }
+            if !path.is_file() {
+                self.error = Some("Select an existing local Meow executable.".into());
+                return;
+            }
+            match meow_paw::app::Desktop::new(path.clone()) {
+                Ok(desktop) => {
+                    self.desktop = Some(desktop);
+                    self.binary = Some(path);
+                    self.snapshot = Default::default();
+                    self.error = None;
+                }
+                Err(error) => {
+                    self.error = Some(format!("Could not prepare the Meow worker: {error}"))
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let _ = path;
+    }
+
+    fn can_change_binary(&self) -> bool {
+        let phase = self.state().0;
+        cfg!(any(target_os = "linux", windows))
+            && !matches!(phase, "Starting" | "Running" | "Stopping")
+    }
+
+    fn settings(&self, cx: &mut Context<Self>) -> Div {
+        let binary = self
+            .binary
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "No executable selected.".into());
         div()
             .flex()
             .flex_col()
             .gap_4()
-            .child(panel("Platform", std::env::consts::OS.into()))
-            .child(panel(
-                "Meow binary",
-                self.binary
-                    .as_ref()
-                    .map(|p| {
-                        p.file_name()
-                            .unwrap_or(p.as_os_str())
-                            .to_string_lossy()
-                            .into_owned()
-                    })
-                    .unwrap_or_else(|| "Not configured. Set MEOW_BIN before opening Paw.".into()),
-            ))
-            .child(panel(
-                "System changes",
-                "No system proxy changes. No TUN or administrator privileges.".into(),
-            ))
+            .child(
+                card()
+                    .child(section_label("ENGINE"))
+                    .child(div().mt_2().text_lg().font_weight(FontWeight::SEMIBOLD).child("Meow executable"))
+                    .child(div().mt_1().text_sm().text_color(rgb(FAINT)).child(binary))
+                    .when(self.can_change_binary(), |el| {
+                        el.child(div().mt_4().flex().child(
+                            secondary_button("select-binary", "Choose executable")
+                                .on_click(cx.listener(|this, _, _, cx| this.choose_file(true, cx))),
+                        ))
+                    }),
+            )
+            .child(
+                card()
+                    .child(section_label("NETWORK BOUNDARIES"))
+                    .child(div().mt_2().text_lg().font_weight(FontWeight::SEMIBOLD).child("Local listener only"))
+                    .child(div().mt_1().text_sm().text_color(rgb(FAINT)).child(
+                        "Paw leaves system proxy and routes untouched. Point individual apps at the local listener shown on Overview.",
+                    ))
+                    .child(div().mt_3().flex().gap_3().flex_wrap()
+                        .child(section_label("NO SYSTEM PROXY"))
+                        .child(section_label("NO TUN"))
+                        .child(section_label("NO ADMINISTRATOR ACCESS"))),
+            )
     }
 }
 
@@ -787,7 +847,7 @@ impl Render for Paw {
             Page::Proxies => self.proxies(cx),
             Page::Profiles => self.profiles(cx),
             Page::Connections => self.connections(),
-            Page::Settings => self.settings(),
+            Page::Settings => self.settings(cx),
         };
         div()
             .size_full()
@@ -858,6 +918,22 @@ fn panel(title: &'static str, message: String) -> Div {
     card()
         .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
         .child(div().mt_2().text_sm().text_color(rgb(FAINT)).child(message))
+}
+
+fn secondary_button(id: &'static str, label: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(0xb5cafa))
+        .bg(rgb(SOFT_BLUE))
+        .text_color(rgb(BLUE))
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(0xd8e7ff)))
+        .px_4()
+        .py_2()
+        .child(label)
 }
 
 fn section_label(label: impl Into<SharedString>) -> Div {
