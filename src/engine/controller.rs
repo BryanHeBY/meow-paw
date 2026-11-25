@@ -1,4 +1,5 @@
 use serde::{Deserialize, de::DeserializeOwned};
+use std::io::{BufRead, BufReader, Read as _};
 use std::{collections::BTreeMap, fmt, net::SocketAddr, time::Duration};
 use url::Url;
 
@@ -36,6 +37,10 @@ pub struct Inventory {
 pub struct Traffic {
     pub up: u64,
     pub down: u64,
+    #[serde(default, rename = "upTotal")]
+    pub up_total: u64,
+    #[serde(default, rename = "downTotal")]
+    pub down_total: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -228,7 +233,23 @@ impl Controller {
     }
 
     pub fn traffic(&self) -> Result<Traffic, ControllerError> {
-        self.get(self.endpoint(&["traffic"]))
+        // This endpoint is an open NDJSON stream in Meow 0.29; do not
+        // read the whole body to EOF to sample one frame.
+        let url = self.endpoint(&["traffic"]);
+        let mut request = self.agent.get(url.as_str());
+        if !self.secret.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", self.secret));
+        }
+        let mut response = request.call().map_err(http_error)?;
+        if response.status().as_u16() != 200 {
+            return Err(ControllerError::Status(response.status().as_u16()));
+        }
+        let mut reader = BufReader::new(response.body_mut().as_reader().take(4096));
+        let mut frame = Vec::new();
+        reader
+            .read_until(b'\n', &mut frame)
+            .map_err(|_| ControllerError::Unreachable)?;
+        serde_json::from_slice(&frame).map_err(|_| ControllerError::InvalidResponse)
     }
 
     pub fn connections(&self) -> Result<Vec<Connection>, ControllerError> {
