@@ -70,14 +70,21 @@ impl Profile {
             .enumerate()
             .filter(|(_, node)| node.get("type").and_then(Value::as_str) == Some("trojan"))
             .filter(|(_, node)| {
-                !node
-                    .get("port")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|port| (1..=65535).contains(&port))
+                !node.get("port").is_some_and(|value| {
+                    let port = if let Some(text) = value.as_str() {
+                        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+                            return false;
+                        }
+                        text.parse::<u64>().ok()
+                    } else {
+                        value.as_u64()
+                    };
+                    port.is_some_and(|port| (1..=65535).contains(&port))
+                })
             })
             .map(|(i, _)| Diagnostic {
                 path: format!("proxies[{i}].port"),
-                message: "Trojan requires an integer port from 1 to 65535; remove quotes from a numeric port.",
+                message: "Trojan requires a decimal port from 1 to 65535.",
             })
             .collect()
     }
@@ -169,11 +176,12 @@ mod tests {
     }
 
     #[test]
-    fn diagnoses_trojan_but_keeps_hysteria_port_ranges() {
-        let source = "proxies:\n  - {type: trojan, name: a, port: '443'}\n  - {type: hysteria2, name: b, ports: '443,7000-8000'}\n  - {type: trojan, name: c, port: 443}\n";
+    fn accepts_quoted_trojan_ports_and_keeps_hysteria_ranges() {
+        let source = "proxies:\n  - {type: trojan, name: a, port: '443'}\n  - {type: hysteria2, name: b, ports: '443,7000-8000'}\n  - {type: trojan, name: c, port: 443}\n  - {type: trojan, name: bad, port: '65536'}\n";
         let diagnostics = Profile::parse(source).unwrap().diagnostics();
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].path, "proxies[0].port");
+        assert_eq!(diagnostics[0].path, "proxies[3].port");
+        assert_eq!(generated(source)["proxies"][0]["port"], "443");
         assert_eq!(generated(source)["proxies"][1]["ports"], "443,7000-8000");
     }
 

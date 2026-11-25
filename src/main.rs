@@ -46,6 +46,7 @@ fn main() {
     }
     let (prefs, warning) = preferences::Preferences::discover(remember);
     let (binary, profile) = prefs.resolve(binary, profile);
+    let binary = binary.or_else(bundled_engine);
     let app: Application = gpui_kit::application().with_assets(view::PawAssets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
@@ -78,6 +79,17 @@ fn main() {
             .detach();
         }
     });
+}
+
+fn bundled_engine() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    engine_beside(&exe)
+}
+
+fn engine_beside(exe: &std::path::Path) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "meow.exe" } else { "meow" };
+    let path = exe.parent()?.join(name);
+    path.is_file().then_some(path)
 }
 
 fn window_options(cx: &mut App) -> WindowOptions {
@@ -145,4 +157,20 @@ fn retain_when_tray_is_ready(
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod bundled_tests {
+    use super::*;
+
+    #[test]
+    fn only_looks_beside_the_paw_executable_for_the_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let paw = dir.path().join("meow-paw");
+        assert!(engine_beside(&paw).is_none());
+        let name = if cfg!(windows) { "meow.exe" } else { "meow" };
+        let core = dir.path().join(name);
+        std::fs::write(&core, "test file").unwrap();
+        assert_eq!(engine_beside(&paw), Some(core));
+    }
 }
