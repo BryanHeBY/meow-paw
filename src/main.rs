@@ -52,7 +52,7 @@ fn main() {
             cx,
             move |window, cx| {
                 window.set_window_title("Meow Paw");
-                view::open(binary, profile, page, start, (prefs, warning), cx)
+                view::open(binary, profile, page, start, (prefs, warning), window, cx)
             },
         )
         .expect("could not open Meow Paw");

@@ -1,4 +1,5 @@
 use crate::preferences::Preferences;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::path::PathBuf;
@@ -81,6 +82,8 @@ pub struct Paw {
     copied_listener: Option<u16>,
     preferences: Preferences,
     preference_warning: Option<String>,
+    search: Entity<InputState>,
+    _search_changes: Subscription,
     #[cfg(any(target_os = "linux", windows))]
     desktop: Option<meow_paw::app::Desktop>,
     #[cfg(any(target_os = "linux", windows))]
@@ -95,9 +98,16 @@ pub fn open(
     page: Page,
     start: bool,
     (preferences, warning): (Preferences, Option<&str>),
+    window: &mut Window,
     cx: &mut App,
 ) -> Entity<Paw> {
+    let search = cx.new(|cx| InputState::new(window, cx));
     cx.new(|cx| {
+        let search_changes = cx.subscribe(&search, |_: &mut Paw, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
         let mut paw = Paw {
             page,
             profile,
@@ -112,6 +122,8 @@ pub fn open(
             copied_listener: None,
             preferences,
             preference_warning: warning.map(str::to_owned),
+            search,
+            _search_changes: search_changes,
             #[cfg(any(target_os = "linux", windows))]
             snapshot: Default::default(),
         };
@@ -712,47 +724,78 @@ impl Paw {
     fn proxies(&self, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
         if let Some(inventory) = self.snapshot.inventory.as_ref() {
-            let visible = inventory.groups.iter().filter(|(_, group)| !group.hidden);
+            let value = self.search.read(cx).value();
+            let query = value.trim().to_lowercase();
+            let total = inventory
+                .groups
+                .values()
+                .filter(|group| !group.hidden)
+                .count();
+            let visible = inventory.groups.iter().filter(|(name, group)| {
+                !group.hidden
+                    && (route_matches(name, &query)
+                        || group.all.as_ref().is_some_and(|members| {
+                            members.iter().any(|member| route_matches(member, &query))
+                        }))
+            });
             let count = visible.clone().count();
+            let search = card()
+                .child(section_label(if query.is_empty() {
+                    format!("{total} ROUTE GROUPS")
+                } else {
+                    format!("{count} OF {total} ROUTE GROUPS")
+                }))
+                .child(
+                    div()
+                        .mt_2()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child("Filter by group or route"),
+                )
+                .child(div().mt_2().child(Input::new(&self.search).cleanable(true)));
+
             let current = visible
                 .clone()
                 .find(|(name, _)| self.proxy_group.as_ref() == Some(name))
                 .or_else(|| visible.clone().next());
             if let Some((name, group)) = current {
-                let groups = card()
-                    .child(section_label(format!("{count} ROUTE GROUPS")))
-                    .child(
-                        div()
-                            .mt_3()
-                            .flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .children(visible.map(|(key, _)| {
-                                let key = key.clone();
-                                let chip = div()
-                                    .id(SharedString::from(format!("group:{key}")))
-                                    .border_1()
-                                    .border_color(rgb(if key == *name { BLUE } else { LINE }))
-                                    .rounded_md()
-                                    .px_3()
-                                    .py_1()
-                                    .bg(rgb(if key == *name { SOFT_BLUE } else { SURFACE }))
-                                    .text_color(rgb(if key == *name { BLUE } else { INK }))
-                                    .cursor_pointer()
-                                    .child(key.clone());
-                                chip.on_click(cx.listener(move |paw, _, _, cx| {
-                                    paw.proxy_group = Some(key.clone());
-                                    cx.notify();
-                                }))
-                            })),
-                    );
+                let groups = search.child(div().mt_3().flex().flex_wrap().gap_2().children(
+                    visible.map(|(key, _)| {
+                        let key = key.clone();
+                        let chip = div()
+                            .id(SharedString::from(format!("group:{key}")))
+                            .border_1()
+                            .border_color(rgb(if key == *name { BLUE } else { LINE }))
+                            .rounded_md()
+                            .px_3()
+                            .py_1()
+                            .bg(rgb(if key == *name { SOFT_BLUE } else { SURFACE }))
+                            .text_color(rgb(if key == *name { BLUE } else { INK }))
+                            .cursor_pointer()
+                            .child(key.clone());
+                        chip.on_click(cx.listener(move |paw, _, _, cx| {
+                            paw.proxy_group = Some(key.clone());
+                            cx.notify();
+                        }))
+                    }),
+                ));
                 let mutable = group.kind.eq_ignore_ascii_case("selector");
-                let members = group.all.as_deref().unwrap_or_default();
+                let all_members = group.all.as_deref().unwrap_or_default();
+                let show_all = route_matches(name, &query);
+                let members: Vec<_> = all_members
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, member)| show_all || route_matches(member, &query))
+                    .collect();
+                let routes = if members.len() == all_members.len() {
+                    format!("{} ROUTES", all_members.len())
+                } else {
+                    format!("{} OF {} ROUTES", members.len(), all_members.len())
+                };
                 let mut detail = card()
                     .child(section_label(format!(
-                        "{} · {} ROUTES",
+                        "{} · {routes}",
                         group.kind.to_uppercase(),
-                        members.len()
                     )))
                     .child(
                         div()
@@ -782,7 +825,7 @@ impl Paw {
                     );
                 } else {
                     detail = detail.child(div().mt_3().flex().flex_wrap().gap_2().children(
-                        members.iter().enumerate().map(|(index, member)| {
+                        members.into_iter().map(|(index, member)| {
                             let (g, n) = (name.clone(), member.clone());
                             let selected = group.now.as_deref() == Some(member.as_str());
                             div()
@@ -824,10 +867,18 @@ impl Paw {
                 }
                 return div().flex().flex_col().gap_4().child(groups).child(detail);
             }
-            return empty_state(
-                "No visible groups",
-                "The active profile has no visible route groups.",
-            );
+            let empty = if total == 0 {
+                empty_state(
+                    "No visible groups",
+                    "The active profile has no visible route groups.",
+                )
+            } else {
+                empty_state(
+                    "No matching routes",
+                    "Clear the filter or try part of a group or route name.",
+                )
+            };
+            return div().flex().flex_col().gap_4().child(search).child(empty);
         }
         let _ = cx;
         empty_state(
@@ -1104,6 +1155,11 @@ fn empty_state(title: &'static str, detail: &'static str) -> Div {
 }
 
 #[cfg(any(target_os = "linux", windows))]
+fn route_matches(name: &str, normalized_query: &str) -> bool {
+    normalized_query.is_empty() || name.to_lowercase().contains(normalized_query)
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn connection_row(destination: Div, route: Div, rule: Div) -> Div {
     div()
         .flex()
@@ -1229,6 +1285,17 @@ mod tests {
         assert_eq!(destination_label("127.0.0.1", &json!(null)), "127.0.0.1");
         assert_eq!(destination_label("", &json!(123)), "—");
     }
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn route_names_support_non_ascii_and_case_insensitive_filters() {
+        use super::route_matches;
+        assert!(route_matches("南京 A-01", "南京"));
+        assert!(route_matches("Oberland DIRECT", "direct"));
+        assert!(route_matches("ÉTÉ", "été"));
+        assert!(route_matches("名称", ""));
+        assert!(!route_matches("上海", "南京"));
+    }
+
     #[test]
     fn every_nav_and_workspace_icon_is_embedded() {
         use gpui_kit::AssetSource;
