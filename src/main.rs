@@ -1,7 +1,11 @@
-use gpui_kit::{App, Application, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui_kit::{
+    AnyWindowHandle, App, Application, Bounds, QuitMode, WindowBounds, WindowOptions, px, size,
+};
 use std::path::PathBuf;
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 mod preferences;
+mod tray;
 mod view;
 
 fn main() {
@@ -10,6 +14,7 @@ fn main() {
     let mut page = view::Page::Overview;
     let mut start = false;
     let mut remember = true;
+    let mut use_tray = true;
     #[cfg(feature = "visual-test")]
     let mut screenshot = None;
     while let Some(arg) = args.next() {
@@ -21,12 +26,13 @@ fn main() {
                 }
             }
             Some("--start") => start = true,
+            Some("--no-tray") => use_tray = false,
             Some("--no-preferences") => remember = false,
             #[cfg(feature = "visual-test")]
             Some("--screenshot") => screenshot = args.next().map(PathBuf::from),
             _ => {
                 eprintln!(
-                    "Usage: meow-paw [--profile FILE] [--start] [--page PAGE] [--no-preferences]"
+                    "Usage: meow-paw [--profile FILE] [--start] [--page PAGE] [--no-preferences] [--no-tray]"
                 );
                 std::process::exit(2);
             }
@@ -36,27 +42,22 @@ fn main() {
     #[cfg(feature = "visual-test")]
     if screenshot.is_some() {
         remember = false;
+        use_tray = false;
     }
     let (prefs, warning) = preferences::Preferences::discover(remember);
     let (binary, profile) = prefs.resolve(binary, profile);
     let app: Application = gpui_kit::application().with_assets(view::PawAssets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
-        let bounds = Bounds::centered(None, size(px(1120.), px(738.)), cx);
-        let (_handle, _) = gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(640.), px(480.))),
-                ..Default::default()
-            },
-            cx,
-            move |window, cx| {
-                window.set_window_title("Meow Paw");
-                view::open(binary, profile, page, start, (prefs, warning), window, cx)
-            },
-        )
+        let (_handle, paw) = gpui_kit::open_window(window_options(cx), cx, move |window, cx| {
+            window.set_window_title("Meow Paw");
+            view::open(binary, profile, page, start, (prefs, warning), window, cx)
+        })
         .expect("could not open Meow Paw");
         cx.activate(true);
+        if use_tray {
+            retain_when_tray_is_ready(_handle, paw, cx);
+        }
         #[cfg(feature = "visual-test")]
         if let Some(path) = screenshot {
             cx.spawn(async move |cx| {
@@ -77,4 +78,71 @@ fn main() {
             .detach();
         }
     });
+}
+
+fn window_options(cx: &mut App) -> WindowOptions {
+    let bounds = Bounds::centered(None, size(px(1120.), px(738.)), cx);
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(640.), px(480.))),
+        ..Default::default()
+    }
+}
+
+fn retain_when_tray_is_ready(
+    initial: AnyWindowHandle,
+    paw: gpui_kit::Entity<view::Paw>,
+    cx: &mut App,
+) {
+    let signals = tray::start();
+    let visible = Rc::new(Cell::new(Some(initial)));
+    let closed = visible.clone();
+    let observer = cx.on_window_closed(move |_, id| {
+        if closed.get().is_some_and(|handle| handle.window_id() == id) {
+            closed.set(None);
+        }
+    });
+    let mut retained = false;
+    cx.spawn(async move |cx| {
+        let _observer = observer;
+        loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(160))
+                .await;
+            cx.update(|cx| {
+                let available = signals.ready();
+                let show = signals.take_show() && available;
+                let restore = retained && !available && visible.get().is_none();
+                if available && !retained {
+                    cx.set_quit_mode(QuitMode::Explicit);
+                }
+                if show || restore {
+                    let activated = visible.get().is_some_and(|handle| {
+                        handle
+                            .update(cx, |_, window, _| window.activate_window())
+                            .is_ok()
+                    });
+                    if !activated {
+                        let result = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
+                            window.set_window_title("Meow Paw");
+                            view::rebind_window(&paw, window, cx);
+                            paw.clone()
+                        });
+                        if let Ok((handle, _)) = result {
+                            visible.set(Some(handle));
+                            cx.activate(true);
+                        } else if restore {
+                            // No tray and no window means no remaining control.
+                            cx.quit();
+                        }
+                    }
+                }
+                if retained && !available {
+                    cx.set_quit_mode(QuitMode::Default);
+                }
+                retained = available;
+            });
+        }
+    })
+    .detach();
 }

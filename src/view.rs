@@ -92,6 +92,24 @@ pub struct Paw {
     snapshot: meow_paw::app::Snapshot,
 }
 
+fn subscribe_search(search: &Entity<InputState>, cx: &mut Context<Paw>) -> Subscription {
+    cx.subscribe(search, |_: &mut Paw, _, event, cx| {
+        if matches!(event, InputEvent::Change) {
+            cx.notify();
+        }
+    })
+}
+
+pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
+    let query = paw.read(cx).search.read(cx).value();
+    let search = cx.new(|cx| InputState::new(window, cx).default_value(query));
+    paw.update(cx, |state, cx| {
+        state._search_changes = subscribe_search(&search, cx);
+        state.search = search;
+        cx.notify();
+    });
+}
+
 pub fn open(
     binary: Option<PathBuf>,
     profile: Option<PathBuf>,
@@ -103,11 +121,7 @@ pub fn open(
 ) -> Entity<Paw> {
     let search = cx.new(|cx| InputState::new(window, cx));
     cx.new(|cx| {
-        let search_changes = cx.subscribe(&search, |_: &mut Paw, _, event, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        });
+        let search_changes = subscribe_search(&search, cx);
         let mut paw = Paw {
             page,
             profile,
@@ -1013,6 +1027,16 @@ impl Paw {
                         .child(section_label("NO SYSTEM PROXY"))
                         .child(section_label("NO TUN"))
                         .child(section_label("NO ADMINISTRATOR ACCESS"))),
+            )            .child(
+                card()
+                    .child(section_label("APPLICATION"))
+                    .child(div().mt_2().text_sm().text_color(rgb(FAINT)).child(
+                        "Quit stops the managed engine. Where a desktop tray is available, closing the window leaves Paw in the tray."
+                    ))
+                    .child(div().mt_4().flex().child(
+                        secondary_button("quit-paw", "Quit Meow Paw")
+                            .on_click(cx.listener(|_, _, _, cx| cx.quit())),
+                    )),
             )
     }
 }
