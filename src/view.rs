@@ -794,11 +794,11 @@ impl Paw {
                     }),
                 ));
                 let mutable = group.kind.eq_ignore_ascii_case("selector");
-                let all_members = group.all.as_deref().unwrap_or_default();
+                let all_members = unique_route_members(group.all.as_deref().unwrap_or_default());
                 let show_all = route_matches(name, &query);
                 let members: Vec<_> = all_members
                     .iter()
-                    .enumerate()
+                    .copied()
                     .filter(|(_, member)| show_all || route_matches(member, &query))
                     .collect();
                 let routes = if members.len() == all_members.len() {
@@ -840,11 +840,12 @@ impl Paw {
                 } else {
                     detail = detail.child(div().mt_3().flex().flex_wrap().gap_2().children(
                         members.into_iter().map(|(index, member)| {
-                            let (g, n) = (name.clone(), member.clone());
-                            let selected = group.now.as_deref() == Some(member.as_str());
+                            let (g, n) = (name.clone(), member.to_owned());
+                            let selected = group.now.as_deref() == Some(member);
                             div()
                                 .id(SharedString::from(format!("proxy:{name}:{index}")))
-                                .min_w(px(142.))
+                                .min_w(px(164.))
+                                .min_h(px(58.))
                                 .flex_1()
                                 .px_3()
                                 .py_2()
@@ -862,8 +863,26 @@ impl Paw {
                                         .rounded_full()
                                         .bg(rgb(if selected { BLUE } else { LINE })),
                                 )
-                                .child(div().min_w_0().flex_1().child(member.clone()))
-                                .when(selected, |el| el.child(section_label("ACTIVE")))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .text_sm()
+                                        .font_weight(if selected {
+                                            FontWeight::SEMIBOLD
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
+                                        .child(member.to_owned())
+                                        .when(selected, |el| {
+                                            el.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(BLUE))
+                                                    .child("Active"),
+                                            )
+                                        }),
+                                )
                                 .when(mutable && !selected, |el| {
                                     el.cursor_pointer()
                                         .hover(|style| style.bg(rgb(SOFT_BLUE)))
@@ -1179,6 +1198,17 @@ fn empty_state(title: &'static str, detail: &'static str) -> Div {
 }
 
 #[cfg(any(target_os = "linux", windows))]
+fn unique_route_members(names: &[String]) -> Vec<(usize, &str)> {
+    let mut seen = std::collections::HashSet::new();
+    names
+        .iter()
+        .map(String::as_str)
+        .enumerate()
+        .filter(|(_, name)| seen.insert(*name))
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn route_matches(name: &str, normalized_query: &str) -> bool {
     normalized_query.is_empty() || name.to_lowercase().contains(normalized_query)
 }
@@ -1318,6 +1348,19 @@ mod tests {
         assert!(route_matches("ÉTÉ", "été"));
         assert!(route_matches("名称", ""));
         assert!(!route_matches("上海", "南京"));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn duplicate_candidates_keep_first_index_and_exact_identity() {
+        use super::unique_route_members;
+
+        let names = ["DIRECT", "南京", "DIRECT", "direct", "南京", "Reading"].map(str::to_owned);
+        assert_eq!(
+            unique_route_members(&names),
+            [(0, "DIRECT"), (1, "南京"), (3, "direct"), (5, "Reading")]
+        );
+        assert!(unique_route_members(&[]).is_empty());
     }
 
     #[test]
