@@ -214,19 +214,7 @@ impl Paw {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(
-                        div()
-                            .w_10()
-                            .h_10()
-                            .rounded_lg()
-                            .bg(rgb(YELLOW))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_lg()
-                            .font_weight(FontWeight::BOLD)
-                            .child("P"),
-                    )
+                    .child(paw_badge(40.0, YELLOW, INK))
                     .child(
                         div()
                             .flex()
@@ -347,28 +335,36 @@ impl Paw {
             .child(
                 div()
                     .rounded_xl()
-                    .bg(rgb(YELLOW))
+                    .border_1()
+                    .border_color(rgb(0xf6e5b3))
+                    .bg(rgb(0xfff8e2))
                     .px_6()
                     .py_5()
                     .flex()
-                    .flex_col()
-                    .gap_2()
+                    .items_center()
+                    .justify_between()
+                    .gap_5()
                     .child(
                         div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("SESSION STATUS"),
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0x76571b))
+                                    .child("LOCAL SESSION"),
+                            )
+                            .child(div().text_2xl().font_weight(FontWeight::BOLD).child(phase))
+                            .child(div().text_sm().text_color(rgb(FAINT)).child(
+                                port.map_or("No local listener is active.".into(), |port| {
+                                    format!("Listening on 127.0.0.1:{port}")
+                                }),
+                            )),
                     )
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(color))
-                            .child(phase),
-                    )
-                    .child(port.map_or("No active loopback listener.".into(), |port| {
-                        format!("Local listener  ·  127.0.0.1:{port}")
-                    })),
+                    .child(paw_badge(56.0, 0xffefbd, color)),
             )
             .child(
                 div()
@@ -809,6 +805,31 @@ fn bytes(value: u64) -> String {
         amount /= 1024.;
     }
     unreachable!()
+}
+
+// A native geometric mark, independent of emoji fonts and platform glyph widths.
+fn paw_badge(size: f32, background: u32, foreground: u32) -> Div {
+    let dot = |x: f32, y: f32, w: f32, h: f32| {
+        div()
+            .absolute()
+            .left(px(x * size))
+            .top(px(y * size))
+            .w(px(w * size))
+            .h(px(h * size))
+            .rounded_full()
+            .bg(rgb(foreground))
+    };
+    div()
+        .relative()
+        .flex_shrink_0()
+        .size(px(size))
+        .rounded_xl()
+        .bg(rgb(background))
+        .child(dot(0.220, 0.315, 0.120, 0.145))
+        .child(dot(0.360, 0.210, 0.125, 0.170))
+        .child(dot(0.515, 0.210, 0.125, 0.170))
+        .child(dot(0.665, 0.315, 0.120, 0.145))
+        .child(dot(0.312, 0.446, 0.376, 0.295))
 }
 
 #[cfg(test)]
