@@ -76,6 +76,8 @@ pub struct Paw {
     #[cfg(any(target_os = "linux", windows))]
     desktop: Option<meow_paw::app::Desktop>,
     #[cfg(any(target_os = "linux", windows))]
+    proxy_group: Option<String>,
+    #[cfg(any(target_os = "linux", windows))]
     snapshot: meow_paw::app::Snapshot,
 }
 
@@ -95,6 +97,8 @@ pub fn open(
                 .as_ref()
                 .and_then(|path| meow_paw::app::Desktop::new(path.clone()).ok()),
             binary,
+            #[cfg(any(target_os = "linux", windows))]
+            proxy_group: None,
             error: None,
             #[cfg(any(target_os = "linux", windows))]
             snapshot: Default::default(),
@@ -576,41 +580,127 @@ impl Paw {
     fn proxies(&self, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
         if let Some(inventory) = self.snapshot.inventory.as_ref() {
-            let mut body = div().flex().flex_col().gap_4();
-            for (name, group) in inventory.groups.iter().filter(|(_, g)| !g.hidden).take(24) {
-                let title = format!("{name}  ·  {}", group.kind);
-                let mut group_box =
-                    card().child(div().font_weight(FontWeight::SEMIBOLD).child(title));
-                if let Some(members) = &group.all {
-                    for (index, member) in members.iter().take(48).enumerate() {
-                        let (g, n) = (name.clone(), member.clone());
-                        let selected = group.now.as_deref() == Some(member.as_str());
-                        group_box = group_box.child(
+            let visible = inventory.groups.iter().filter(|(_, group)| !group.hidden);
+            let count = visible.clone().count();
+            let current = visible
+                .clone()
+                .find(|(name, _)| self.proxy_group.as_ref() == Some(name))
+                .or_else(|| visible.clone().next());
+            if let Some((name, group)) = current {
+                let groups = card()
+                    .child(section_label(format!("{count} ROUTE GROUPS")))
+                    .child(
+                        div()
+                            .mt_3()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .children(visible.map(|(key, _)| {
+                                let key = key.clone();
+                                let chip = div()
+                                    .id(SharedString::from(format!("group:{key}")))
+                                    .border_1()
+                                    .border_color(rgb(if key == *name { BLUE } else { LINE }))
+                                    .rounded_md()
+                                    .px_3()
+                                    .py_1()
+                                    .bg(rgb(if key == *name { SOFT_BLUE } else { SURFACE }))
+                                    .text_color(rgb(if key == *name { BLUE } else { INK }))
+                                    .cursor_pointer()
+                                    .child(key.clone());
+                                chip.on_click(cx.listener(move |paw, _, _, cx| {
+                                    paw.proxy_group = Some(key.clone());
+                                    cx.notify();
+                                }))
+                            })),
+                    );
+                let mutable = group.kind.eq_ignore_ascii_case("selector");
+                let members = group.all.as_deref().unwrap_or_default();
+                let mut detail = card()
+                    .child(section_label(format!(
+                        "{} · {} ROUTES",
+                        group.kind.to_uppercase(),
+                        members.len()
+                    )))
+                    .child(
+                        div()
+                            .mt_1()
+                            .text_xl()
+                            .font_weight(FontWeight::BOLD)
+                            .child(name.clone()),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .text_sm()
+                            .text_color(rgb(FAINT))
+                            .child(if mutable {
+                                "Choose a route for new connections."
+                            } else {
+                                "Meow automatically chooses the active route for this group."
+                            }),
+                    );
+                if members.is_empty() {
+                    detail = detail.child(
+                        div()
+                            .mt_3()
+                            .text_sm()
+                            .text_color(rgb(FAINT))
+                            .child("This group has no candidate routes."),
+                    );
+                } else {
+                    detail = detail.child(div().mt_3().flex().flex_wrap().gap_2().children(
+                        members.iter().enumerate().map(|(index, member)| {
+                            let (g, n) = (name.clone(), member.clone());
+                            let selected = group.now.as_deref() == Some(member.as_str());
                             div()
                                 .id(SharedString::from(format!("proxy:{name}:{index}")))
-                                .p_2()
-                                .mt_1()
+                                .min_w(px(142.))
+                                .flex_1()
+                                .px_3()
+                                .py_2()
+                                .gap_2()
+                                .flex()
+                                .items_center()
                                 .rounded_md()
-                                .cursor_pointer()
+                                .border_1()
+                                .border_color(rgb(if selected { 0x9cbafb } else { LINE }))
                                 .bg(rgb(if selected { SOFT_BLUE } else { SURFACE }))
-                                .child(format!("{} {member}", if selected { "●" } else { "○" }))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.error = this.desktop.as_ref().and_then(|d| {
-                                        d.select(g.clone(), n.clone()).err().map(|e| e.to_string())
-                                    });
-                                    cx.notify();
-                                })),
-                        );
-                    }
+                                .child(
+                                    div()
+                                        .size(px(7.))
+                                        .flex_shrink_0()
+                                        .rounded_full()
+                                        .bg(rgb(if selected { BLUE } else { LINE })),
+                                )
+                                .child(div().min_w_0().flex_1().child(member.clone()))
+                                .when(selected, |el| el.child(section_label("ACTIVE")))
+                                .when(mutable && !selected, |el| {
+                                    el.cursor_pointer()
+                                        .hover(|style| style.bg(rgb(SOFT_BLUE)))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.error = this.desktop.as_ref().and_then(|d| {
+                                                d.select(g.clone(), n.clone())
+                                                    .err()
+                                                    .map(|e| e.to_string())
+                                            });
+                                            cx.notify();
+                                        }))
+                                })
+                        }),
+                    ));
                 }
-                body = body.child(group_box);
+                return div().flex().flex_col().gap_4().child(groups).child(detail);
             }
-            return body;
+            return empty_state(
+                "No visible groups",
+                "The active profile has no visible route groups.",
+            );
         }
         let _ = cx;
-        panel(
-            "No proxy groups",
-            "Start a local profile to see available selectors.".into(),
+        empty_state(
+            "No proxy groups yet",
+            "Start a local profile to see its route groups and active choices.",
         )
     }
 
@@ -618,34 +708,50 @@ impl Paw {
         #[cfg(any(target_os = "linux", windows))]
         if let Some(list) = self.snapshot.connections.as_ref().filter(|c| !c.is_empty()) {
             return card()
+                .child(section_label(format!("{} ACTIVE CONNECTIONS", list.len())))
                 .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!("{} active", list.len())),
+                    connection_row(
+                        section_label("DESTINATION"),
+                        section_label("ROUTE"),
+                        section_label("MATCHED RULE"),
+                    )
+                    .mt_3()
+                    .bg(rgb(SOFT_BLUE))
+                    .rounded_md(),
                 )
-                .children(list.iter().take(100).map(|c| {
+                .children(list.iter().map(|c| {
                     let target = if c.metadata.host.is_empty() {
                         &c.metadata.destination_ip
                     } else {
                         &c.metadata.host
                     };
-                    div()
-                        .border_t_1()
-                        .border_color(rgb(LINE))
-                        .py_2()
-                        .mt_2()
-                        .child(div().font_weight(FontWeight::MEDIUM).child(target.clone()))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(FAINT))
-                                .child(c.chains.join(" / ")),
-                        )
+                    let dest = destination_label(target, &c.metadata.destination_port);
+                    let route = if c.chains.is_empty() {
+                        "—".into()
+                    } else {
+                        c.chains.join(" / ")
+                    };
+                    connection_row(
+                        div().font_weight(FontWeight::MEDIUM).child(dest),
+                        div().text_color(rgb(FAINT)).child(route),
+                        div().text_color(rgb(FAINT)).child(if c.rule.is_empty() {
+                            "—".into()
+                        } else {
+                            c.rule.clone()
+                        }),
+                    )
+                    .border_b_1()
+                    .border_color(rgb(LINE))
                 }));
         }
-        panel(
+        let running = self.state().2.is_some();
+        empty_state(
             "No active connections",
-            "Use Paw’s local listener to see live requests here.".into(),
+            if running {
+                "Once an app sends a request through Paw’s local listener, its destination and matched rule appear here."
+            } else {
+                "Start a local session, then send an app’s traffic through its listener to see connections here."
+            },
         )
     }
 
@@ -754,6 +860,63 @@ fn panel(title: &'static str, message: String) -> Div {
         .child(div().mt_2().text_sm().text_color(rgb(FAINT)).child(message))
 }
 
+fn section_label(label: impl Into<SharedString>) -> Div {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(FAINT))
+        .child(label.into())
+}
+
+fn empty_state(title: &'static str, detail: &'static str) -> Div {
+    card()
+        .min_h(px(174.))
+        .flex()
+        .flex_col()
+        .justify_center()
+        .items_start()
+        .gap_2()
+        .child(paw_badge(42., SOFT_BLUE, BLUE))
+        .child(
+            div()
+                .text_lg()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title),
+        )
+        .child(div().text_sm().text_color(rgb(FAINT)).child(detail))
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn connection_row(destination: Div, route: Div, rule: Div) -> Div {
+    div()
+        .flex()
+        .gap_3()
+        .px_3()
+        .py_2()
+        .items_center()
+        .text_sm()
+        .child(destination.flex_1().min_w_0())
+        .child(route.w(px(140.)).min_w_0().flex_shrink(1.))
+        .child(rule.w(px(112.)).min_w_0().flex_shrink(1.))
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn destination_label(host: &str, port: &serde_json::Value) -> String {
+    if host.is_empty() {
+        return "—".into();
+    }
+    let port = port
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .or_else(|| port.as_str()?.parse::<u16>().ok())
+        .filter(|&p| p != 0);
+    match port {
+        Some(p) if host.contains(':') => format!("[{host}]:{p}"),
+        Some(p) => format!("{host}:{p}"),
+        None => host.to_owned(),
+    }
+}
+
 fn metric(label: &'static str, value: String) -> Div {
     card()
         .flex_1()
@@ -835,6 +998,20 @@ fn paw_badge(size: f32, background: u32, foreground: u32) -> Div {
 #[cfg(test)]
 mod tests {
     use super::Page;
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn connection_destinations_keep_ports_and_disambiguate_ipv6() {
+        use super::destination_label;
+        use serde_json::json;
+        assert_eq!(
+            destination_label("test.local", &json!("443")),
+            "test.local:443"
+        );
+        assert_eq!(destination_label("::1", &json!(80)), "[::1]:80");
+        assert_eq!(destination_label("127.0.0.1", &json!(null)), "127.0.0.1");
+        assert_eq!(destination_label("", &json!(123)), "—");
+    }
     #[test]
     fn startup_pages_match_the_nav() {
         assert_eq!(Page::ALL.len(), 5);
