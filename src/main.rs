@@ -28,13 +28,14 @@ fn main() {
         }
     }
     let binary = std::env::var_os("MEOW_BIN").map(PathBuf::from);
-    let app: Application = gpui_kit::application();
+    let app: Application = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         let bounds = Bounds::centered(None, size(px(1120.), px(738.)), cx);
         let (_handle, _) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(640.), px(480.))),
                 ..Default::default()
             },
             cx,

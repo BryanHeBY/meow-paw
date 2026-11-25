@@ -48,13 +48,13 @@ impl Page {
             Self::Settings => "Settings",
         }
     }
-    fn mark(self) -> &'static str {
+    fn icon(self) -> &'static str {
         match self {
-            Self::Overview => "◈",
-            Self::Proxies => "↔",
-            Self::Profiles => "▤",
-            Self::Connections => "◎",
-            Self::Settings => "⚙",
+            Self::Overview => "icons/layout-dashboard.svg",
+            Self::Proxies => "icons/arrow-left-right.svg",
+            Self::Profiles => "icons/folder-open.svg",
+            Self::Connections => "icons/activity.svg",
+            Self::Settings => "icons/settings.svg",
         }
     }
     fn subtitle(self) -> &'static str {
@@ -73,6 +73,7 @@ pub struct Paw {
     profile: Option<PathBuf>,
     binary: Option<PathBuf>,
     error: Option<String>,
+    copied_listener: Option<u16>,
     #[cfg(any(target_os = "linux", windows))]
     desktop: Option<meow_paw::app::Desktop>,
     #[cfg(any(target_os = "linux", windows))]
@@ -100,6 +101,7 @@ pub fn open(
             #[cfg(any(target_os = "linux", windows))]
             proxy_group: None,
             error: None,
+            copied_listener: None,
             #[cfg(any(target_os = "linux", windows))]
             snapshot: Default::default(),
         };
@@ -131,6 +133,7 @@ pub fn open(
 impl Paw {
     fn start(&mut self) {
         self.error = None;
+        self.copied_listener = None;
         #[cfg(any(target_os = "linux", windows))]
         {
             let Some(desktop) = self.desktop.as_ref() else {
@@ -199,16 +202,16 @@ impl Paw {
         self.error.clone()
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
-        let nav = Self::pages(self.page, cx);
+    fn sidebar(&self, compact: bool, cx: &mut Context<Self>) -> Div {
+        let nav = Self::pages(self.page, compact, cx);
         div()
-            .w(px(216.))
+            .w(px(if compact { 58. } else { 216. }))
             .h_full()
             .flex_shrink_0()
             .bg(rgb(SURFACE))
             .border_r_1()
             .border_color(rgb(LINE))
-            .px_5()
+            .px(if compact { px(8.) } else { px(20.) })
             .py_6()
             .flex()
             .flex_col()
@@ -217,47 +220,54 @@ impl Paw {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(paw_badge(40.0, YELLOW, INK))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_lg()
-                                    .font_weight(FontWeight::BOLD)
-                                    .child("Meow Paw"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(FAINT))
-                                    .child("DESKTOP CLIENT"),
-                            ),
-                    ),
+                    .child(paw_badge(if compact { 40. } else { 42. }, YELLOW, INK))
+                    .when(!compact, |brand| {
+                        brand.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(FontWeight::BOLD)
+                                        .child("Meow Paw"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(FAINT))
+                                        .child("DESKTOP CLIENT"),
+                                ),
+                        )
+                    }),
             )
-            .child(
-                div()
-                    .mt_8()
-                    .mb_2()
-                    .text_xs()
-                    .text_color(rgb(FAINT))
-                    .child("WORKSPACE"),
-            )
+            .when(!compact, |bar| {
+                bar.child(
+                    div()
+                        .mt_8()
+                        .mb_2()
+                        .text_xs()
+                        .text_color(rgb(FAINT))
+                        .child("WORKSPACE"),
+                )
+            })
+            .when(compact, |bar| bar.child(div().h_8()))
             .children(nav)
             .child(div().flex_grow(1.0))
-            .child(
-                div()
-                    .border_t_1()
-                    .border_color(rgb(LINE))
-                    .pt_4()
-                    .text_xs()
-                    .text_color(rgb(FAINT))
-                    .child(format!("Paw 0.1  ·  {}", std::env::consts::OS)),
-            )
+            .when(!compact, |bar| {
+                bar.child(
+                    div()
+                        .border_t_1()
+                        .border_color(rgb(LINE))
+                        .pt_4()
+                        .text_xs()
+                        .text_color(rgb(FAINT))
+                        .child(format!("Paw 0.1  ·  {}", std::env::consts::OS)),
+                )
+            })
     }
 
-    fn pages(active: Page, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+    fn pages(active: Page, compact: bool, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
         Page::ALL
             .into_iter()
             .enumerate()
@@ -280,8 +290,13 @@ impl Paw {
                         this.page = page;
                         cx.notify();
                     }))
-                    .child(div().w_5().text_lg().child(page.mark()))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(page.title()))
+                    .child(line_icon(page.icon(), if on { BLUE } else { FAINT }, 18.))
+                    .when(!compact, |row| {
+                        row.child(div().font_weight(FontWeight::SEMIBOLD).child(page.title()))
+                    })
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(page.title()).build(window, cx)
+                    })
             })
             .collect()
     }
@@ -340,7 +355,7 @@ impl Paw {
         }
     }
 
-    fn overview(&self) -> Div {
+    fn overview(&self, cx: &mut Context<Self>) -> Div {
         let (phase, color, port) = self.state();
         let (up, down, total) = self.traffic();
         div()
@@ -373,13 +388,68 @@ impl Paw {
                                     .child("LOCAL SESSION"),
                             )
                             .child(div().text_2xl().font_weight(FontWeight::BOLD).child(phase))
-                            .child(div().text_sm().text_color(rgb(FAINT)).child(
-                                port.map_or("No local listener is active.".into(), |port| {
-                                    format!("Listening on 127.0.0.1:{port}")
-                                }),
-                            )),
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().text_sm().text_color(rgb(FAINT)).child(
+                                        port.map_or(
+                                            "No local listener is active.".into(),
+                                            |port| format!("127.0.0.1:{port}"),
+                                        ),
+                                    ))
+                                    .when_some(port, |row, port| {
+                                        row.child(
+                                            div()
+                                                .id("copy-listener")
+                                                .cursor_pointer()
+                                                .rounded_md()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .text_xs()
+                                                .text_color(rgb(BLUE))
+                                                .px_2()
+                                                .py_1()
+                                                .hover(|s| s.bg(rgb(SOFT_BLUE)))
+                                                .child(line_icon("icons/clipboard.svg", BLUE, 13.))
+                                                .child(if self.copied_listener == Some(port) {
+                                                    "Copied"
+                                                } else {
+                                                    "Copy address"
+                                                })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(format!(
+                                                            "127.0.0.1:{port}"
+                                                        )),
+                                                    );
+                                                    this.copied_listener = Some(port);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                    }),
+                            ),
                     )
-                    .child(paw_badge(56.0, 0xffefbd, color)),
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .rounded_xl()
+                            .bg(rgb(0xffefbd))
+                            .p_3()
+                            .child(if port.is_some() {
+                                paw_badge(52., 0xffefbd, color)
+                            } else {
+                                div()
+                                    .size(px(52.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(line_icon("icons/cat.svg", 0x76571b, 38.))
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -390,11 +460,31 @@ impl Paw {
                     .child(metric("SESSION TOTAL", total)),
             )
             .child(self.traffic_timeline())
-            .child(panel("Profile", self.profile_label()))
-            .child(panel(
-                "System proxy",
-                "Unchanged. Use the local listener explicitly.".into(),
-            ))
+            .child(
+                card()
+                    .flex()
+                    .gap_5()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div().min_w_0().child(section_label("PROFILE")).child(
+                            div()
+                                .mt_1()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(self.overview_profile_label()),
+                        ),
+                    )
+                    .child(
+                        div().min_w_0().child(section_label("SYSTEM PROXY")).child(
+                            div()
+                                .mt_1()
+                                .text_sm()
+                                .text_color(rgb(FAINT))
+                                .child("Unchanged · local apps opt in"),
+                        ),
+                    ),
+            )
     }
 
     fn traffic_timeline(&self) -> Div {
@@ -511,6 +601,20 @@ impl Paw {
                     .into_owned()
             })
             .unwrap_or_else(|| "No profile selected".into())
+    }
+
+    fn overview_profile_label(&self) -> String {
+        #[cfg(any(target_os = "linux", windows))]
+        if self.state().2.is_some()
+            && let Some(path) = &self.snapshot.profile
+        {
+            return path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned();
+        }
+        self.profile_label()
     }
 
     fn profiles(&self, cx: &mut Context<Self>) -> Div {
@@ -841,9 +945,10 @@ impl Paw {
 }
 
 impl Render for Paw {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = window.viewport_size().width < px(820.);
         let body = match self.page {
-            Page::Overview => self.overview(),
+            Page::Overview => self.overview(cx),
             Page::Proxies => self.proxies(cx),
             Page::Profiles => self.profiles(cx),
             Page::Connections => self.connections(),
@@ -854,21 +959,22 @@ impl Render for Paw {
             .flex()
             .bg(rgb(BG))
             .text_color(rgb(INK))
-            .child(self.sidebar(cx))
+            .child(self.sidebar(compact, cx))
             .child(
                 div()
                     .id("paw-page")
                     .size_full()
                     .flex_1()
                     .overflow_y_scroll()
-                    .px_8()
-                    .py_7()
+                    .px(if compact { px(20.) } else { px(32.) })
+                    .py_6()
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .justify_between()
-                            .mb_6()
+                            .gap_3()
+                            .mb_5()
                             .child(
                                 div()
                                     .flex()
@@ -914,10 +1020,12 @@ fn card() -> Div {
         .p_5()
 }
 
-fn panel(title: &'static str, message: String) -> Div {
-    card()
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-        .child(div().mt_2().text_sm().text_color(rgb(FAINT)).child(message))
+fn line_icon(path: &'static str, color: u32, side: f32) -> impl IntoElement {
+    svg()
+        .path(path)
+        .size(px(side))
+        .text_color(rgb(color))
+        .flex_shrink_0()
 }
 
 fn secondary_button(id: &'static str, label: &'static str) -> Stateful<Div> {
