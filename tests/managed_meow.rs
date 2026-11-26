@@ -435,3 +435,183 @@ fn slow_provider_does_not_block_guarded_engine_startup() {
     let _ = stop.send(());
     server.join().unwrap();
 }
+
+#[test]
+#[ignore = "requires patched MEOW_BIN"]
+fn slow_provider_does_not_block_live_profile_apply() {
+    use meow_paw::app::{Desktop, EngineStatus};
+    use std::time::Instant;
+    let binary = PathBuf::from(std::env::var_os("MEOW_BIN").unwrap());
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (seen, connected) = mpsc::channel();
+    let (stop, finish) = mpsc::channel();
+    let server = thread::spawn(move || {
+        loop {
+            if finish.try_recv().is_ok() {
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = seen.send(());
+                    let _stream = stream;
+                    let _ = finish.recv_timeout(Duration::from_secs(8));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let before = dir.path().join("before.yaml");
+    let after = dir.path().join("after.yaml");
+    std::fs::write(&before, "mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
+    std::fs::write(&after, format!(
+        "mode: direct\nproxy-providers: {{P: {{type: http, url: 'https://{address}/nodes'}}}}\nrules: ['MATCH,DIRECT']\n"
+    )).unwrap();
+    let desktop = Desktop::new(binary).unwrap();
+    desktop.start(before).unwrap();
+    let end = Instant::now() + Duration::from_secs(8);
+    while !matches!(desktop.snapshot().engine, EngineStatus::Running { .. }) {
+        assert!(Instant::now() < end, "engine start timed out");
+        thread::sleep(Duration::from_millis(30));
+    }
+    let start = Instant::now();
+    desktop.apply_profile(after.clone()).unwrap();
+    loop {
+        let snapshot = desktop.snapshot();
+        assert!(
+            snapshot.action_error.is_none(),
+            "{:?}",
+            snapshot.action_error
+        );
+        if snapshot.profile.as_ref() == Some(&after) && snapshot.applying_profile.is_none() {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "live apply timed out"
+        );
+        thread::sleep(Duration::from_millis(30));
+    }
+    connected.recv_timeout(Duration::from_secs(3)).unwrap();
+    drop(desktop);
+    let _ = stop.send(());
+    server.join().unwrap();
+}
+
+#[test]
+#[ignore = "requires test-only CA Meow and MEOW_PROVIDER_TEST_URL"]
+fn guarded_https_provider_fetches_and_refreshes_over_trusted_local_tls() {
+    use meow_paw::engine::controller::Origin;
+    use std::time::Instant;
+    let binary = PathBuf::from(std::env::var_os("MEOW_BIN").unwrap());
+    let url = std::env::var("MEOW_PROVIDER_TEST_URL").unwrap();
+    let profile = Profile::parse(&format!(
+        "mode: direct\nproxy-providers: {{P: {{type: http, url: '{url}'}}}}\nproxy-groups: [{{name: G, type: select, use: [P]}}]\nrules: ['MATCH,DIRECT']\n"
+    )).unwrap();
+    let session = Session::launch(&binary, &profile, || false).unwrap();
+    let end = Instant::now() + Duration::from_secs(8);
+    loop {
+        let inventory = session.controller.inventory().unwrap();
+        if inventory
+            .nodes
+            .iter()
+            .any(|n| n.name == "FixtureNode" && n.origin == Origin::Provider("P".into()))
+        {
+            break;
+        }
+        assert!(Instant::now() < end, "HTTPS provider did not populate");
+        thread::sleep(Duration::from_millis(30));
+    }
+    session.controller.refresh_provider("P").unwrap();
+    let inventory = session.controller.inventory().unwrap();
+    assert!(inventory.nodes.iter().any(|n| n.name == "FixtureNode"));
+    assert_eq!(
+        inventory.providers["P"]
+            .subscription_info
+            .as_ref()
+            .unwrap()
+            .upload,
+        1
+    );
+    session.stop().unwrap();
+}
+
+#[test]
+#[ignore = "requires test-only CA Meow and local fixture state"]
+fn saved_profile_provider_cache_is_stable_and_isolated_on_live_apply() {
+    use meow_paw::app::{Desktop, EngineStatus, Snapshot};
+    use meow_paw::engine::controller::Origin;
+    use std::time::Instant;
+
+    fn wait_for(desktop: &Desktop, predicate: impl Fn(&Snapshot) -> bool) {
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = desktop.snapshot();
+            assert!(
+                snapshot.action_error.is_none(),
+                "{:?}",
+                snapshot.action_error
+            );
+            assert!(
+                !matches!(snapshot.engine, EngineStatus::Error(_)),
+                "{:?}",
+                snapshot.engine
+            );
+            if predicate(&snapshot) {
+                return;
+            }
+            assert!(Instant::now() < end, "state timed out: {snapshot:?}");
+            thread::sleep(Duration::from_millis(30));
+        }
+    }
+    fn has_fixture(snapshot: &Snapshot) -> bool {
+        snapshot.inventory.as_ref().is_some_and(|inv| {
+            inv.nodes.iter().any(|node| {
+                node.name == "FixtureNode" && node.origin == Origin::Provider("P".into())
+            })
+        })
+    }
+    let binary = PathBuf::from(std::env::var_os("MEOW_BIN").unwrap());
+    let url = std::env::var("MEOW_PROVIDER_TEST_URL").unwrap();
+    let state = PathBuf::from(std::env::var_os("MEOW_PROVIDER_TEST_STATE").unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first.yaml");
+    let second = dir.path().join("second.yaml");
+    let profile = format!(
+        "proxy-providers: {{P: {{type: http, url: '{url}'}}}}\nproxy-groups: [{{name: G, type: select, use: [P]}}]\nrules: ['MATCH,DIRECT']\n"
+    );
+    std::fs::write(&state, "online").unwrap();
+    std::fs::write(&first, format!("mode: rule\n{profile}")).unwrap();
+    std::fs::write(&second, format!("mode: direct\n{profile}")).unwrap();
+    let desktop = Desktop::new(binary).unwrap();
+    desktop.start(first.clone()).unwrap();
+    wait_for(&desktop, |s| {
+        matches!(s.engine, EngineStatus::Running { .. }) && has_fixture(s)
+    });
+    // An unrelated rules/mode edit and different caller-supplied cache path
+    // must not change the provider identity or discard the last good nodes.
+    std::fs::write(&state, "offline").unwrap();
+    std::fs::write(&first, format!("mode: direct\n{profile}")).unwrap();
+    desktop.apply_profile(first.clone()).unwrap();
+    wait_for(&desktop, |s| {
+        s.profile.as_ref() == Some(&first) && s.applying_profile.is_none() && has_fixture(s)
+    });
+    // A second saved profile with the same provider label and URL must not
+    // inherit the first profile's previously cached nodes.
+    desktop.apply_profile(second.clone()).unwrap();
+    wait_for(&desktop, |s| {
+        s.profile.as_ref() == Some(&second)
+            && s.applying_profile.is_none()
+            && s.inventory
+                .as_ref()
+                .is_some_and(|i| i.providers.contains_key("P"))
+            && !has_fixture(s)
+    });
+    drop(desktop);
+}
