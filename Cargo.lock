@@ -4286,6 +4286,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "unicase",
  "ureq",
  "url",
  "windows-sys 0.61.2",

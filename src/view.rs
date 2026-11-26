@@ -184,6 +184,9 @@ pub struct Paw {
     language_save_failed: bool,
     search: Entity<InputState>,
     _search_changes: Subscription,
+    rule_filter: Entity<InputState>,
+    _rule_filter_changes: Subscription,
+    rule_page: usize,
     connection_filter: Entity<InputState>,
     _connection_filter_changes: Subscription,
     probe_url: Entity<InputState>,
@@ -203,6 +206,15 @@ pub struct Paw {
 fn subscribe_search(search: &Entity<InputState>, cx: &mut Context<Paw>) -> Subscription {
     cx.subscribe(search, |_: &mut Paw, _, event, cx| {
         if matches!(event, InputEvent::Change) {
+            cx.notify();
+        }
+    })
+}
+
+fn subscribe_rule_filter(input: &Entity<InputState>, cx: &mut Context<Paw>) -> Subscription {
+    cx.subscribe(input, |paw: &mut Paw, _, event, cx| {
+        if matches!(event, InputEvent::Change) {
+            paw.rule_page = 0;
             cx.notify();
         }
     })
@@ -234,6 +246,8 @@ fn subscribe_probe_url(input: &Entity<InputState>, cx: &mut Context<Paw>) -> Sub
 pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let query = paw.read(cx).search.read(cx).value();
     let search = cx.new(|cx| InputState::new(window, cx).default_value(query));
+    let query = paw.read(cx).rule_filter.read(cx).value();
+    let rule_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).connection_filter.read(cx).value();
     let connection_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).probe_url.read(cx).value();
@@ -250,6 +264,8 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
         state.probe_url = probe_url;
         state._search_changes = subscribe_search(&search, cx);
         state.search = search;
+        state._rule_filter_changes = subscribe_rule_filter(&rule_filter, cx);
+        state.rule_filter = rule_filter;
         state._connection_filter_changes = subscribe_search(&connection_filter, cx);
         state.connection_filter = connection_filter;
         cx.notify();
@@ -266,6 +282,7 @@ pub fn open(
     cx: &mut App,
 ) -> Entity<Paw> {
     let search = cx.new(|cx| InputState::new(window, cx));
+    let rule_filter = cx.new(|cx| InputState::new(window, cx));
     let connection_filter = cx.new(|cx| InputState::new(window, cx));
     let probe_url = cx.new(|cx| InputState::new(window, cx));
     let subscription_url = cx.new(|cx| InputState::new(window, cx));
@@ -274,6 +291,7 @@ pub fn open(
         let subscription_url_changes = subscribe_subscription_url(&subscription_url, cx);
         let probe_url_changes = subscribe_probe_url(&probe_url, cx);
         let search_changes = subscribe_search(&search, cx);
+        let rule_filter_changes = subscribe_rule_filter(&rule_filter, cx);
         let connection_filter_changes = subscribe_search(&connection_filter, cx);
         let (subscription_paths, subscription_notice) = preferences
             .subscription_dir()
@@ -318,6 +336,9 @@ pub fn open(
             language_save_failed: false,
             search,
             _search_changes: search_changes,
+            rule_filter,
+            _rule_filter_changes: rule_filter_changes,
+            rule_page: 0,
             connection_filter,
             _connection_filter_changes: connection_filter_changes,
             probe_url,
@@ -676,37 +697,114 @@ impl Paw {
                 .gap_3()
                 .child(div().flex().justify_end().child(button));
             return match &self.snapshot.rules {
-                Some(rules) => page.child(
-                    card()
-                        .child(section_label(self.locale.rule_count(rules.len())))
+                Some(rules) => {
+                    const PAGE_SIZE: usize = 100;
+                    let value = self.rule_filter.read(cx).value();
+                    let results = meow_paw::rule_inspection::matching_rules(rules, &value);
+                    let (current, start, end) = meow_paw::rule_inspection::page_bounds(
+                        results.len(),
+                        self.rule_page,
+                        PAGE_SIZE,
+                    );
+                    let toolbar = div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
                         .child(
-                            connection_row(
-                                section_label(self.locale.message(Message::RuleTypeColumn)),
-                                section_label(self.locale.message(Message::RuleMatchColumn)),
-                                section_label(self.locale.message(Message::RulePolicyColumn)),
-                            )
-                            .mt_2()
-                            .bg(rgb(SOFT_BLUE))
-                            .rounded_md(),
+                            div()
+                                .text_sm()
+                                .text_color(rgb(FAINT))
+                                .child(self.locale.message(Message::RulePayloadFilter)),
                         )
-                        .children(rules.iter().map(|rule| {
-                            connection_row(
-                                div()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(rule.kind.clone()),
-                                div()
-                                    .text_color(rgb(FAINT))
-                                    .child(if rule.payload.is_empty() {
-                                        "—".into()
-                                    } else {
-                                        rule.payload.clone()
-                                    }),
-                                div().child(rule.proxy.clone()),
+                        .child(
+                            div()
+                                .id("rules-payload-search")
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(&self.rule_filter).cleanable(true)),
+                        )
+                        .child(chip(
+                            self.locale.rule_match_count(results.len(), rules.len()),
+                            BLUE,
+                            SOFT_BLUE,
+                        ));
+                    let table = if results.is_empty() {
+                        empty_state(
+                            self.locale.message(Message::NoMatchingRules),
+                            self.locale.message(Message::RuleFilterDetail),
+                        )
+                    } else {
+                        let navigation = div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(section_label(self.locale.rule_page_range(
+                                start + 1,
+                                end,
+                                results.len(),
+                            )))
+                            .when(current > 0, |nav| {
+                                nav.child(
+                                    secondary_button(
+                                        "rules-previous-page",
+                                        self.locale.message(Message::PreviousRulesPage),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.rule_page = current - 1;
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                            })
+                            .when(end < results.len(), |nav| {
+                                nav.child(
+                                    secondary_button(
+                                        "rules-next-page",
+                                        self.locale.message(Message::NextRulesPage),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.rule_page = current + 1;
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                            });
+                        card()
+                            .child(navigation)
+                            .child(
+                                rule_row(
+                                    section_label(self.locale.message(Message::RuleLineColumn)),
+                                    section_label(self.locale.message(Message::RuleTypeColumn)),
+                                    section_label(self.locale.message(Message::RuleMatchColumn)),
+                                    section_label(self.locale.message(Message::RulePolicyColumn)),
+                                )
+                                .mt_2()
+                                .bg(rgb(SOFT_BLUE))
+                                .rounded_md(),
                             )
-                            .border_b_1()
-                            .border_color(rgb(LINE))
-                        })),
-                ),
+                            .children(results[start..end].iter().map(|(line, rule)| {
+                                rule_row(
+                                    div().text_color(rgb(FAINT)).child(line.to_string()),
+                                    div()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(rule.kind.clone()),
+                                    div().text_color(rgb(FAINT)).child(
+                                        if rule.payload.is_empty() {
+                                            "—".into()
+                                        } else {
+                                            rule.payload.clone()
+                                        },
+                                    ),
+                                    div().child(rule.proxy.clone()),
+                                )
+                                .border_b_1()
+                                .border_color(rgb(LINE))
+                            }))
+                    };
+                    page.child(toolbar).child(table)
+                }
                 None => page.child(empty_state(
                     self.locale.message(Message::NoRuleSnapshot),
                     self.locale.message(Message::RefreshRulesDetail),
@@ -3445,7 +3543,7 @@ fn active_connection_row(a: Div, b: Div, c: Div, action: impl IntoElement) -> Di
 }
 
 #[cfg(any(target_os = "linux", windows))]
-fn connection_row(destination: Div, route: Div, rule: Div) -> Div {
+fn rule_row(line: Div, kind: Div, payload: Div, policy: Div) -> Div {
     div()
         .flex()
         .gap_3()
@@ -3453,9 +3551,10 @@ fn connection_row(destination: Div, route: Div, rule: Div) -> Div {
         .py_2()
         .items_center()
         .text_sm()
-        .child(destination.flex_1().min_w_0())
-        .child(route.w(px(140.)).min_w_0().flex_shrink(1.))
-        .child(rule.w(px(112.)).min_w_0().flex_shrink(1.))
+        .child(line.w(px(60.)).flex_shrink_0())
+        .child(kind.w(px(140.)).min_w_0().flex_shrink(1.))
+        .child(payload.flex_1().min_w_0())
+        .child(policy.w(px(112.)).min_w_0().flex_shrink(1.))
 }
 
 #[cfg(any(target_os = "linux", windows))]

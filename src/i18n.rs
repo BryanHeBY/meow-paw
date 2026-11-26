@@ -160,6 +160,12 @@ pub enum Message {
     RuleColumn,
     CloseConnection,
     RefreshRules,
+    RuleLineColumn,
+    RulePayloadFilter,
+    NoMatchingRules,
+    RuleFilterDetail,
+    PreviousRulesPage,
+    NextRulesPage,
     RuleTypeColumn,
     RuleMatchColumn,
     RulePolicyColumn,
@@ -220,6 +226,20 @@ impl Locale {
         match self {
             Self::En => format!("{count} RULES"),
             Self::ZhCn => format!("{count} 条规则"),
+        }
+    }
+
+    pub fn rule_match_count(self, matched: usize, total: usize) -> String {
+        match self {
+            Self::En => format!("{matched} of {total} rules"),
+            Self::ZhCn => format!("{total} 条规则中匹配 {matched} 条"),
+        }
+    }
+
+    pub fn rule_page_range(self, start: usize, end: usize, total: usize) -> String {
+        match self {
+            Self::En => format!("Showing {start}–{end} of {total} matches"),
+            Self::ZhCn => format!("显示 {total} 条匹配结果中的第 {start}–{end} 条"),
         }
     }
 
@@ -434,6 +454,12 @@ fn english(key: Message) -> &'static str {
         Message::RuleColumn => "RULE",
         Message::CloseConnection => "Close",
         Message::RefreshRules => "Refresh rules",
+        Message::RuleLineColumn => "LINE",
+        Message::RulePayloadFilter => "Search payload",
+        Message::NoMatchingRules => "No matching rules",
+        Message::RuleFilterDetail => "Change or clear the payload search.",
+        Message::PreviousRulesPage => "Previous",
+        Message::NextRulesPage => "Next",
         Message::RuleTypeColumn => "TYPE",
         Message::RuleMatchColumn => "MATCH",
         Message::RulePolicyColumn => "POLICY",
@@ -608,6 +634,12 @@ fn chinese(key: Message) -> &'static str {
         Message::RuleColumn => "规则",
         Message::CloseConnection => "关闭",
         Message::RefreshRules => "刷新规则",
+        Message::RuleLineColumn => "行号",
+        Message::RulePayloadFilter => "搜索匹配内容",
+        Message::NoMatchingRules => "没有匹配的规则",
+        Message::RuleFilterDetail => "更改或清除匹配内容搜索。",
+        Message::PreviousRulesPage => "上一页",
+        Message::NextRulesPage => "下一页",
         Message::RuleTypeColumn => "类型",
         Message::RuleMatchColumn => "匹配内容",
         Message::RulePolicyColumn => "策略",
@@ -848,6 +880,20 @@ mod tests {
     fn rules_and_logs_catalog() {
         let cases = [
             (Message::RefreshRules, "Refresh rules", "刷新规则"),
+            (Message::RuleLineColumn, "LINE", "行号"),
+            (Message::RulePayloadFilter, "Search payload", "搜索匹配内容"),
+            (
+                Message::NoMatchingRules,
+                "No matching rules",
+                "没有匹配的规则",
+            ),
+            (
+                Message::RuleFilterDetail,
+                "Change or clear the payload search.",
+                "更改或清除匹配内容搜索。",
+            ),
+            (Message::PreviousRulesPage, "Previous", "上一页"),
+            (Message::NextRulesPage, "Next", "下一页"),
             (Message::RuleTypeColumn, "TYPE", "类型"),
             (Message::RuleMatchColumn, "MATCH", "匹配内容"),
             (Message::RulePolicyColumn, "POLICY", "策略"),
@@ -889,6 +935,16 @@ mod tests {
             assert_eq!(Locale::ZhCn.message(key), zh, "Chinese: {key:?}");
             assert_eq!(Locale::select(Some("unsupported"), None).message(key), en);
         }
+        assert_eq!(Locale::En.rule_match_count(2, 7), "2 of 7 rules");
+        assert_eq!(Locale::ZhCn.rule_match_count(2, 7), "7 条规则中匹配 2 条");
+        assert_eq!(
+            Locale::En.rule_page_range(101, 150, 150),
+            "Showing 101–150 of 150 matches"
+        );
+        assert_eq!(
+            Locale::ZhCn.rule_page_range(101, 150, 150),
+            "显示 150 条匹配结果中的第 101–150 条"
+        );
         for count in [0, 1, 42] {
             assert_eq!(Locale::En.rule_count(count), format!("{count} RULES"));
             assert_eq!(Locale::ZhCn.rule_count(count), format!("{count} 条规则"));
