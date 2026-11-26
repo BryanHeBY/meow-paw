@@ -66,6 +66,12 @@ pub enum Message {
     TunMode,
     TunDescription,
     ListenerDescription,
+    Unmanaged,
+    Unavailable,
+    Loopback,
+    KeepRunning,
+    NoExecutableSelected,
+    UnlockUnavailableDetail,
     MeowExecutable,
     Browse,
     HideFullPath,
@@ -253,6 +259,14 @@ fn english(key: Message) -> &'static str {
         Message::TunMode => "TUN mode",
         Message::TunDescription => "A virtual network interface is not available in this build.",
         Message::ListenerDescription => "Only apps configured to use Paw are routed through it.",
+        Message::Unmanaged => "Unmanaged",
+        Message::Unavailable => "Unavailable",
+        Message::Loopback => "Loopback",
+        Message::KeepRunning => "Keep running",
+        Message::NoExecutableSelected => "No executable selected",
+        Message::UnlockUnavailableDetail => {
+            "Service availability tests are not available in this build."
+        }
         Message::MeowExecutable => "Meow executable",
         Message::Browse => "Browse…",
         Message::HideFullPath => "Hide full path",
@@ -411,6 +425,12 @@ fn chinese(key: Message) -> &'static str {
         Message::TunMode => "TUN 模式",
         Message::TunDescription => "此版本不支持虚拟网络接口。",
         Message::ListenerDescription => "只有配置为使用 Paw 的应用才会通过它连接。",
+        Message::Unmanaged => "未管理",
+        Message::Unavailable => "不可用",
+        Message::Loopback => "回环",
+        Message::KeepRunning => "继续运行",
+        Message::NoExecutableSelected => "未选择可执行文件",
+        Message::UnlockUnavailableDetail => "此版本不提供服务可用性测试。",
         Message::MeowExecutable => "Meow 可执行文件",
         Message::Browse => "浏览…",
         Message::HideFullPath => "隐藏完整路径",
@@ -590,6 +610,30 @@ mod tests {
         }
         assert_eq!(Locale::En.message(Message::Home), "Home");
         assert_eq!(Locale::ZhCn.message(Message::Home), "首页");
+    }
+    #[test]
+    fn settings_badges_and_unlock_help_are_localized() {
+        let cases = [
+            (Message::Unmanaged, "Unmanaged", "未管理"),
+            (Message::Unavailable, "Unavailable", "不可用"),
+            (Message::Loopback, "Loopback", "回环"),
+            (Message::KeepRunning, "Keep running", "继续运行"),
+            (
+                Message::NoExecutableSelected,
+                "No executable selected",
+                "未选择可执行文件",
+            ),
+            (
+                Message::UnlockUnavailableDetail,
+                "Service availability tests are not available in this build.",
+                "此版本不提供服务可用性测试。",
+            ),
+        ];
+        for (key, en, zh) in cases {
+            assert_eq!(Locale::En.message(key), en, "English: {key:?}");
+            assert_eq!(Locale::ZhCn.message(key), zh, "Chinese: {key:?}");
+            assert_eq!(Locale::select(Some("unsupported"), None).message(key), en);
+        }
     }
     #[test]
     fn connection_match_counts_are_localized() {

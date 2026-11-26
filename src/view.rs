@@ -2206,24 +2206,24 @@ impl Paw {
                 ),
         );
         let binary = self.binary.as_ref().map_or_else(
-            || "No executable selected".into(),
+            || self.locale.message(Message::NoExecutableSelected).into(),
             |p| p.display().to_string(),
         );
         let system = form_card(self.locale.message(Message::System))
             .child(form_row(
                 self.locale.message(Message::SystemProxy),
                 self.locale.message(Message::SystemProxyDescription),
-                chip("Unmanaged", FAINT, BG),
+                chip(self.locale.message(Message::Unmanaged), FAINT, BG),
             ))
             .child(form_row(
                 self.locale.message(Message::TunMode),
                 self.locale.message(Message::TunDescription),
-                chip("Unavailable", FAINT, BG),
+                chip(self.locale.message(Message::Unavailable), FAINT, BG),
             ))
             .child(form_row(
                 self.locale.message(Message::LocalListener),
                 self.locale.message(Message::ListenerDescription),
-                chip("Loopback", BLUE, SOFT_BLUE),
+                chip(self.locale.message(Message::Loopback), BLUE, SOFT_BLUE),
             ));
         let shown_path = binary.clone();
         let path_detail = div()
@@ -2296,7 +2296,7 @@ impl Paw {
             .child(form_row(
                 self.locale.message(Message::TrayBehavior),
                 self.locale.message(Message::TrayDescription),
-                chip("Keep running", BLUE, SOFT_BLUE),
+                chip(self.locale.message(Message::KeepRunning), BLUE, SOFT_BLUE),
             ))
             .child(form_row(
                 self.locale.message(Message::ApplicationVersion),
@@ -2351,7 +2351,7 @@ impl Render for Paw {
             Page::Logs => self.logs(cx),
             Page::Unlock => empty_state(
                 self.locale.message(Message::Unlock),
-                "Service availability tests are not available in this build.",
+                self.locale.message(Message::UnlockUnavailableDetail),
             ),
             Page::Settings => self.settings(window.viewport_size().width >= px(960.), cx),
         };
