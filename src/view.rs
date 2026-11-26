@@ -158,6 +158,8 @@ pub struct Paw {
     #[cfg(any(target_os = "linux", windows))]
     proxy_order: std::collections::HashMap<String, ProxyOrder>,
     #[cfg(any(target_os = "linux", windows))]
+    proxy_group_scroll: ScrollHandle,
+    #[cfg(any(target_os = "linux", windows))]
     snapshot: meow_paw::app::Snapshot,
 }
 
@@ -252,6 +254,8 @@ pub fn open(
             expanded_groups: Default::default(),
             #[cfg(any(target_os = "linux", windows))]
             proxy_order: Default::default(),
+            #[cfg(any(target_os = "linux", windows))]
+            proxy_group_scroll: ScrollHandle::new(),
             error: None,
             copied_listener: None,
             show_engine_path: false,
@@ -1446,6 +1450,7 @@ impl Paw {
             let value = self.search.read(cx).value();
             let query = value.trim().to_lowercase();
             let mut count = 0;
+            let mut group_anchors = Vec::new();
             let columns = route_columns(window_width);
             use meow_paw::app::{ProxyProbeStatus, ProxyProbeTarget, parse_probe_url};
             let delays = unambiguous_route_delays(inventory);
@@ -1475,6 +1480,8 @@ impl Paw {
                         return None;
                     }
                     count += 1;
+                    let anchor = ScrollAnchor::for_handle(self.proxy_group_scroll.clone());
+                    group_anchors.push((name.clone(), anchor.clone()));
                     let expandable = name != "GLOBAL";
                     let open =
                         !expandable || !query.is_empty() || self.expanded_groups.contains(name);
@@ -1487,6 +1494,7 @@ impl Paw {
                         .px_3()
                         .py_2()
                         .id(SharedString::from(format!("group:{name}")))
+                        .anchor_scroll(Some(anchor))
                         .flex()
                         .items_center()
                         .justify_between()
@@ -2060,7 +2068,42 @@ impl Paw {
                     self.locale.message(Message::TryAnotherRoute),
                 ))
             } else {
-                page.children(groups)
+                let navigator = div()
+                    .id("proxy-group-navigator")
+                    .w_full()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .flex()
+                    .gap_2()
+                    .children(group_anchors.into_iter().map(|(name, anchor)| {
+                        let full_name = name.clone();
+                        div()
+                            .id(SharedString::from(format!("jump-group:{name}")))
+                            .flex_shrink_0()
+                            .max_w(px(180.))
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(SOFT_BLUE))
+                            .text_color(rgb(BLUE))
+                            .text_sm()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0xd8e8ff)))
+                            .child(div().truncate().child(name))
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(full_name.clone())
+                                    .build(window, cx)
+                            })
+                            .on_click(move |_, window, cx| anchor.scroll_to(window, cx))
+                    }));
+                page.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child(self.locale.message(Message::JumpToGroup)),
+                )
+                .child(navigator)
+                .children(groups)
             };
         }
         let _ = (window_width, cx);
@@ -2455,6 +2498,11 @@ impl Render for Paw {
             ),
             Page::Settings => self.settings(window.viewport_size().width >= px(960.), cx),
         };
+        let pane = div().id(("paw-page", self.page as usize));
+        #[cfg(any(target_os = "linux", windows))]
+        let pane = pane.when(self.page == Page::Proxies, |pane| {
+            pane.track_scroll(&self.proxy_group_scroll)
+        });
         div()
             .size_full()
             .flex()
@@ -2495,9 +2543,7 @@ impl Render for Paw {
                             }),
                     )
                     .child(
-                        div()
-                            .id(("paw-page", self.page as usize))
-                            .flex_1()
+                        pane.flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
                             .p_4()
