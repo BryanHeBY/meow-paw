@@ -147,8 +147,42 @@ fn subscription_error(locale: Locale, error: subscription::DownloadError) -> Str
     locale.message(message).to_owned()
 }
 
-// Mirrors the subscription downloader's URL policy for feedback before starting a job.
-// The downloader validates again before making a request.
+fn import_error_message(error: subscription::DownloadError) -> Message {
+    use subscription::DownloadError;
+    match error {
+        DownloadError::InvalidUrl => Message::InvalidSubscriptionUrl,
+        DownloadError::Request => Message::SubscriptionDownloadFailed,
+        DownloadError::TooLarge => Message::SubscriptionTooLarge,
+        DownloadError::InvalidText => Message::SubscriptionInvalidText,
+        DownloadError::NoProxies => Message::SubscriptionNoProxies,
+        DownloadError::InvalidProfile(_) => Message::SubscriptionInvalidProfile,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ImportEditorEffect {
+    Clear,
+    Failure(Message),
+    Unchanged,
+}
+
+// A result may only change the editor that launched it.
+fn import_editor_effect(
+    start_revision: u64,
+    current_revision: u64,
+    entry_open: bool,
+    failure: Option<Message>,
+) -> ImportEditorEffect {
+    if !entry_open || start_revision != current_revision {
+        ImportEditorEffect::Unchanged
+    } else if let Some(message) = failure {
+        ImportEditorEffect::Failure(message)
+    } else {
+        ImportEditorEffect::Clear
+    }
+}
+
+// Mirrors the downloader policy; the downloader validates again before a request.
 fn valid_subscription_url(input: &str) -> bool {
     url::Url::parse(input.trim()).is_ok_and(|url| {
         url.scheme() == "https"
@@ -363,7 +397,9 @@ pub struct Paw {
     subscription_name: Entity<InputState>,
     subscription_notice: Option<Message>,
     subscription_entry_open: bool,
-    subscription_url: Entity<InputState>,
+    subscription_url_revision: u64,
+    subscription_window: AnyWindowHandle,
+    subscription_url: Option<Entity<InputState>>,
     subscription_add_focus: FocusHandle,
     _subscription_url_changes: Subscription,
     preference_warning: Option<String>,
@@ -435,6 +471,7 @@ fn subscribe_rule_filter(input: &Entity<InputState>, cx: &mut Context<Paw>) -> S
 fn subscribe_subscription_url(input: &Entity<InputState>, cx: &mut Context<Paw>) -> Subscription {
     cx.subscribe(input, |paw: &mut Paw, _, event, cx| {
         if matches!(event, InputEvent::Change) {
+            paw.subscription_url_revision = paw.subscription_url_revision.wrapping_add(1);
             if paw.subscription_notice == Some(Message::InvalidSubscriptionUrl) {
                 paw.subscription_notice = None;
             }
@@ -495,7 +532,12 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let probe_url = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).subscription_name.read(cx).value();
     let subscription_name = cx.new(|cx| InputState::new(window, cx).default_value(query));
-    let query = paw.read(cx).subscription_url.read(cx).value();
+    let query = paw
+        .read(cx)
+        .subscription_url
+        .as_ref()
+        .map(|input| input.read(cx).value())
+        .unwrap_or_default();
     let subscription_url = cx.new(|cx| InputState::new(window, cx).default_value(query));
     paw.update(cx, |state, cx| {
         #[cfg(any(target_os = "linux", windows))]
@@ -503,8 +545,9 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
             state._page_filter_shortcut =
                 register_page_filter_shortcut(cx.weak_entity(), window, cx);
         }
+        state.subscription_window = window.window_handle();
         state._subscription_url_changes = subscribe_subscription_url(&subscription_url, cx);
-        state.subscription_url = subscription_url;
+        state.subscription_url = Some(subscription_url);
         state.subscription_name = subscription_name;
         state._log_filter_changes = subscribe_search(&log_filter, cx);
         state.log_filter = log_filter;
@@ -581,7 +624,9 @@ pub fn open(
             subscription_name,
             subscription_notice,
             subscription_entry_open: false,
-            subscription_url,
+            subscription_url_revision: 0,
+            subscription_window: window.window_handle(),
+            subscription_url: Some(subscription_url),
             subscription_add_focus: cx.focus_handle(),
             _subscription_url_changes: subscription_url_changes,
             preference_warning: warning.map(str::to_owned),
@@ -1898,7 +1943,7 @@ impl Paw {
             }
         }
         let mut page = div().flex().flex_col().gap_3().child(import);
-        if self.preferences.subscription_dir().is_some() && !self.subscription_busy {
+        if self.preferences.subscription_dir().is_some() {
             if self.subscription_entry_open {
                 page =
                     page.child(
@@ -1907,8 +1952,14 @@ impl Paw {
                             .on_key_down(cx.listener(|paw, event: &KeyDownEvent, window, cx| {
                                 // Leave input keystrokes to the input's IME and editing handlers.
                                 if event.keystroke.key == "escape"
+                                    && !paw.subscription_busy
                                     && !event.keystroke.modifiers.modified()
-                                    && !paw.subscription_url.focus_handle(cx).is_focused(window)
+                                    && !paw
+                                        .subscription_url
+                                        .as_ref()
+                                        .unwrap()
+                                        .focus_handle(cx)
+                                        .is_focused(window)
                                 {
                                     paw.cancel_subscription(window, cx);
                                     cx.stop_propagation();
@@ -1926,7 +1977,8 @@ impl Paw {
                                     .gap_2()
                                     .child(
                                         div().flex_basis(px(260.)).flex_grow(1.).min_w_0().child(
-                                            Input::new(&self.subscription_url).cleanable(true),
+                                            Input::new(self.subscription_url.as_ref().unwrap())
+                                                .cleanable(true),
                                         ),
                                     )
                                     .child(
@@ -1942,8 +1994,9 @@ impl Paw {
                                                     true,
                                                     cx,
                                                 )
-                                                .on_click(cx.listener(|paw, _, window, cx| {
-                                                    paw.import_subscription(window, cx)
+                                                .disabled(self.subscription_busy)
+                                                .on_click(cx.listener(|paw, _, _, cx| {
+                                                    paw.import_subscription(cx)
                                                 })),
                                             )
                                             .child(
@@ -1954,6 +2007,7 @@ impl Paw {
                                                     false,
                                                     cx,
                                                 )
+                                                .disabled(self.subscription_busy)
                                                 .on_click(cx.listener(|paw, _, window, cx| {
                                                     paw.cancel_subscription(window, cx)
                                                 })),
@@ -1961,7 +2015,7 @@ impl Paw {
                                     ),
                             ),
                     );
-            } else if self.subscription_rename.is_none() {
+            } else if !self.subscription_busy && self.subscription_rename.is_none() {
                 page = page.child(
                     subscription_button(
                         "import-subscription",
@@ -1973,7 +2027,11 @@ impl Paw {
                     .on_click(cx.listener(|paw, _, window, cx| {
                         paw.subscription_entry_open = true;
                         paw.subscription_notice = None;
-                        paw.subscription_url.focus_handle(cx).focus(window, cx);
+                        paw.subscription_url
+                            .as_ref()
+                            .unwrap()
+                            .focus_handle(cx)
+                            .focus(window, cx);
                         cx.notify();
                     })),
                 );
@@ -2418,14 +2476,17 @@ impl Paw {
     }
 
     fn cancel_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.subscription_busy {
+            return;
+        }
+        self.subscription_url_revision = self.subscription_url_revision.wrapping_add(1);
         self.subscription_url
+            .as_ref()
+            .unwrap()
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.subscription_entry_open = false;
         self.subscription_notice = None;
-        if self.page == Page::Profiles
-            && !self.subscription_busy
-            && self.preferences.subscription_dir().is_some()
-        {
+        if self.page == Page::Profiles && self.preferences.subscription_dir().is_some() {
             self.subscription_add_focus.focus(window, cx);
         }
         cx.notify();
@@ -2486,28 +2547,106 @@ impl Paw {
         .detach();
     }
 
-    fn import_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.subscription_busy || self.preferences.subscription_dir().is_none() {
+    fn import_subscription(&mut self, cx: &mut Context<Self>) {
+        if self.subscription_busy {
             return;
         }
-        let url = self.subscription_url.read(cx).value().to_string();
+        let Some(dir) = self.preferences.subscription_dir() else {
+            return;
+        };
+        let url = self
+            .subscription_url
+            .as_ref()
+            .unwrap()
+            .read(cx)
+            .value()
+            .to_string();
         if !valid_subscription_url(&url) {
             self.subscription_notice = Some(Message::InvalidSubscriptionUrl);
             cx.notify();
             return;
         }
-        self.subscription_url
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.subscription_entry_open = false;
-        let locale = self.locale;
-        self.subscription_job(cx, move |store| {
-            let candidate =
-                subscription::fetch(&url).map_err(|err| subscription_error(locale, err))?;
-            let id = store
-                .import(&url, candidate, RefreshPolicy::default())
-                .map_err(|_| locale.message(Message::SubscriptionSaveFailed).to_owned())?;
-            Ok((store.record_path(id), store.metadata(id).ok(), true))
-        });
+        let revision = self.subscription_url_revision;
+        self.subscription_busy = true;
+        self.subscription_busy_message = Message::DownloadingSubscription;
+        self.subscription_notice = None;
+        cx.notify();
+        cx.spawn(async move |weak, cx| {
+            let mut result = Some(
+                cx.background_executor()
+                    .spawn(async move {
+                        let candidate = subscription::fetch(&url).map_err(import_error_message)?;
+                        let mut store = SubscriptionStore::new(dir);
+                        let id = store
+                            .import(&url, candidate, RefreshPolicy::default())
+                            .map_err(|_| Message::SubscriptionSaveFailed)?;
+                        Ok((store.record_path(id), store.metadata(id).ok()))
+                    })
+                    .await,
+            );
+            let Ok(handle) = weak.update(cx, |paw, _| paw.subscription_window) else {
+                return;
+            };
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = weak.update(cx, |paw, cx| {
+                    paw.finish_subscription_import(
+                        result.take().unwrap(),
+                        revision,
+                        Some(window),
+                        cx,
+                    );
+                });
+            });
+            if let Some(result) = result {
+                let _ = weak.update(cx, |paw, cx| {
+                    paw.finish_subscription_import(result, revision, None, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn finish_subscription_import(
+        &mut self,
+        result: Result<(PathBuf, Option<SubscriptionMetadata>), Message>,
+        revision: u64,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        self.subscription_busy = false;
+        let effect = import_editor_effect(
+            revision,
+            self.subscription_url_revision,
+            self.subscription_entry_open,
+            result.as_ref().err().copied(),
+        );
+        match result {
+            Ok((path, metadata)) => {
+                if !self.subscription_paths.contains(&path) {
+                    self.subscription_paths.push(path.clone());
+                }
+                self.subscription_metadata.insert(path, metadata);
+                self.subscription_notice = Some(Message::SubscriptionSaved);
+                if effect == ImportEditorEffect::Clear {
+                    if let Some(window) = window {
+                        self.subscription_url
+                            .as_ref()
+                            .unwrap()
+                            .update(cx, |input, cx| input.set_value("", window, cx));
+                    } else {
+                        // The window was closed; discard the input and recreate it on rebind.
+                        self.subscription_url = None;
+                    }
+                    self.subscription_entry_open = false;
+                }
+            }
+            Err(_) => {
+                if let ImportEditorEffect::Failure(message) = effect {
+                    self.subscription_notice = Some(message);
+                }
+            }
+        }
+        cx.notify();
     }
 
     fn refresh_subscription(&mut self, id: SubscriptionId, cx: &mut Context<Self>) {
@@ -3973,13 +4112,16 @@ impl Paw {
         if window.has_active_dialog(cx)
             || window.has_active_sheet(cx)
             || window.has_focused_input(cx)
+            || self
+                .subscription_url
+                .as_ref()
+                .is_some_and(|input| input.focus_handle(cx).is_focused(window))
             || [
                 &self.search,
                 &self.rule_filter,
                 &self.connection_filter,
                 &self.log_filter,
                 &self.probe_url,
-                &self.subscription_url,
                 &self.subscription_name,
             ]
             .iter()
@@ -5054,6 +5196,74 @@ mod tests {
             overview_route_summary(Some(RoutingMode::Rule), Some(&inventory)),
             (Message::OverviewRouteUnavailable, vec![], 0)
         );
+    }
+
+    #[test]
+    fn import_results_respect_edits_and_cancel() {
+        use super::{ImportEditorEffect, Message, import_editor_effect};
+
+        // Exercise the same result decision used by the editor, with synthetic input.
+        let submitted = "https://example.invalid/feed?token=synthetic";
+        let newer = "https://example.invalid/other?token=new";
+        let failure = Message::SubscriptionDownloadFailed;
+        let mut input = submitted.to_owned();
+        let mut notice = None;
+        let start = 10;
+        if let ImportEditorEffect::Failure(message) =
+            import_editor_effect(start, start, true, Some(failure))
+        {
+            notice = Some(message);
+        }
+        assert_eq!(input, submitted);
+        assert_eq!(notice, Some(failure));
+
+        if import_editor_effect(start, start, true, None) == ImportEditorEffect::Clear {
+            input.clear();
+        }
+        assert!(input.is_empty());
+
+        input = newer.to_owned();
+        // Editing, including changing back to the submitted value, invalidates the result.
+        for result in [None, Some(failure)] {
+            assert_eq!(
+                import_editor_effect(start, 12, true, result),
+                ImportEditorEffect::Unchanged,
+            );
+            assert_eq!(
+                import_editor_effect(start, 11, false, result),
+                ImportEditorEffect::Unchanged,
+            );
+            // Cancel followed by reopening is also a different entry.
+            assert_eq!(
+                import_editor_effect(start, 11, true, result),
+                ImportEditorEffect::Unchanged,
+            );
+        }
+        assert_eq!(input, newer);
+    }
+
+    #[test]
+    fn import_failure_feedback_is_localized_and_does_not_expose_input() {
+        use super::{Locale, Message, import_error_message};
+        use meow_paw::{profile::ProfileError, subscription::DownloadError};
+
+        let secret = "https://example.invalid/profile?token=synthetic-secret";
+        let message = import_error_message(DownloadError::InvalidProfile(
+            ProfileError::UnsupportedField(secret.to_owned()),
+        ));
+        assert_eq!(message, Message::SubscriptionInvalidProfile);
+        for locale in [Locale::En, Locale::ZhCn] {
+            assert!(!locale.message(message).contains(secret));
+        }
+        for (error, expected) in [
+            (DownloadError::Request, Message::SubscriptionDownloadFailed),
+            (DownloadError::TooLarge, Message::SubscriptionTooLarge),
+            (DownloadError::InvalidText, Message::SubscriptionInvalidText),
+            (DownloadError::NoProxies, Message::SubscriptionNoProxies),
+            (DownloadError::InvalidUrl, Message::InvalidSubscriptionUrl),
+        ] {
+            assert_eq!(import_error_message(error), expected);
+        }
     }
 
     #[test]
