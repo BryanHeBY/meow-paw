@@ -108,6 +108,8 @@ pub struct Paw {
     #[cfg(any(target_os = "linux", windows))]
     expanded_groups: std::collections::HashSet<String>,
     #[cfg(any(target_os = "linux", windows))]
+    proxy_order: std::collections::HashMap<String, ProxyOrder>,
+    #[cfg(any(target_os = "linux", windows))]
     snapshot: meow_paw::app::Snapshot,
 }
 
@@ -164,6 +166,8 @@ pub fn open(
             binary,
             #[cfg(any(target_os = "linux", windows))]
             expanded_groups: Default::default(),
+            #[cfg(any(target_os = "linux", windows))]
+            proxy_order: Default::default(),
             error: None,
             copied_listener: None,
             show_usage: false,
@@ -1201,12 +1205,13 @@ impl Paw {
             let value = self.search.read(cx).value();
             let query = value.trim().to_lowercase();
             let mut count = 0;
+            let delays = unambiguous_route_delays(inventory);
             let groups = mode_groups(inventory, self.snapshot.mode)
                 .into_iter()
                 .filter_map(|(name, group)| {
                     let all = unique_route_members(group.all.as_deref().unwrap_or_default());
                     let show_all = route_matches(name, &query);
-                    let members: Vec<_> = all
+                    let mut members: Vec<_> = all
                         .into_iter()
                         .filter(|(_, member)| show_all || route_matches(member, &query))
                         .collect();
@@ -1217,6 +1222,10 @@ impl Paw {
                     let expandable = name != "GLOBAL";
                     let open =
                         !expandable || !query.is_empty() || self.expanded_groups.contains(name);
+                    let order = self.proxy_order.get(name).copied().unwrap_or_default();
+                    if open {
+                        sort_route_members(&mut members, order, &delays);
+                    }
                     let toggle = name.clone();
                     let heading = card()
                         .id(SharedString::from(format!("group:{name}")))
@@ -1289,8 +1298,32 @@ impl Paw {
                                             .child("This group has no candidate routes."),
                                     );
                                 }
-                                let candidates = div().flex().flex_col().gap_2().children(
-                                    members.chunks(2).map(|pair| {
+                                let group_name = name.clone();
+                                let candidates = div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div().flex().justify_end().child(
+                                            secondary_button(
+                                                SharedString::from(format!("proxy-order:{name}")),
+                                                order.label(),
+                                            )
+                                            .on_click(
+                                                cx.listener(move |paw, _, _, cx| {
+                                                    let next = order.next();
+                                                    if next == ProxyOrder::Configured {
+                                                        paw.proxy_order.remove(&group_name);
+                                                    } else {
+                                                        paw.proxy_order
+                                                            .insert(group_name.clone(), next);
+                                                    }
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                        ),
+                                    )
+                                    .children(members.chunks(2).map(|pair| {
                                         let row = div().flex().gap_2().children(pair.iter().map(
                                             |&(index, member)| {
                                                 let (g, n) = (name.clone(), member.to_owned());
@@ -1325,6 +1358,18 @@ impl Paw {
                                                             .text_sm()
                                                             .child(member.to_owned()),
                                                     )
+                                                    .when_some(
+                                                        delays.get(member).copied().flatten(),
+                                                        |el, ms| {
+                                                            el.child(
+                                                                div()
+                                                                    .flex_shrink_0()
+                                                                    .text_sm()
+                                                                    .text_color(rgb(FAINT))
+                                                                    .child(format!("{ms} ms")),
+                                                            )
+                                                        },
+                                                    )
                                                     .when(selected, |el| {
                                                         el.child(line_icon(
                                                             "icons/circle-check.svg",
@@ -1357,8 +1402,7 @@ impl Paw {
                                         row.when(pair.len() == 1, |el| {
                                             el.child(div().flex_1().min_w_0())
                                         })
-                                    }),
-                                );
+                                    }));
                                 if expandable && query.is_empty() {
                                     panel.child(
                                         candidates.with_animation(
@@ -1978,6 +2022,70 @@ fn unique_route_members(names: &[String]) -> Vec<(usize, &str)> {
 }
 
 #[cfg(any(target_os = "linux", windows))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ProxyOrder {
+    #[default]
+    Configured,
+    Delay,
+    Name,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl ProxyOrder {
+    fn next(self) -> Self {
+        match self {
+            Self::Configured => Self::Delay,
+            Self::Delay => Self::Name,
+            Self::Name => Self::Configured,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Configured => "Sort: Default",
+            Self::Delay => "Sort: Latency",
+            Self::Name => "Sort: Name",
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn unambiguous_route_delays(
+    inventory: &meow_paw::engine::controller::Inventory,
+) -> std::collections::HashMap<&str, Option<u16>> {
+    let mut delays = std::collections::HashMap::new();
+    let routes = inventory
+        .groups
+        .iter()
+        .chain(inventory.nodes.iter().map(|node| (&node.name, &node.proxy)));
+    for (name, proxy) in routes {
+        delays
+            .entry(name.as_str())
+            .and_modify(|delay| *delay = None)
+            .or_insert_with(|| proxy.latest_delay_ms());
+    }
+    delays
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn sort_route_members(
+    members: &mut [(usize, &str)],
+    order: ProxyOrder,
+    delays: &std::collections::HashMap<&str, Option<u16>>,
+) {
+    match order {
+        ProxyOrder::Configured => {}
+        ProxyOrder::Delay => members.sort_by_key(|(index, name)| {
+            let delay = delays.get(name).copied().flatten();
+            (delay.is_none(), delay, *index)
+        }),
+        ProxyOrder::Name => {
+            members.sort_by_cached_key(|(index, name)| (name.to_lowercase(), *index))
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn route_matches(name: &str, normalized_query: &str) -> bool {
     normalized_query.is_empty() || name.to_lowercase().contains(normalized_query)
 }
@@ -2129,6 +2237,86 @@ mod tests {
             [(0, "DIRECT"), (1, "南京"), (3, "direct"), (5, "Reading")]
         );
         assert!(unique_route_members(&[]).is_empty());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn proxy_order_keeps_stable_route_ids_and_does_not_guess_duplicate_delays() {
+        use super::{
+            ProxyOrder, sort_route_members, unambiguous_route_delays, unique_route_members,
+        };
+        use meow_paw::engine::controller::{Inventory, Node, Origin, Proxy};
+        let proxy = |samples: &[u16]| -> Proxy {
+            let history: Vec<_> = samples
+                .iter()
+                .map(|ms| serde_json::json!({"delay":ms}))
+                .collect();
+            serde_json::from_value(serde_json::json!({"history": history})).unwrap()
+        };
+        let nodes = [
+            ("Zulu", Origin::Local, proxy(&[5, 20])),
+            ("alpha", Origin::Provider("feed".into()), proxy(&[10])),
+            ("Bravo", Origin::Local, proxy(&[1, 0])),
+            ("zulu", Origin::Local, proxy(&[20])),
+            ("Ambiguous", Origin::Local, proxy(&[1])),
+            ("Ambiguous", Origin::Provider("feed".into()), proxy(&[2])),
+        ];
+        let inventory = Inventory {
+            nodes: nodes
+                .into_iter()
+                .map(|(name, origin, proxy)| Node {
+                    name: name.into(),
+                    origin,
+                    proxy,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let delays = unambiguous_route_delays(&inventory);
+        assert_eq!(delays["Zulu"], Some(20));
+        assert_eq!(delays["Bravo"], None);
+        assert_eq!(delays["Ambiguous"], None);
+        let names = ["Zulu", "Bravo", "alpha", "zulu", "Ambiguous", "Unknown"].map(str::to_owned);
+        let order = |mode| {
+            let mut visible = unique_route_members(&names);
+            sort_route_members(&mut visible, mode, &delays);
+            visible
+        };
+        let default = ProxyOrder::default();
+        assert_eq!(
+            order(default),
+            [
+                (0, "Zulu"),
+                (1, "Bravo"),
+                (2, "alpha"),
+                (3, "zulu"),
+                (4, "Ambiguous"),
+                (5, "Unknown")
+            ]
+        );
+        assert_eq!(
+            order(default.next()),
+            [
+                (2, "alpha"),
+                (0, "Zulu"),
+                (3, "zulu"),
+                (1, "Bravo"),
+                (4, "Ambiguous"),
+                (5, "Unknown")
+            ]
+        );
+        assert_eq!(
+            order(default.next().next()),
+            [
+                (2, "alpha"),
+                (4, "Ambiguous"),
+                (1, "Bravo"),
+                (5, "Unknown"),
+                (0, "Zulu"),
+                (3, "zulu")
+            ]
+        );
+        assert_eq!(default.next().next().next(), default);
     }
 
     #[test]

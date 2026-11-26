@@ -12,6 +12,23 @@ pub struct Proxy {
     #[serde(default)]
     pub hidden: bool,
     pub alive: Option<bool>,
+    #[serde(default)]
+    pub history: Vec<DelaySample>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DelaySample {
+    delay: u16,
+}
+
+impl Proxy {
+    /// The controller orders samples oldest to newest; zero means a failed check.
+    pub fn latest_delay_ms(&self) -> Option<u16> {
+        self.history
+            .last()
+            .map(|sample| sample.delay)
+            .filter(|ms| *ms > 0)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
