@@ -1177,7 +1177,7 @@ impl Paw {
                                         .child(Input::new(&self.subscription_url).cleanable(true)),
                                 )
                                 .child(
-                                    secondary_button(
+                                    action_button_base(
                                         "confirm-subscription",
                                         self.locale.message(Message::ImportSubscription),
                                     )
@@ -1205,9 +1205,10 @@ impl Paw {
                         "import-subscription",
                         self.locale.message(Message::AddSubscription),
                     )
-                    .on_click(cx.listener(|paw, _, _, cx| {
+                    .on_click(cx.listener(|paw, _, window, cx| {
                         paw.subscription_entry_open = true;
                         paw.subscription_notice = None;
+                        paw.subscription_url.focus_handle(cx).focus(window, cx);
                         cx.notify();
                     })),
                 );
@@ -2803,20 +2804,24 @@ fn line_icon(path: &'static str, color: u32, side: f32) -> impl IntoElement {
         .flex_shrink_0()
 }
 
-fn secondary_button(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
+fn action_button_base(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
     div()
         .id(id)
         .rounded_md()
         .border_1()
         .border_color(rgb(0xb5cafa))
-        .bg(rgb(SOFT_BLUE))
-        .text_color(rgb(BLUE))
         .font_weight(FontWeight::SEMIBOLD)
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(0xd8e7ff)))
         .px_4()
         .py_2()
         .child(label)
+}
+
+fn secondary_button(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
+    action_button_base(id, label)
+        .bg(rgb(SOFT_BLUE))
+        .text_color(rgb(BLUE))
+        .hover(|style| style.bg(rgb(0xd8e7ff)))
 }
 
 fn section_label(label: impl Into<SharedString>) -> Div {
