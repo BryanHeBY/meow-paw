@@ -17,6 +17,9 @@ use std::{
 use tempfile::TempDir;
 
 #[cfg(target_os = "linux")]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+#[cfg(target_os = "linux")]
 mod linux;
 #[cfg(windows)]
 mod windows;
@@ -42,7 +45,7 @@ impl Session {
         cancelled: impl Fn() -> bool,
     ) -> io::Result<Self> {
         let binary = binary.canonicalize()?;
-        let directory = tempfile::Builder::new().prefix("meow-paw-").tempdir()?;
+        let directory = session_directory()?;
         let config = directory.path().join("config.yaml");
         let control_slot = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let mixed_slot = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
@@ -69,7 +72,7 @@ impl Session {
         let candidate = profile
             .managed_with_https(controller_addr, mixed_port, &secret, https_policy_supported)
             .map_err(Error::other)?;
-        fs::write(&config, candidate)?;
+        write_config(&config, candidate.as_bytes())?;
         let mut args = vec![
             OsStr::new("--no-external-plugins"),
             OsStr::new("-d"),
@@ -228,9 +231,87 @@ impl Session {
     }
 }
 
+fn session_directory() -> io::Result<TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("meow-paw-");
+    // Set the mode on mkdir itself, before any credentials enter the directory.
+    #[cfg(target_os = "linux")]
+    builder.permissions(fs::Permissions::from_mode(0o700));
+    builder.tempdir()
+}
+
+fn write_config(path: &Path, contents: &[u8]) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?
+            .write_all(contents)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        fs::write(path, contents)
+    }
+}
+
 pub(crate) enum ApplyError {
     Prepare(io::Error),
     Reload(ControllerError),
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::{session_directory, write_config};
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+
+    #[test]
+    fn managed_config_permissions_with_permissive_umask() {
+        const CHILD: &str = "MEOW_PAW_PERMISSION_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "engine::session::tests::managed_config_permissions_with_permissive_umask",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("permissions verified"),
+                "isolated permission test failed: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        // This test runs alone in a child process, so it cannot change the
+        // umask of other concurrently running tests.
+        unsafe { libc::umask(0) };
+        let directory = session_directory().unwrap();
+        assert_eq!(
+            directory.path().metadata().unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let config = directory.path().join("config.yaml");
+        write_config(&config, b"synthetic config").unwrap();
+        assert_eq!(
+            config.metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            write_config(&config, b"replacement").unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(config).unwrap(), b"synthetic config");
+        println!("permissions verified");
+    }
 }
 
 impl ApplyError {
