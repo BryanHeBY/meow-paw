@@ -9,7 +9,7 @@ use crate::{
     profile::{Diagnostic, MAX_PROFILE_BYTES, Profile},
 };
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::File,
     io::{self, Error, ErrorKind, Read},
     path::PathBuf,
@@ -167,6 +167,158 @@ pub fn unique_proxy(inventory: &Inventory, name: &str) -> Option<Origin> {
     let mut candidates = inventory.nodes.iter().filter(|node| node.name == name);
     let first = candidates.next()?;
     candidates.next().is_none().then(|| first.origin.clone())
+}
+
+/// Limits both preparation work and the number of requests a future caller can schedule.
+pub const GROUP_PROBE_TARGET_LIMIT: usize = 128;
+const GROUP_PROBE_INVENTORY_LIMIT: usize = 4096;
+const GROUP_PROBE_MEMBER_LIMIT: usize = 4096;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GroupProbePreparationError {
+    MissingGroup,
+    InventoryTooLarge,
+    MembershipTooLarge,
+    TooManyTargets,
+}
+
+/// Resolve nested membership in first-seen order. Unknown and ambiguous names are
+/// omitted; a group/node name collision is never followed or measured. Limits
+/// fail the whole preparation instead of silently returning an incomplete set.
+pub fn group_probe_targets(
+    inventory: &Inventory,
+    group: &str,
+) -> Result<Vec<ProxyProbeTarget>, GroupProbePreparationError> {
+    if !inventory.groups.contains_key(group) {
+        return Err(GroupProbePreparationError::MissingGroup);
+    }
+    if inventory.nodes.len() > GROUP_PROBE_INVENTORY_LIMIT {
+        return Err(GroupProbePreparationError::InventoryTooLarge);
+    }
+    let mut nodes = BTreeMap::new();
+    for node in &inventory.nodes {
+        nodes
+            .entry(node.name.as_str())
+            .and_modify(|origin| *origin = None)
+            .or_insert(Some(&node.origin));
+    }
+    let mut visited = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![group];
+    let mut examined = 0;
+    let mut targets = Vec::new();
+    while let Some(name) = pending.pop() {
+        if !inventory.groups.contains_key(name) {
+            if let Some(Some(origin)) = nodes.get(name)
+                && seen.insert(name)
+            {
+                if targets.len() == GROUP_PROBE_TARGET_LIMIT {
+                    return Err(GroupProbePreparationError::TooManyTargets);
+                }
+                targets.push(ProxyProbeTarget {
+                    name: name.to_owned(),
+                    origin: (*origin).clone(),
+                });
+            }
+            continue;
+        }
+        if nodes.contains_key(name) || !visited.insert(name) {
+            continue;
+        }
+        let Some(members) = inventory.groups.get(name).and_then(|g| g.all.as_ref()) else {
+            continue;
+        };
+        examined += members.len();
+        if examined > GROUP_PROBE_MEMBER_LIMIT {
+            return Err(GroupProbePreparationError::MembershipTooLarge);
+        }
+        // Reversed stack preserves the controller's member order, including nested groups.
+        for member in members.iter().rev() {
+            pending.push(member);
+        }
+    }
+    Ok(targets)
+}
+
+/// Local comparison state only. The caller owns scheduling and must use a new
+/// run_id for each run, even when the engine generation and URL are unchanged.
+/// Per-node delay checks update engine history and may affect automatic routes.
+#[derive(Clone, Debug)]
+pub struct GroupProbeResults {
+    epoch: u64,
+    run_id: u64,
+    url: url::Url,
+    rows: Vec<(ProxyProbeTarget, Option<ProxyProbeStatus>)>,
+}
+
+impl GroupProbeResults {
+    pub fn new(
+        epoch: u64,
+        run_id: u64,
+        url: url::Url,
+        targets: Vec<ProxyProbeTarget>,
+    ) -> Option<Self> {
+        if targets.len() > GROUP_PROBE_TARGET_LIMIT
+            || parse_probe_url(url.as_str()).as_ref() != Some(&url)
+        {
+            return None;
+        }
+        let mut seen = BTreeSet::new();
+        if targets.iter().any(|target| !seen.insert(&target.name)) {
+            return None;
+        }
+        Some(Self {
+            epoch,
+            run_id,
+            url,
+            rows: targets.into_iter().map(|target| (target, None)).collect(),
+        })
+    }
+
+    pub fn rows(&self) -> &[(ProxyProbeTarget, Option<ProxyProbeStatus>)] {
+        &self.rows
+    }
+
+    pub fn url(&self) -> &url::Url {
+        &self.url
+    }
+
+    /// Only one target may be in flight; completed entries cannot be restarted.
+    pub fn begin(&mut self, index: usize) -> bool {
+        if self
+            .rows
+            .iter()
+            .any(|(_, status)| *status == Some(ProxyProbeStatus::Running))
+        {
+            return false;
+        }
+        let Some((_, status @ None)) = self.rows.get_mut(index) else {
+            return false;
+        };
+        *status = Some(ProxyProbeStatus::Running);
+        true
+    }
+
+    pub fn finish(
+        &mut self,
+        epoch: u64,
+        run_id: u64,
+        index: usize,
+        target: &ProxyProbeTarget,
+        status: ProxyProbeStatus,
+    ) -> bool {
+        if epoch != self.epoch || run_id != self.run_id || status == ProxyProbeStatus::Running {
+            return false;
+        }
+        let Some((expected, current)) = self.rows.get_mut(index) else {
+            return false;
+        };
+        if expected != target || *current != Some(ProxyProbeStatus::Running) {
+            return false;
+        }
+        *current = Some(status);
+        true
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -857,6 +1009,132 @@ fn load_profile(path: &std::path::Path) -> io::Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_targets_are_ordered_deduplicated_and_skip_ambiguous_members() {
+        use crate::engine::controller::{Node, Proxy};
+        let mut inventory = Inventory::default();
+        let group = |members: &[&str]| Proxy {
+            all: Some(members.iter().map(|s| (*s).to_owned()).collect()),
+            ..Default::default()
+        };
+        inventory.groups.insert(
+            "root".into(),
+            group(&["a", "nested", "a", "ambiguous", "collision", "missing", "b"]),
+        );
+        inventory
+            .groups
+            .insert("nested".into(), group(&["b", "root", "a"]));
+        inventory.groups.insert("collision".into(), group(&["c"]));
+        for (name, origin) in [
+            ("a", Origin::Local),
+            ("b", Origin::Provider("P".into())),
+            ("c", Origin::Local),
+            ("ambiguous", Origin::Local),
+            ("ambiguous", Origin::Provider("P".into())),
+            ("collision", Origin::Local),
+        ] {
+            inventory.nodes.push(Node {
+                name: name.into(),
+                origin,
+                proxy: Proxy::default(),
+            });
+        }
+        assert_eq!(
+            group_probe_targets(&inventory, "root").unwrap(),
+            vec![
+                ProxyProbeTarget {
+                    name: "a".into(),
+                    origin: Origin::Local
+                },
+                ProxyProbeTarget {
+                    name: "b".into(),
+                    origin: Origin::Provider("P".into())
+                },
+            ]
+        );
+        assert_eq!(
+            group_probe_targets(&inventory, "absent"),
+            Err(GroupProbePreparationError::MissingGroup)
+        );
+    }
+
+    #[test]
+    fn group_target_limits_fail_without_returning_partial_results() {
+        use crate::engine::controller::{Node, Proxy};
+        let mut inventory = Inventory::default();
+        let names: Vec<_> = (0..=GROUP_PROBE_TARGET_LIMIT)
+            .map(|i| format!("n{i}"))
+            .collect();
+        inventory.groups.insert(
+            "root".into(),
+            Proxy {
+                all: Some(names.clone()),
+                ..Default::default()
+            },
+        );
+        inventory.nodes = names
+            .into_iter()
+            .map(|name| Node {
+                name,
+                origin: Origin::Local,
+                proxy: Proxy::default(),
+            })
+            .collect();
+        assert_eq!(
+            group_probe_targets(&inventory, "root"),
+            Err(GroupProbePreparationError::TooManyTargets)
+        );
+        inventory.groups.get_mut("root").unwrap().all =
+            Some(vec!["unknown".into(); GROUP_PROBE_MEMBER_LIMIT + 1]);
+        assert_eq!(
+            group_probe_targets(&inventory, "root"),
+            Err(GroupProbePreparationError::MembershipTooLarge)
+        );
+        inventory
+            .nodes
+            .resize_with(GROUP_PROBE_INVENTORY_LIMIT + 1, || Node {
+                name: "x".into(),
+                origin: Origin::Local,
+                proxy: Proxy::default(),
+            });
+        assert_eq!(
+            group_probe_targets(&inventory, "root"),
+            Err(GroupProbePreparationError::InventoryTooLarge)
+        );
+    }
+
+    #[test]
+    fn group_results_reject_stale_or_mismatched_completions() {
+        let target = ProxyProbeTarget {
+            name: "a".into(),
+            origin: Origin::Local,
+        };
+        let other = ProxyProbeTarget {
+            name: "b".into(),
+            origin: Origin::Local,
+        };
+        let url = parse_probe_url("https://example.invalid/").unwrap();
+        assert!(
+            GroupProbeResults::new(4, 1, url.clone(), vec![target.clone(), target.clone()])
+                .is_none()
+        );
+        let mut results =
+            GroupProbeResults::new(4, 2, url.clone(), vec![target.clone(), other.clone()]).unwrap();
+        assert!(results.begin(0));
+        assert!(!results.begin(1));
+        assert!(!results.finish(3, 2, 0, &target, ProxyProbeStatus::Measured(10)));
+        assert!(!results.finish(4, 1, 0, &target, ProxyProbeStatus::Measured(10)));
+        assert!(!results.finish(4, 2, 0, &other, ProxyProbeStatus::Measured(10)));
+        assert!(!results.finish(4, 2, 0, &target, ProxyProbeStatus::Running));
+        assert!(results.finish(4, 2, 0, &target, ProxyProbeStatus::Measured(10)));
+        assert!(!results.begin(0));
+        assert!(results.begin(1));
+        assert!(results.finish(4, 2, 1, &other, ProxyProbeStatus::Unavailable));
+        assert_eq!(results.url, url);
+        assert_eq!(results.rows()[0].1, Some(ProxyProbeStatus::Measured(10)));
+        assert_eq!(results.rows()[1].1, Some(ProxyProbeStatus::Unavailable));
+    }
 
     #[test]
     fn proxy_probe_rejects_ambiguous_targets_and_stale_completions() {
