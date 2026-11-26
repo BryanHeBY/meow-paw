@@ -1627,13 +1627,17 @@ impl Paw {
             .child(form_row(
                 self.locale.message(Message::Running),
                 current_label,
-                secondary_button("home-profiles", self.locale.message(Message::Profiles)).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.page = Page::Profiles;
-                        this.load_subscription_metadata(cx);
-                        cx.notify();
-                    }),
-                ),
+                subscription_button(
+                    "home-profiles",
+                    self.locale.message(Message::Profiles),
+                    false,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.page = Page::Profiles;
+                    this.load_subscription_metadata(cx);
+                    cx.notify();
+                })),
             ))
             .child(form_row(
                 self.locale.message(Message::OverviewNextProfile),
@@ -1923,12 +1927,16 @@ impl Paw {
         form_card(self.locale.message(Message::OverviewCurrentRoute)).child(form_row_with_detail(
             self.locale.message(detail),
             preview,
-            secondary_button("home-proxies", self.locale.message(Message::Proxies)).on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.page = Page::Proxies;
-                    cx.notify();
-                }),
-            ),
+            subscription_button(
+                "home-proxies",
+                self.locale.message(Message::Proxies),
+                false,
+                cx,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.page = Page::Proxies;
+                cx.notify();
+            })),
         ))
     }
 
@@ -2322,13 +2330,15 @@ impl Paw {
                             })
                             .when(live && applying.is_none() && !unreadable, |el| {
                                 el.child(
-                                    secondary_button(
+                                    subscription_button(
                                         action_id("profile-apply"),
                                         self.locale.message(if active {
                                             Message::Reload
                                         } else {
                                             Message::ApplyLive
                                         }),
+                                        false,
+                                        cx,
                                     )
                                     .on_click(cx.listener(
                                         move |paw, _, _, cx| {
@@ -2410,9 +2420,11 @@ impl Paw {
                             )
                             .when(!next && !unreadable, |el| {
                                 el.child(
-                                    secondary_button(
+                                    subscription_button(
                                         action_id("profile-use"),
                                         self.locale.message(Message::Use),
+                                        false,
+                                        cx,
                                     )
                                     .on_click(cx.listener(
                                         move |paw, _, _, cx| {
