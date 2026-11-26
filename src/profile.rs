@@ -61,6 +61,20 @@ impl Profile {
         }
     }
 
+    pub(crate) fn has_subscription_content(&self) -> bool {
+        self.root
+            .get("proxies")
+            .and_then(Value::as_array)
+            .is_some_and(|nodes| !nodes.is_empty() && nodes.iter().all(Value::is_object))
+            || self
+                .root
+                .get("proxy-providers")
+                .and_then(Value::as_object)
+                .is_some_and(|providers| {
+                    !providers.is_empty() && providers.values().all(Value::is_object)
+                })
+    }
+
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         self.root
             .get("proxies")
