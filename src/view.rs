@@ -146,6 +146,14 @@ fn subscription_download_feedback(error: subscription::DownloadError) -> Message
     }
 }
 
+fn subscription_write_feedback(error: std::io::Error, fallback: Message) -> Message {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        Message::SubscriptionWriteConflict
+    } else {
+        fallback
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ImportEditorEffect {
     Clear,
@@ -2517,7 +2525,6 @@ impl Paw {
         self.subscription_busy = true;
         self.subscription_busy_message = Message::SavingSubscriptionName;
         self.subscription_notice = None;
-        self.error = None;
         cx.notify();
         cx.spawn(async move |weak, cx| {
             let result = cx
@@ -2531,15 +2538,14 @@ impl Paw {
                         paw.subscription_metadata.insert(path, Some(metadata));
                         paw.subscription_rename = None;
                     }
-                    Err(_) => {
+                    Err(error) => {
                         if paw.page != Page::Profiles {
                             paw.subscription_rename = None;
                         }
-                        paw.error = Some(
-                            paw.locale
-                                .message(Message::SubscriptionNameSaveFailed)
-                                .to_owned(),
-                        )
+                        paw.subscription_notice = Some(subscription_write_feedback(
+                            error,
+                            Message::SubscriptionNameSaveFailed,
+                        ));
                     }
                 }
                 cx.notify();
@@ -2581,7 +2587,9 @@ impl Paw {
                         let mut store = SubscriptionStore::new(dir);
                         let id = store
                             .import(&url, candidate, RefreshPolicy::default())
-                            .map_err(|_| Message::SubscriptionSaveFailed)?;
+                            .map_err(|error| {
+                                subscription_write_feedback(error, Message::SubscriptionSaveFailed)
+                            })?;
                         Ok((store.record_path(id), store.metadata(id).ok()))
                     })
                     .await,
@@ -2682,8 +2690,10 @@ impl Paw {
                     .fetch_latest()
                     .map_err(subscription_download_feedback)?;
                 store
-                    .refresh(id, candidate)
-                    .map_err(|_| Message::SubscriptionRefreshSaveFailed)?;
+                    .refresh_if_unchanged(id, &prior, candidate)
+                    .map_err(|error| {
+                        subscription_write_feedback(error, Message::SubscriptionRefreshSaveFailed)
+                    })?;
                 Ok((store.record_path(id), store.metadata(id).ok()))
             },
         );
@@ -5279,6 +5289,30 @@ mod tests {
             (DownloadError::InvalidUrl, Message::InvalidSubscriptionUrl),
         ] {
             assert_eq!(subscription_download_feedback(error), expected);
+        }
+    }
+
+    #[test]
+    fn subscription_write_feedback_is_retryable_and_provider_safe() {
+        use super::{Locale, Message, subscription_write_feedback};
+        use std::io::{Error, ErrorKind};
+
+        let secret = "https://example.invalid/feed?token=synthetic-secret";
+        for fallback in [
+            Message::SubscriptionSaveFailed,
+            Message::SubscriptionNameSaveFailed,
+            Message::SubscriptionRefreshSaveFailed,
+        ] {
+            let message =
+                subscription_write_feedback(Error::new(ErrorKind::WouldBlock, secret), fallback);
+            assert_eq!(message, Message::SubscriptionWriteConflict);
+            for locale in [Locale::En, Locale::ZhCn] {
+                assert!(!locale.message(message).contains(secret));
+            }
+            assert_eq!(
+                subscription_write_feedback(Error::other(secret), fallback),
+                fallback
+            );
         }
     }
 

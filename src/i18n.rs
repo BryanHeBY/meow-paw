@@ -155,6 +155,7 @@ pub enum Message {
     CheckingSavedSubscription,
     SavedSubscriptionReadable,
     SubscriptionRefreshSaveFailed,
+    SubscriptionWriteConflict,
     ActiveConnections,
     ActiveTab,
     ClosedTab,
@@ -516,6 +517,9 @@ fn english(key: Message) -> &'static str {
         Message::CheckingSavedSubscription => "Checking saved subscription",
         Message::SavedSubscriptionReadable => "Saved subscription is readable",
         Message::SubscriptionRefreshSaveFailed => "Could not save the refreshed subscription",
+        Message::SubscriptionWriteConflict => {
+            "Subscription is busy or has changed. Please try again."
+        }
         Message::ActiveConnections => "active",
         Message::ActiveTab => "Active",
         Message::ClosedTab => "Closed",
@@ -745,6 +749,7 @@ fn chinese(key: Message) -> &'static str {
         Message::CheckingSavedSubscription => "正在检查已保存的订阅",
         Message::SavedSubscriptionReadable => "已确认订阅副本可读",
         Message::SubscriptionRefreshSaveFailed => "无法保存刷新后的订阅",
+        Message::SubscriptionWriteConflict => "订阅正忙或已更改，请重试。",
         Message::ActiveConnections => "个活动连接",
         Message::ActiveTab => "活动",
         Message::ClosedTab => "已关闭",
@@ -1418,6 +1423,11 @@ mod tests {
                 Message::SubscriptionRefreshSaveFailed,
                 "Could not save the refreshed subscription",
                 "无法保存刷新后的订阅",
+            ),
+            (
+                Message::SubscriptionWriteConflict,
+                "Subscription is busy or has changed. Please try again.",
+                "订阅正忙或已更改，请重试。",
             ),
             (Message::ActiveConnections, "active", "个活动连接"),
             (Message::ActiveTab, "Active", "活动"),
