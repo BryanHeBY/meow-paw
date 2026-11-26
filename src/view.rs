@@ -2910,18 +2910,18 @@ impl Paw {
                     let open =
                         !expandable || !query.is_empty() || self.expanded_groups.contains(name);
                     let order = self.proxy_order.get(name).copied().unwrap_or_default();
+                    let comparison = self.snapshot.group_probe.as_ref().filter(|g| {
+                        open && ownership_available
+                            && g.is_current_completed(&self.snapshot, name, probe_url.as_ref())
+                    });
+                    let delays = route_delays(
+                        order,
+                        &history_delays,
+                        inventory,
+                        comparison.map(|g| &g.results),
+                    );
                     if open {
-                        let comparison = self.snapshot.group_probe.as_ref().filter(|g| {
-                            ownership_available
-                                && g.is_current_completed(&self.snapshot, name, probe_url.as_ref())
-                        });
-                        sort_route_members(
-                            &mut members,
-                            order,
-                            &history_delays,
-                            inventory,
-                            comparison.map(|g| &g.results),
-                        );
+                        sort_route_members(&mut members, order, &delays);
                     }
                     let toggle = name.clone();
                     let heading = card()
@@ -3232,10 +3232,7 @@ impl Paw {
                                                             .child(member.to_owned()),
                                                     )
                                                     .when_some(
-                                                        history_delays
-                                                            .get(member)
-                                                            .copied()
-                                                            .flatten(),
+                                                        route_delay(&delays, member),
                                                         |el, ms| {
                                                             el.child(
                                                                 div()
@@ -4665,9 +4662,12 @@ impl ProxyOrder {
 }
 
 #[cfg(any(target_os = "linux", windows))]
+type RouteDelayMap<'a> = std::collections::HashMap<&'a str, Option<u32>>;
+
+#[cfg(any(target_os = "linux", windows))]
 fn unambiguous_route_delays(
     inventory: &meow_paw::engine::controller::Inventory,
-) -> std::collections::HashMap<&str, Option<u16>> {
+) -> RouteDelayMap<'_> {
     let mut delays = std::collections::HashMap::new();
     let routes = inventory
         .groups
@@ -4677,43 +4677,54 @@ fn unambiguous_route_delays(
         delays
             .entry(name.as_str())
             .and_modify(|delay| *delay = None)
-            .or_insert_with(|| proxy.latest_delay_ms());
+            .or_insert_with(|| proxy.latest_delay_ms().map(u32::from));
     }
     delays
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn route_delays<'a>(
+    order: ProxyOrder,
+    history_delays: &'a RouteDelayMap<'a>,
+    inventory: &meow_paw::engine::controller::Inventory,
+    comparison: Option<&'a meow_paw::app::GroupProbeResults>,
+) -> std::borrow::Cow<'a, RouteDelayMap<'a>> {
+    if order == ProxyOrder::Delay
+        && let Some(comparison) = comparison
+    {
+        // A comparison shares one URL and run; don't mix unrelated history.
+        let mut delays = std::collections::HashMap::new();
+        for (target, status) in comparison.rows() {
+            if meow_paw::app::unique_proxy(inventory, &target.name).as_ref() == Some(&target.origin)
+                && let Some(meow_paw::app::ProxyProbeStatus::Measured(ms)) = status
+            {
+                delays.insert(target.name.as_str(), Some(*ms));
+            }
+        }
+        std::borrow::Cow::Owned(delays)
+    } else {
+        std::borrow::Cow::Borrowed(history_delays)
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn route_delay(delays: &RouteDelayMap<'_>, name: &str) -> Option<u32> {
+    delays.get(name).copied().flatten()
 }
 
 #[cfg(any(target_os = "linux", windows))]
 fn sort_route_members(
     members: &mut [(usize, &str)],
     order: ProxyOrder,
-    history_delays: &std::collections::HashMap<&str, Option<u16>>,
-    inventory: &meow_paw::engine::controller::Inventory,
-    comparison: Option<&meow_paw::app::GroupProbeResults>,
+    delays: &RouteDelayMap<'_>,
 ) {
     match order {
         ProxyOrder::Configured => {}
         ProxyOrder::Delay => {
-            if let Some(comparison) = comparison {
-                // A comparison shares one URL and run; don't mix unrelated history.
-                let mut delays = std::collections::HashMap::new();
-                for (target, status) in comparison.rows() {
-                    if meow_paw::app::unique_proxy(inventory, &target.name).as_ref()
-                        == Some(&target.origin)
-                        && let Some(meow_paw::app::ProxyProbeStatus::Measured(ms)) = status
-                    {
-                        delays.insert(target.name.as_str(), *ms);
-                    }
-                }
-                members.sort_by_key(|(index, name)| {
-                    let delay = delays.get(name).copied();
-                    (delay.is_none(), delay, *index)
-                });
-            } else {
-                members.sort_by_key(|(index, name)| {
-                    let delay = history_delays.get(name).copied().flatten();
-                    (delay.is_none(), delay, *index)
-                });
-            }
+            members.sort_by_key(|(index, name)| {
+                let delay = route_delay(delays, name);
+                (delay.is_none(), delay, *index)
+            });
         }
         ProxyOrder::Name => {
             members.sort_by_cached_key(|(index, name)| (name.to_lowercase(), *index))
@@ -5804,7 +5815,7 @@ mod tests {
         let names = ["Zulu", "Bravo", "alpha", "zulu", "Ambiguous", "Unknown"].map(str::to_owned);
         let order = |mode| {
             let mut visible = unique_route_members(&names);
-            sort_route_members(&mut visible, mode, &delays, &inventory, None);
+            sort_route_members(&mut visible, mode, &delays);
             visible
         };
         let default = ProxyOrder::default();
@@ -5848,7 +5859,8 @@ mod tests {
     #[cfg(any(target_os = "linux", windows))]
     fn proxy_order_uses_only_current_comparable_direct_nodes() {
         use super::{
-            ProxyOrder, sort_route_members, unambiguous_route_delays, unique_route_members,
+            ProxyOrder, route_delays, sort_route_members, unambiguous_route_delays,
+            unique_route_members,
         };
         use meow_paw::app::{GroupProbeResults, ProxyProbeStatus, ProxyProbeTarget};
         use meow_paw::engine::controller::{Inventory, Node, Origin, Proxy};
@@ -5909,7 +5921,8 @@ mod tests {
         let history_delays = unambiguous_route_delays(&inventory);
         let sorted = |order, comparison| {
             let mut members = unique_route_members(&names);
-            sort_route_members(&mut members, order, &history_delays, &inventory, comparison);
+            let delays = route_delays(order, &history_delays, &inventory, comparison);
+            sort_route_members(&mut members, order, &delays);
             members
                 .into_iter()
                 .map(|(_, name)| name)
@@ -5930,6 +5943,91 @@ mod tests {
         assert_eq!(
             sorted(ProxyOrder::Name, Some(&results)),
             ["A", "Ambiguous", "B", "Changed", "Nested", "Tie", "Unknown"]
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn latency_cards_and_order_share_the_selected_delay_source() {
+        use super::{
+            ProxyOrder, route_delay, route_delays, sort_route_members, unambiguous_route_delays,
+            unique_route_members,
+        };
+        use meow_paw::app::{GroupProbeResults, ProxyProbeStatus, ProxyProbeTarget};
+        use meow_paw::engine::controller::{Inventory, Node, Origin};
+
+        let nodes = [("A", 5), ("B", 90), ("C", 30)];
+        let inventory = Inventory {
+            nodes: nodes
+                .into_iter()
+                .map(|(name, delay)| Node {
+                    name: name.into(),
+                    origin: Origin::Local,
+                    proxy: serde_json::from_value(serde_json::json!({
+                        "history": [{"delay": delay}]
+                    }))
+                    .unwrap(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let targets: Vec<_> = ["A", "B", "C"]
+            .into_iter()
+            .map(|name| ProxyProbeTarget {
+                name: name.into(),
+                origin: Origin::Local,
+            })
+            .collect();
+        let mut comparison = GroupProbeResults::new(
+            7,
+            1,
+            url::Url::parse("https://example.com/").unwrap(),
+            targets.clone(),
+        )
+        .unwrap();
+        for (index, status) in [
+            ProxyProbeStatus::Measured(70),
+            ProxyProbeStatus::Measured(10),
+            ProxyProbeStatus::Unavailable,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(comparison.begin(index));
+            assert!(comparison.finish(7, 1, index, &targets[index], status));
+        }
+
+        let history = unambiguous_route_delays(&inventory);
+        let names = ["A", "B", "C"].map(str::to_owned);
+        let check = |order, comparison, expected| {
+            let delays = route_delays(order, &history, &inventory, comparison);
+            let mut members = unique_route_members(&names);
+            sort_route_members(&mut members, order, &delays);
+            let cards: Vec<_> = members
+                .iter()
+                .map(|(_, name)| (*name, route_delay(&delays, name)))
+                .collect();
+            assert_eq!(cards, expected);
+        };
+        check(
+            ProxyOrder::Delay,
+            Some(&comparison),
+            vec![("B", Some(10)), ("A", Some(70)), ("C", None)],
+        );
+        check(
+            ProxyOrder::Delay,
+            None,
+            vec![("A", Some(5)), ("C", Some(30)), ("B", Some(90))],
+        );
+        check(
+            ProxyOrder::Configured,
+            Some(&comparison),
+            vec![("A", Some(5)), ("B", Some(90)), ("C", Some(30))],
+        );
+        check(
+            ProxyOrder::Name,
+            Some(&comparison),
+            vec![("A", Some(5)), ("B", Some(90)), ("C", Some(30))],
         );
     }
 
