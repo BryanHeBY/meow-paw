@@ -32,6 +32,7 @@ pub struct Session {
     directory: TempDir,
     controller_addr: SocketAddrV4,
     secret: String,
+    https_policy_supported: bool,
 }
 
 impl Session {
@@ -57,20 +58,28 @@ impl Session {
                 let _ = write!(hex, "{byte:02x}");
                 hex
             });
+        let https_policy_supported = Self::detect_https_policy(
+            &binary,
+            directory.path(),
+            controller_addr,
+            mixed_port,
+            &secret,
+            &cancelled,
+        )?;
         let candidate = profile
-            .managed_with_https(controller_addr, mixed_port, &secret, true)
+            .managed_with_https(controller_addr, mixed_port, &secret, https_policy_supported)
             .map_err(Error::other)?;
         fs::write(&config, candidate)?;
-        let args = [
+        let mut args = vec![
             OsStr::new("--no-external-plugins"),
-            // Old engines must fail closed at preflight rather than silently
-            // downloading provider credentials over an unguarded transport.
-            OsStr::new("--providers-require-https"),
             OsStr::new("-d"),
             directory.path().as_os_str(),
             OsStr::new("-f"),
             config.as_os_str(),
         ];
+        if https_policy_supported {
+            args.push(OsStr::new("--providers-require-https"));
+        }
         if cancelled() {
             return Err(Error::from(ErrorKind::Interrupted));
         }
@@ -138,12 +147,63 @@ impl Session {
             directory,
             controller_addr,
             secret,
+            https_policy_supported,
         })
+    }
+
+    fn detect_https_policy(
+        binary: &Path,
+        directory: &Path,
+        controller: SocketAddrV4,
+        mixed_port: u16,
+        secret: &str,
+        cancelled: &impl Fn() -> bool,
+    ) -> io::Result<bool> {
+        // A network-free known-good probe cannot leak profile contents, and
+        // recognizes older Meow builds by their rejecting the new CLI flag.
+        let source = "mode: direct\nrules: ['MATCH,DIRECT']\n";
+        let probe = Profile::parse(source)
+            .map_err(Error::other)?
+            .managed(controller, mixed_port, secret)
+            .map_err(Error::other)?;
+        let mut file = tempfile::Builder::new()
+            .prefix("capability-")
+            .suffix(".yaml")
+            .tempfile_in(directory)?;
+        file.write_all(probe.as_bytes())?;
+        let args = [
+            OsStr::new("--no-external-plugins"),
+            OsStr::new("--providers-require-https"),
+            OsStr::new("-d"),
+            directory.as_os_str(),
+            OsStr::new("-f"),
+            file.path().as_os_str(),
+            OsStr::new("-t"),
+        ];
+        let mut process = OwnedChild::spawn(binary, directory, &args)?;
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            if cancelled() {
+                return Err(Error::from(ErrorKind::Interrupted));
+            }
+            if let Some(status) = process.try_wait()? {
+                return Ok(status.success());
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            thread::sleep(Duration::from_millis(30));
+        }
     }
 
     pub(crate) fn apply_profile(&self, profile: &Profile) -> Result<(), ApplyError> {
         let prepared = profile
-            .managed_with_https(self.controller_addr, self.mixed_port, &self.secret, true)
+            .managed_with_https(
+                self.controller_addr,
+                self.mixed_port,
+                &self.secret,
+                self.https_policy_supported,
+            )
             .map_err(Error::other)
             .map_err(ApplyError::Prepare)?;
         let mut staging = tempfile::Builder::new()

@@ -188,13 +188,14 @@ impl ProfileInput {
     }
 
     fn load(&self) -> io::Result<Profile> {
-        match self {
+        let profile = match self {
             Self::Local(path) => load_profile(path),
             Self::Subscription { store, id } => {
                 let record = store.read(*id)?;
                 Profile::parse(record.yaml()).map_err(Error::other)
             }
-        }
+        }?;
+        Ok(profile.with_cache_scope(&self.key()))
     }
 }
 

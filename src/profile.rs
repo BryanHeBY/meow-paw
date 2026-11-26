@@ -45,6 +45,7 @@ impl Error for ProfileError {}
 
 pub struct Profile {
     root: Map<String, Value>,
+    cache_scope: Option<Vec<u8>>,
 }
 
 impl Profile {
@@ -58,9 +59,18 @@ impl Profile {
         match serde_saphyr::from_str_with_options::<Value>(source, options)
             .map_err(|_| ProfileError::InvalidYaml)?
         {
-            Value::Object(root) => Ok(Self { root }),
+            Value::Object(root) => Ok(Self {
+                root,
+                cache_scope: None,
+            }),
             _ => Err(ProfileError::InvalidDocument),
         }
+    }
+
+    /// Identify a saved document independently of its changing contents.
+    pub(crate) fn with_cache_scope(mut self, path: &std::path::Path) -> Self {
+        self.cache_scope = Some(path.as_os_str().as_encoded_bytes().to_vec());
+        self
     }
 
     pub(crate) fn has_subscription_content(&self) -> bool {
@@ -111,14 +121,6 @@ impl Profile {
         mixed_port: u16,
         secret: &str,
     ) -> Result<String, ProfileError> {
-        if !controller.ip().is_loopback()
-            || controller.port() == 0
-            || mixed_port == 0
-            || mixed_port == controller.port()
-            || secret.is_empty()
-        {
-            return Err(ProfileError::InvalidSettings);
-        }
         self.managed_with_https(controller, mixed_port, secret, false)
     }
 
@@ -159,9 +161,17 @@ impl Profile {
         }
         // Inline and guarded HTTPS providers are allowed. File providers stay
         // disabled and remote cache paths are always owned by Paw.
-        // Identical full profiles retain cache identity on Apply. Any source
-        // change gets a different private cache namespace within this session.
-        let identity = Sha256::digest(serde_json::to_vec(&root).map_err(|_| ProfileError::Encode)?);
+        // Anonymous callers conservatively use content identity. Saved
+        // documents retain identity through updates and across hot switches.
+        let fallback;
+        let scope = match self.cache_scope.as_deref() {
+            Some(scope) => scope,
+            None => {
+                fallback = serde_json::to_vec(&root).map_err(|_| ProfileError::Encode)?;
+                &fallback
+            }
+        };
+        let identity = Sha256::digest(scope);
         allow_providers(&mut root, "proxy-providers", true, allow_https, &identity)?;
         allow_providers(&mut root, "rule-providers", false, allow_https, &identity)?;
         for key in [
@@ -257,6 +267,12 @@ fn allow_providers(
             digest.update(name.as_bytes());
             digest.update([0]);
             digest.update(url.as_str().as_bytes());
+            // Fetch-affecting fields distinguish sources; user path and
+            // refresh cadence do not.
+            let mut source = provider.clone();
+            source.remove("path");
+            source.remove("interval");
+            digest.update(serde_json::to_vec(&source).map_err(|_| ProfileError::Encode)?);
             let cache = digest.finalize().iter().fold(String::new(), |mut text, b| {
                 use std::fmt::Write as _;
                 let _ = write!(text, "{b:02x}");
@@ -289,7 +305,9 @@ mod tests {
     fn managed_https_providers_use_private_stable_scoped_caches() {
         let source = "proxy-providers: {same: {type: http, url: 'https://example.test/feed?secret=private'}}\nrule-providers: {same: {type: http, url: 'https://example.test/feed?secret=private', behavior: domain}}\n";
         let build = |input: &str| {
-            let profile = Profile::parse(input).unwrap();
+            let profile = Profile::parse(input)
+                .unwrap()
+                .with_cache_scope(std::path::Path::new("/saved/one.json"));
             let rendered = profile
                 .managed_with_https("127.0.0.1:19200".parse().unwrap(), 19201, "test", true)
                 .unwrap();
@@ -306,6 +324,20 @@ mod tests {
         assert_ne!(
             p,
             build(&source.replace("secret=private", "secret=changed"))["proxy-providers"]["same"]["path"]
+        );
+        assert_eq!(
+            p,
+            build(&(source.to_owned() + "mode: direct\nrules: ['MATCH,DIRECT']\n"))["proxy-providers"]
+                ["same"]["path"]
+        );
+        let another = Profile::parse(source)
+            .unwrap()
+            .with_cache_scope(std::path::Path::new("/saved/two.json"))
+            .managed_with_https("127.0.0.1:19200".parse().unwrap(), 19201, "test", true)
+            .unwrap();
+        assert_ne!(
+            p,
+            Profile::parse(&another).unwrap().root["proxy-providers"]["same"]["path"]
         );
         for bad in [
             "proxy-providers: {p: {type: http, url: 'http://example.test/feed'}}",

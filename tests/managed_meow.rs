@@ -357,3 +357,81 @@ fn isolated_session_loads_inline_proxy_and_rule_providers() {
     assert_eq!(rules[0].payload, "Domains");
     assert_eq!(rules[0].proxy, "Select");
 }
+
+#[test]
+#[ignore = "requires new MEOW_BIN and previous MEOW_OLD_BIN"]
+fn provider_policy_is_compatible_with_older_engines_without_unsafe_fallback() {
+    let new = PathBuf::from(std::env::var_os("MEOW_BIN").unwrap());
+    let old = PathBuf::from(std::env::var_os("MEOW_OLD_BIN").unwrap());
+    let local = Profile::parse("mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
+    Session::launch(&old, &local, || false)
+        .unwrap()
+        .stop()
+        .unwrap();
+    Session::launch(&new, &local, || false)
+        .unwrap()
+        .stop()
+        .unwrap();
+    let remote = Profile::parse(
+        "mode: direct\nproxy-providers: {P: {type: http, url: 'https://127.0.0.1:9/nodes', path: /tmp/unsafe.yaml}}\nrules: ['MATCH,DIRECT']\n",
+    ).unwrap();
+    let error = match Session::launch(&old, &remote, || false) {
+        Ok(_) => panic!("old engine must reject HTTPS provider profiles"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("not supported"));
+    // No server listens at this endpoint. A new engine may start with an
+    // initially empty provider, but it must not fall back to an old engine.
+    let session = Session::launch(&new, &remote, || false).unwrap();
+    session.stop().unwrap();
+}
+
+#[test]
+#[ignore = "requires patched MEOW_BIN"]
+fn slow_provider_does_not_block_guarded_engine_startup() {
+    use std::time::Instant;
+    let binary = PathBuf::from(std::env::var_os("MEOW_BIN").unwrap());
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (seen, connected) = mpsc::channel();
+    let (stop, finish) = mpsc::channel();
+    let server = thread::spawn(move || {
+        loop {
+            if finish.try_recv().is_ok() {
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = seen.send(());
+                    // Stall TLS without using the host network or touching routes.
+                    let _stream = stream;
+                    let _ = finish.recv_timeout(Duration::from_secs(8));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+    let profile = Profile::parse(&format!(
+        "mode: direct\nproxy-providers: {{P: {{type: http, url: 'https://{address}/nodes'}}}}\nrules: ['MATCH,DIRECT']\n"
+    )).unwrap();
+    let start = Instant::now();
+    let session = Session::launch(&binary, &profile, || false).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(5));
+    connected.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(
+        session
+            .controller
+            .inventory()
+            .unwrap()
+            .providers
+            .contains_key("P")
+    );
+    session.stop().unwrap();
+    let _ = stop.send(());
+    server.join().unwrap();
+}
