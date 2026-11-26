@@ -799,14 +799,16 @@ impl Paw {
 
     fn overview_profile_label(&self) -> String {
         #[cfg(any(target_os = "linux", windows))]
-        if self.state().2.is_some()
-            && let Some(path) = &self.snapshot.profile
-        {
-            return path
-                .file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy()
-                .into_owned();
+        if self.state().2.is_some() {
+            return self.snapshot.profile.as_ref().map_or_else(
+                || "Unconfirmed live profile".into(),
+                |path| {
+                    path.file_name()
+                        .unwrap_or(path.as_os_str())
+                        .to_string_lossy()
+                        .into_owned()
+                },
+            );
         }
         self.profile_label()
     }
@@ -856,6 +858,14 @@ impl Paw {
                     self.state().2.is_some() && self.snapshot.profile.as_ref() == Some(profile);
                 #[cfg(not(any(target_os = "linux", windows)))]
                 let active = false;
+                #[cfg(any(target_os = "linux", windows))]
+                let (live, applying) = (
+                    self.state().2.is_some(),
+                    self.snapshot.applying_profile.as_ref(),
+                );
+                #[cfg(not(any(target_os = "linux", windows)))]
+                let (live, applying): (bool, Option<&PathBuf>) = (false, None);
+                let apply_path = profile.clone();
                 let use_path = profile.clone();
                 let forget_path = profile.clone();
                 let name = profile
@@ -886,6 +896,23 @@ impl Paw {
                     .when(next && !active, |el| {
                         el.child(chip("Next session", BLUE, SOFT_BLUE))
                     })
+                    .when(applying == Some(profile), |el| {
+                        el.child(chip("Applying…", BLUE, SOFT_BLUE))
+                    })
+                    .when(live && applying.is_none(), |el| {
+                        el.child(
+                            secondary_button(
+                                ("profile-apply", index),
+                                if active { "Reload" } else { "Apply live" },
+                            )
+                            .on_click(cx.listener(
+                                move |paw, _, _, cx| {
+                                    paw.apply_local_profile(apply_path.clone());
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                    })
                     .when(!next, |el| {
                         el.child(secondary_button(("profile-use", index), "Use").on_click(
                             cx.listener(move |paw, _, _, cx| {
@@ -895,7 +922,9 @@ impl Paw {
                         ))
                     })
                     .when(
-                        !active && self.preferences.profiles().contains(profile),
+                        !active
+                            && applying != Some(profile)
+                            && self.preferences.profiles().contains(profile),
                         |el| {
                             el.child(
                                 secondary_button(("profile-forget", index), "Forget").on_click(
@@ -975,6 +1004,18 @@ impl Paw {
             }
         })
         .detach();
+    }
+
+    fn apply_local_profile(&mut self, path: PathBuf) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(desktop) = &self.desktop {
+            self.error = desktop
+                .apply_profile(path)
+                .err()
+                .map(|error| error.to_string());
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let _ = path;
     }
 
     fn select_local_profile(&mut self, path: PathBuf) {

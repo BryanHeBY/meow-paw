@@ -1,10 +1,13 @@
 //! Shared lifecycle for an isolated Meow instance owned by Paw.
-use crate::{engine::controller::Controller, profile::Profile};
+use crate::{
+    engine::controller::{Controller, ControllerError},
+    profile::Profile,
+};
 use std::{
     ffi::OsStr,
     fmt::Write as _,
     fs,
-    io::{self, Error, ErrorKind},
+    io::{self, Error, ErrorKind, Write as _},
     net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
     path::Path,
     process::ExitStatus,
@@ -26,7 +29,9 @@ pub struct Session {
     pub controller: Controller,
     pub mixed_port: u16,
     process: OwnedChild,
-    _directory: TempDir,
+    directory: TempDir,
+    controller_addr: SocketAddrV4,
+    secret: String,
 }
 
 impl Session {
@@ -94,7 +99,8 @@ impl Session {
         drop(control_slot);
         drop(mixed_slot);
         let mut process = OwnedChild::spawn(&binary, directory.path(), &args)?;
-        let controller = Controller::new(controller_addr.into(), secret).map_err(Error::other)?;
+        let controller =
+            Controller::new(controller_addr.into(), secret.clone()).map_err(Error::other)?;
         let deadline = Instant::now() + Duration::from_secs(6);
         loop {
             if cancelled() {
@@ -126,8 +132,28 @@ impl Session {
             controller,
             mixed_port,
             process,
-            _directory: directory,
+            directory,
+            controller_addr,
+            secret,
         })
+    }
+
+    pub(crate) fn apply_profile(&self, profile: &Profile) -> Result<(), ApplyError> {
+        let prepared = profile
+            .managed(self.controller_addr, self.mixed_port, &self.secret)
+            .map_err(Error::other)
+            .map_err(ApplyError::Prepare)?;
+        let mut staging = tempfile::Builder::new()
+            .prefix("apply-")
+            .suffix(".yaml")
+            .tempfile_in(self.directory.path())
+            .map_err(ApplyError::Prepare)?;
+        staging
+            .write_all(prepared.as_bytes())
+            .map_err(ApplyError::Prepare)?;
+        self.controller
+            .reload_config(staging.path())
+            .map_err(ApplyError::Reload)
     }
 
     pub fn status(&mut self) -> io::Result<Option<ExitStatus>> {
@@ -136,5 +162,27 @@ impl Session {
 
     pub fn stop(mut self) -> io::Result<()> {
         self.process.stop()
+    }
+}
+
+pub(crate) enum ApplyError {
+    Prepare(io::Error),
+    Reload(ControllerError),
+}
+
+impl ApplyError {
+    pub(crate) fn rejected(&self) -> bool {
+        matches!(
+            self,
+            Self::Prepare(_) | Self::Reload(ControllerError::Status(400..=499))
+        )
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Prepare(error) => error.to_string(),
+            Self::Reload(error) if self.rejected() => format!("Meow rejected the profile: {error}"),
+            Self::Reload(_) => "Meow did not confirm the change. Apply a profile again to confirm which configuration is running.".into(),
+        }
     }
 }

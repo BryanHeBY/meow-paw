@@ -151,3 +151,73 @@ fn closes_only_the_selected_loopback_connection() {
     assert_eq!(&marker, b"P");
     assert_eq!(session.controller.connections().unwrap().len(), 1);
 }
+
+#[test]
+#[ignore = "requires a local Meow binary: MEOW_BIN=/path/to/meow"]
+fn applies_local_profile_without_rebinding_and_preserves_it_on_rejection() {
+    use meow_paw::app::{Desktop, EngineStatus, Snapshot};
+    use std::{fs, time::Instant};
+
+    fn wait(desktop: &Desktop, check: impl Fn(&Snapshot) -> bool) -> Snapshot {
+        let deadline = Instant::now() + Duration::from_secs(25);
+        loop {
+            let snapshot = desktop.snapshot();
+            assert!(
+                !matches!(snapshot.engine, EngineStatus::Error(_)),
+                "{:?}",
+                snapshot.engine
+            );
+            if check(&snapshot) {
+                return snapshot;
+            }
+            assert!(Instant::now() < deadline, "Timed out: {snapshot:?}");
+            thread::sleep(Duration::from_millis(60));
+        }
+    }
+
+    let desktop = Desktop::new(PathBuf::from(std::env::var_os("MEOW_BIN").unwrap())).unwrap();
+    let fixtures = tempfile::tempdir().unwrap();
+    let original = fixtures.path().join("original.yaml");
+    let candidate = fixtures.path().join("candidate.yaml");
+    let rejected = fixtures.path().join("rejected.yaml");
+    let original_yaml = "mode: rule\nrules: ['MATCH,DIRECT']\n";
+    let candidate_yaml = "mode: global\nrules: ['MATCH,REJECT']\n";
+    fs::write(&original, original_yaml).unwrap();
+    fs::write(&candidate, candidate_yaml).unwrap();
+    // The Paw parser accepts this mapping; the Meow reload API rejects the typed field.
+    fs::write(&rejected, "mode: direct\nlog-level: [bad, shape]\n").unwrap();
+    desktop.start(original.clone()).unwrap();
+    let starting = wait(&desktop, |s| {
+        matches!(s.engine, EngineStatus::Running { .. })
+    });
+    let EngineStatus::Running { mixed_port } = starting.engine else {
+        unreachable!()
+    };
+
+    desktop.apply_profile(candidate.clone()).unwrap();
+    let applied = wait(&desktop, |s| s.profile.as_ref() == Some(&candidate));
+    assert!(
+        matches!(applied.engine, EngineStatus::Running { mixed_port: port } if port == mixed_port)
+    );
+    assert_eq!(applied.mode, Some(RoutingMode::Global));
+    desktop.read_rules().unwrap();
+    let rules = wait(&desktop, |s| s.rules.is_some()).rules.unwrap();
+    assert_eq!(rules[0].proxy, "REJECT");
+
+    desktop.apply_profile(rejected).unwrap();
+    let rejected = wait(&desktop, |s| s.action_error.is_some());
+    assert!(
+        rejected
+            .action_error
+            .as_deref()
+            .unwrap()
+            .starts_with("Meow rejected")
+    );
+    assert_eq!(rejected.profile.as_ref(), Some(&candidate));
+    assert_eq!(rejected.mode, Some(RoutingMode::Global));
+    assert!(
+        matches!(rejected.engine, EngineStatus::Running { mixed_port: port } if port == mixed_port)
+    );
+    assert_eq!(fs::read_to_string(original).unwrap(), original_yaml);
+    assert_eq!(fs::read_to_string(candidate).unwrap(), candidate_yaml);
+}

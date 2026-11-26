@@ -251,6 +251,24 @@ impl Controller {
         Ok(())
     }
 
+    pub(crate) fn reload_config(&self, path: &std::path::Path) -> Result<(), ControllerError> {
+        let path = path.to_str().ok_or(ControllerError::InvalidResponse)?;
+        let url = self.endpoint(&["configs"]);
+        let reply = self
+            .agent
+            .put(url.as_str())
+            .config()
+            .timeout_global(Some(Duration::from_secs(12)))
+            .build()
+            .header("Authorization", format!("Bearer {}", self.secret))
+            .send_json(serde_json::json!({"path": path}))
+            .map_err(http_error)?;
+        if reply.status().as_u16() != 204 {
+            return Err(ControllerError::Status(reply.status().as_u16()));
+        }
+        Ok(())
+    }
+
     pub fn delay(&self, origin: &Origin, name: &str, probe: &Url) -> Result<u32, ControllerError> {
         #[derive(Deserialize)]
         struct Delay {

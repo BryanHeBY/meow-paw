@@ -3,7 +3,7 @@
 use crate::{
     engine::{
         controller::{Connection, Inventory, LogEntry, RoutingMode, Rule, Traffic},
-        session::Session,
+        session::{ApplyError, Session},
     },
     profile::{Diagnostic, MAX_PROFILE_BYTES, Profile},
 };
@@ -84,6 +84,7 @@ pub struct Snapshot {
     pub revision: u64,
     pub engine: EngineStatus,
     pub profile: Option<PathBuf>,
+    pub applying_profile: Option<PathBuf>,
     pub diagnostics: Vec<Diagnostic>,
     pub inventory: Option<Arc<Inventory>>,
     pub mode: Option<RoutingMode>,
@@ -171,6 +172,7 @@ impl Drop for LogWorker {
 
 enum Command {
     Start(PathBuf),
+    ApplyProfile(PathBuf),
     Select { group: String, member: String },
     SetMode(RoutingMode),
     ReadRules,
@@ -214,6 +216,10 @@ impl Desktop {
 
     pub fn start(&self, path: PathBuf) -> io::Result<()> {
         self.send(Command::Start(path))
+    }
+
+    pub fn apply_profile(&self, path: PathBuf) -> io::Result<()> {
+        self.send(Command::ApplyProfile(path))
     }
 
     pub fn select(&self, group: String, member: String) -> io::Result<()> {
@@ -358,6 +364,50 @@ fn run(
                         s.engine = EngineStatus::Error(error.to_string())
                     }),
                 }
+            }
+            Ok(Command::ApplyProfile(path)) => {
+                let Some(active) = &session else {
+                    change(snapshot, |s| {
+                        s.action_error = Some("Start Meow before applying a live profile".into())
+                    });
+                    continue;
+                };
+                change(snapshot, |s| {
+                    s.applying_profile = Some(path.clone());
+                    s.action_error = None;
+                    s.diagnostics.clear();
+                });
+                let result = load_profile(&path)
+                    .map_err(ApplyError::Prepare)
+                    .and_then(|profile| {
+                        change(snapshot, |s| s.diagnostics = profile.diagnostics());
+                        active.apply_profile(&profile)
+                    });
+                let mode = if result.is_ok() && !cancelled() {
+                    active.controller.mode().ok()
+                } else {
+                    None
+                };
+                change(snapshot, |s| {
+                    s.applying_profile = None;
+                    match result {
+                        Ok(()) => {
+                            s.profile = Some(path);
+                            s.mode = mode;
+                            s.inventory = None;
+                            s.rules = None;
+                        }
+                        Err(error) => {
+                            if !error.rejected() {
+                                s.profile = None;
+                                s.mode = None;
+                                s.rules = None;
+                            }
+                            s.action_error = Some(error.message());
+                        }
+                    }
+                });
+                next_sample = Instant::now();
             }
             Ok(Command::Select { group, member }) => {
                 if let Some(active) = &session {
