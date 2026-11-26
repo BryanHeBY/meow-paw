@@ -150,6 +150,12 @@ pub enum Message {
     SubscriptionReadFailed,
     SubscriptionRefreshSaveFailed,
     ActiveConnections,
+    ActiveTab,
+    ClosedTab,
+    NoClosedConnections,
+    NoClosedConnectionsDetail,
+    LiveConnectionsUnavailable,
+    LiveConnectionsUnavailableDetail,
     NoActiveConnections,
     ListenerConnectionsDetail,
     NoMatchingConnections,
@@ -237,6 +243,24 @@ impl Locale {
         match self {
             Self::En => format!("{matched} of {total} active"),
             Self::ZhCn => format!("{total} 个活动连接中匹配 {matched} 个"),
+        }
+    }
+
+    pub fn closed_connection_count(self, matched: usize, total: usize, filtered: bool) -> String {
+        match (self, filtered) {
+            (Self::En, false) => format!("{total} closed"),
+            (Self::En, true) => format!("{matched} of {total} closed"),
+            (Self::ZhCn, false) => format!("{total} 个已关闭连接"),
+            (Self::ZhCn, true) => format!("{total} 个已关闭连接中匹配 {matched} 个"),
+        }
+    }
+
+    pub fn closed_connection_history_detail(self, limit: usize) -> String {
+        match self {
+            Self::En => {
+                format!("Read-only · Last {limit} closed connections in the current session.")
+            }
+            Self::ZhCn => format!("只读 · 当前会话最近关闭的 {limit} 个连接。"),
         }
     }
 
@@ -467,6 +491,14 @@ fn english(key: Message) -> &'static str {
         Message::SubscriptionReadFailed => "Could not read the saved subscription",
         Message::SubscriptionRefreshSaveFailed => "Could not save the refreshed subscription",
         Message::ActiveConnections => "active",
+        Message::ActiveTab => "Active",
+        Message::ClosedTab => "Closed",
+        Message::NoClosedConnections => "No closed connections recorded",
+        Message::NoClosedConnectionsDetail => {
+            "Connections observed closing in this session appear here."
+        }
+        Message::LiveConnectionsUnavailable => "Live connections unavailable",
+        Message::LiveConnectionsUnavailableDetail => "Waiting for a live connection sample.",
         Message::NoActiveConnections => "No active connections",
         Message::ListenerConnectionsDetail => "Traffic handled by the Paw listener appears here.",
         Message::NoMatchingConnections => "No matching connections",
@@ -667,6 +699,12 @@ fn chinese(key: Message) -> &'static str {
         Message::SubscriptionReadFailed => "无法读取已保存的订阅",
         Message::SubscriptionRefreshSaveFailed => "无法保存刷新后的订阅",
         Message::ActiveConnections => "个活动连接",
+        Message::ActiveTab => "活动",
+        Message::ClosedTab => "已关闭",
+        Message::NoClosedConnections => "尚无已记录的关闭连接",
+        Message::NoClosedConnectionsDetail => "当前会话中观察到关闭的连接会显示在这里。",
+        Message::LiveConnectionsUnavailable => "无法获取实时连接",
+        Message::LiveConnectionsUnavailableDetail => "正在等待实时连接数据。",
         Message::NoActiveConnections => "暂无活动连接",
         Message::ListenerConnectionsDetail => "由 Paw 监听器处理的流量会显示在这里。",
         Message::NoMatchingConnections => "没有匹配的连接",
@@ -946,6 +984,31 @@ mod tests {
         assert_eq!(
             Locale::ZhCn.visible_log_count(2, 3),
             "保留 3 条日志，显示 2 条"
+        );
+    }
+
+    #[test]
+    fn closed_connection_counts_and_session_limit_are_localized() {
+        assert_eq!(Locale::En.closed_connection_count(2, 7, false), "7 closed");
+        assert_eq!(
+            Locale::En.closed_connection_count(2, 7, true),
+            "2 of 7 closed"
+        );
+        assert_eq!(
+            Locale::ZhCn.closed_connection_count(2, 7, false),
+            "7 个已关闭连接"
+        );
+        assert_eq!(
+            Locale::ZhCn.closed_connection_count(2, 7, true),
+            "7 个已关闭连接中匹配 2 个"
+        );
+        assert_eq!(
+            Locale::En.closed_connection_history_detail(100),
+            "Read-only · Last 100 closed connections in the current session."
+        );
+        assert_eq!(
+            Locale::ZhCn.closed_connection_history_detail(100),
+            "只读 · 当前会话最近关闭的 100 个连接。"
         );
     }
 
@@ -1251,6 +1314,28 @@ mod tests {
                 "无法保存刷新后的订阅",
             ),
             (Message::ActiveConnections, "active", "个活动连接"),
+            (Message::ActiveTab, "Active", "活动"),
+            (Message::ClosedTab, "Closed", "已关闭"),
+            (
+                Message::NoClosedConnections,
+                "No closed connections recorded",
+                "尚无已记录的关闭连接",
+            ),
+            (
+                Message::NoClosedConnectionsDetail,
+                "Connections observed closing in this session appear here.",
+                "当前会话中观察到关闭的连接会显示在这里。",
+            ),
+            (
+                Message::LiveConnectionsUnavailable,
+                "Live connections unavailable",
+                "无法获取实时连接",
+            ),
+            (
+                Message::LiveConnectionsUnavailableDetail,
+                "Waiting for a live connection sample.",
+                "正在等待实时连接数据。",
+            ),
             (
                 Message::NoActiveConnections,
                 "No active connections",

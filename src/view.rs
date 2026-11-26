@@ -267,6 +267,9 @@ pub struct Paw {
     rule_sets_read_focus: FocusHandle,
     rule_previous_focus: FocusHandle,
     rule_next_focus: FocusHandle,
+    closed_connections_open: bool,
+    active_connections_tab_focus: FocusHandle,
+    closed_connections_tab_focus: FocusHandle,
     connection_filter: Entity<InputState>,
     _connection_filter_changes: Subscription,
     log_filter: Entity<InputState>,
@@ -436,6 +439,9 @@ pub fn open(
             rule_sets_read_focus: cx.focus_handle(),
             rule_previous_focus: cx.focus_handle(),
             rule_next_focus: cx.focus_handle(),
+            closed_connections_open: false,
+            active_connections_tab_focus: cx.focus_handle(),
+            closed_connections_tab_focus: cx.focus_handle(),
             connection_filter,
             _connection_filter_changes: connection_filter_changes,
             log_filter,
@@ -3002,28 +3008,76 @@ impl Paw {
 
     fn connections(&self, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
-        if let Some(list) = self.snapshot.connections.as_ref() {
+        if matches!(
+            self.snapshot.engine,
+            meow_paw::app::EngineStatus::Running { .. }
+        ) {
+            let active_tab = subscription_button(
+                "connections-active-tab",
+                self.locale.message(Message::ActiveTab),
+                !self.closed_connections_open,
+                cx,
+            )
+            .toggled(!self.closed_connections_open)
+            .track_focus(&self.active_connections_tab_focus)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.active_connections_tab_focus.focus(window, cx);
+                this.closed_connections_open = false;
+                cx.notify();
+            }));
+            let closed_tab = subscription_button(
+                "connections-closed-tab",
+                self.locale.message(Message::ClosedTab),
+                self.closed_connections_open,
+                cx,
+            )
+            .toggled(self.closed_connections_open)
+            .track_focus(&self.closed_connections_tab_focus)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.closed_connections_tab_focus.focus(window, cx);
+                this.closed_connections_open = true;
+                cx.notify();
+            }));
+            let mut page = div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().flex().gap_2().child(active_tab).child(closed_tab));
+            if self.closed_connections_open {
+                page =
+                    page.child(div().text_sm().text_color(rgb(FAINT)).child(
+                        self.locale.closed_connection_history_detail(
+                            meow_paw::app::CLOSED_CONNECTION_LIMIT,
+                        ),
+                    ));
+            }
+            let rows: Vec<_> = if self.closed_connections_open {
+                self.snapshot.connection_history.recent().collect()
+            } else if let Some(list) = &self.snapshot.connections {
+                list.iter().collect()
+            } else {
+                return page.child(empty_state(
+                    self.locale.message(Message::LiveConnectionsUnavailable),
+                    self.locale
+                        .message(Message::LiveConnectionsUnavailableDetail),
+                ));
+            };
             let value = self.connection_filter.read(cx).value();
             let query = value.trim().to_lowercase();
-            let results = list
-                .iter()
-                .filter_map(|c| {
-                    let target = if c.metadata.host.is_empty() {
-                        &c.metadata.destination_ip
-                    } else {
-                        &c.metadata.host
-                    };
-                    let destination = destination_label(target, &c.metadata.destination_port);
-                    let route = c.chains.join(" / ");
-                    if !(route_matches(&destination, &query)
-                        || route_matches(&route, &query)
-                        || route_matches(&c.rule, &query))
-                    {
-                        return None;
-                    }
-                    Some((c, destination, route))
-                })
-                .collect::<Vec<_>>();
+            let results = matching_connections(rows.iter().copied(), &query);
+            let count = if self.closed_connections_open {
+                self.locale
+                    .closed_connection_count(results.len(), rows.len(), !query.is_empty())
+            } else if query.is_empty() {
+                format!(
+                    "{} {}",
+                    rows.len(),
+                    self.locale.message(Message::ActiveConnections)
+                )
+            } else {
+                self.locale
+                    .connection_match_count(results.len(), rows.len())
+            };
             let toolbar = div()
                 .flex()
                 .items_center()
@@ -3037,58 +3091,55 @@ impl Paw {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .child(Input::new(&self.connection_filter).cleanable(true)),
                 )
-                .child(chip(
-                    if query.is_empty() {
-                        format!(
-                            "{} {}",
-                            list.len(),
-                            self.locale.message(Message::ActiveConnections)
-                        )
-                    } else {
-                        self.locale
-                            .connection_match_count(results.len(), list.len())
-                    },
-                    BLUE,
-                    SOFT_BLUE,
-                ));
+                .child(chip(count, BLUE, SOFT_BLUE));
             let table = if results.is_empty() {
-                let (title, detail) = connection_empty_messages(list.len());
+                let (title, detail) =
+                    connection_empty_messages(self.closed_connections_open, rows.len());
                 empty_state(self.locale.message(title), self.locale.message(detail))
             } else {
                 card()
                     .p_0()
                     .child(
-                        active_connection_row(
+                        connection_row(
                             section_label(self.locale.message(Message::DestinationColumn)),
                             section_label(self.locale.message(Message::RouteColumn)),
                             section_label(self.locale.message(Message::RuleColumn)),
-                            div(),
+                            None,
+                            !self.closed_connections_open,
                         )
                         .bg(rgb(CHROME)),
                     )
                     .children(results.into_iter().map(|(c, destination, route)| {
-                        let key = c.id.clone();
-                        let close = div()
-                            .id(SharedString::from(format!("connection-close:{key}")))
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_xs()
-                            .text_color(rgb(BLUE))
-                            .hover(|s| s.bg(rgb(SOFT_BLUE)))
-                            .child(self.locale.message(Message::CloseConnection))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.error = this
-                                    .desktop
-                                    .as_ref()
-                                    .and_then(|d| d.close_connection(key.clone()).err())
-                                    .map(|err| err.to_string());
-                                cx.notify();
-                            }));
-                        active_connection_row(
+                        let close = if self.closed_connections_open {
+                            None
+                        } else {
+                            let key = c.id.clone();
+                            Some(
+                                div()
+                                    .id(SharedString::from(format!("connection-close:{key}")))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(rgb(BLUE))
+                                    .hover(|s| s.bg(rgb(SOFT_BLUE)))
+                                    .child(self.locale.message(Message::CloseConnection))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.error = this
+                                            .desktop
+                                            .as_ref()
+                                            .and_then(|d| d.close_connection(key.clone()).err())
+                                            .map(|err| err.to_string());
+                                        cx.notify();
+                                    }))
+                                    .into_any_element(),
+                            )
+                        };
+                        connection_row(
                             div().font_weight(FontWeight::MEDIUM).child(destination),
                             div().child(if route.is_empty() {
                                 "—".into()
@@ -3101,10 +3152,11 @@ impl Paw {
                                 c.rule.clone()
                             }),
                             close,
+                            !self.closed_connections_open,
                         )
                     }))
             };
-            return div().flex().flex_col().gap_3().child(toolbar).child(table);
+            return page.child(toolbar).child(table);
         }
         let _ = cx;
         empty_state(
@@ -3832,12 +3884,41 @@ fn route_matches(name: &str, normalized_query: &str) -> bool {
 }
 
 #[cfg(any(target_os = "linux", windows))]
-fn connection_empty_messages(total: usize) -> (Message, Message) {
+fn matching_connections<'a>(
+    connections: impl Iterator<Item = &'a meow_paw::engine::controller::Connection>,
+    query: &str,
+) -> Vec<(&'a meow_paw::engine::controller::Connection, String, String)> {
+    connections
+        .filter_map(|c| {
+            let target = if c.metadata.host.is_empty() {
+                &c.metadata.destination_ip
+            } else {
+                &c.metadata.host
+            };
+            let destination = destination_label(target, &c.metadata.destination_port);
+            let route = c.chains.join(" / ");
+            (route_matches(&destination, query)
+                || route_matches(&route, query)
+                || route_matches(&c.rule, query))
+            .then_some((c, destination, route))
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn connection_empty_messages(closed: bool, total: usize) -> (Message, Message) {
     if total == 0 {
-        (
-            Message::NoActiveConnections,
-            Message::ListenerConnectionsDetail,
-        )
+        if closed {
+            (
+                Message::NoClosedConnections,
+                Message::NoClosedConnectionsDetail,
+            )
+        } else {
+            (
+                Message::NoActiveConnections,
+                Message::ListenerConnectionsDetail,
+            )
+        }
     } else {
         (
             Message::NoMatchingConnections,
@@ -3847,7 +3928,7 @@ fn connection_empty_messages(total: usize) -> (Message, Message) {
 }
 
 #[cfg(any(target_os = "linux", windows))]
-fn active_connection_row(a: Div, b: Div, c: Div, action: impl IntoElement) -> Div {
+fn connection_row(a: Div, b: Div, c: Div, action: Option<AnyElement>, has_action: bool) -> Div {
     div()
         .flex()
         .gap_3()
@@ -3860,7 +3941,9 @@ fn active_connection_row(a: Div, b: Div, c: Div, action: impl IntoElement) -> Di
         .child(a.flex_1().min_w_0())
         .child(b.flex_1().min_w_0().text_color(rgb(FAINT)))
         .child(c.flex_1().min_w_0().text_color(rgb(FAINT)))
-        .child(div().w(px(54.)).flex_shrink_0().child(action))
+        .when(has_action, |row| {
+            row.child(div().w(px(54.)).flex_shrink_0().children(action))
+        })
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -4297,19 +4380,73 @@ mod tests {
     fn connection_empty_state_distinguishes_no_traffic_from_no_matches() {
         use super::{Message, connection_empty_messages};
         assert_eq!(
-            connection_empty_messages(0),
+            connection_empty_messages(false, 0),
             (
                 Message::NoActiveConnections,
                 Message::ListenerConnectionsDetail
             )
         );
         assert_eq!(
-            connection_empty_messages(3),
+            connection_empty_messages(true, 0),
+            (
+                Message::NoClosedConnections,
+                Message::NoClosedConnectionsDetail
+            )
+        );
+        assert_eq!(
+            connection_empty_messages(true, 3),
             (
                 Message::NoMatchingConnections,
                 Message::ConnectionFilterDetail
             )
         );
+        assert_eq!(
+            connection_empty_messages(false, 3),
+            (
+                Message::NoMatchingConnections,
+                Message::ConnectionFilterDetail
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn connection_filter_matches_destination_route_and_rule_for_any_pane() {
+        use super::matching_connections;
+        use meow_paw::engine::controller::{Connection, Metadata};
+        use serde_json::json;
+
+        let rows = [
+            Connection {
+                metadata: Metadata {
+                    host: "Example.Test".into(),
+                    destination_ip: "192.0.2.1".into(),
+                    destination_port: json!(443),
+                    ..Default::default()
+                },
+                chains: vec!["Proxy".into(), "出口".into()],
+                rule: "Domain-Suffix".into(),
+                ..Default::default()
+            },
+            Connection {
+                metadata: Metadata {
+                    destination_ip: "2001:db8::1".into(),
+                    destination_port: json!(80),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ];
+        for query in ["example.test:443", "proxy / 出口", "domain-suffix"] {
+            assert_eq!(matching_connections(rows.iter(), query).len(), 1);
+        }
+        assert_eq!(
+            matching_connections(rows.iter(), "[2001:db8::1]:80").len(),
+            1
+        );
+        assert!(matching_connections(rows.iter(), "192.0.2.1").is_empty());
+        assert!(matching_connections(rows.iter(), "missing").is_empty());
+        assert_eq!(matching_connections(rows.iter(), "").len(), 2);
     }
 
     #[test]

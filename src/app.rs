@@ -83,6 +83,47 @@ impl TrafficHistory {
     }
 }
 
+pub const CLOSED_CONNECTION_LIMIT: usize = 100;
+
+/// Closed connections observed in the current profile generation, in memory only.
+#[derive(Clone, Debug, Default)]
+pub struct ConnectionHistory {
+    previous: Option<Arc<Vec<Connection>>>,
+    closed: Arc<VecDeque<Connection>>,
+}
+
+impl ConnectionHistory {
+    /// Returns the last observed metadata for closed connections, newest first.
+    /// Closures detected in the same sample are ordered by descending ID.
+    pub fn recent(&self) -> impl ExactSizeIterator<Item = &Connection> + '_ {
+        self.closed.iter().rev()
+    }
+
+    fn record(&mut self, sample: Option<&Arc<Vec<Connection>>>) {
+        let Some(sample) = sample else { return };
+        if let Some(previous) = &self.previous {
+            let live: BTreeSet<_> = sample.iter().map(|c| c.id.as_str()).collect();
+            // A duplicate ID represents one connection; its last row wins.
+            let mut disappeared = BTreeMap::new();
+            for connection in previous.iter() {
+                if !connection.id.is_empty() && !live.contains(connection.id.as_str()) {
+                    disappeared.insert(connection.id.as_str(), connection);
+                }
+            }
+            if !disappeared.is_empty() {
+                let closed = Arc::make_mut(&mut self.closed);
+                for connection in disappeared.into_values() {
+                    if closed.len() == CLOSED_CONNECTION_LIMIT {
+                        closed.pop_front();
+                    }
+                    closed.push_back(connection.clone());
+                }
+            }
+        }
+        self.previous = Some(Arc::clone(sample));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxyProbeTarget {
     pub name: String,
@@ -342,6 +383,7 @@ pub struct Snapshot {
     pub traffic: Option<Traffic>,
     pub traffic_history: TrafficHistory,
     pub connections: Option<Arc<Vec<Connection>>>,
+    pub connection_history: ConnectionHistory,
     pub last_update: Option<Instant>,
     pub action_error: Option<String>,
     pub refreshing_provider: Option<String>,
@@ -777,6 +819,7 @@ fn run(
                     s.probes = ProxyProbeResults::default();
                     s.group_probe = None;
                     clear_rule_provider_state(s);
+                    clear_connection_history(s);
                     s.profile = Some(path.clone());
                     s.diagnostics.clear();
                     s.action_error = None;
@@ -820,6 +863,7 @@ fn run(
                     s.probe_epoch = generation;
                     s.probes = ProxyProbeResults::default();
                     s.group_probe = None;
+                    clear_connection_history(s);
                 });
                 let path = input.key();
                 let Some(active) = &session else {
@@ -1191,6 +1235,7 @@ fn run(
                 );
                 // A temporary controller failure must not erase the last good list.
                 retain_inventory(s, inventory);
+                s.connection_history.record(connections.as_ref());
                 s.connections = connections;
                 s.traffic = traffic;
             });
@@ -1203,6 +1248,10 @@ fn retain_inventory(snapshot: &mut Snapshot, fresh: Option<Arc<Inventory>>) {
     if fresh.is_some() {
         snapshot.inventory = fresh;
     }
+}
+
+fn clear_connection_history(snapshot: &mut Snapshot) {
+    snapshot.connection_history = ConnectionHistory::default();
 }
 
 fn clear_rule_provider_state(snapshot: &mut Snapshot) {
@@ -1337,6 +1386,7 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64) {
         clear_rule_provider_state(s);
         s.logs = None;
         s.connections = None;
+        clear_connection_history(s);
         s.traffic = None;
         s.traffic_history = TrafficHistory::default();
         s.last_update = None;
@@ -1366,6 +1416,144 @@ fn load_profile(path: &std::path::Path) -> io::Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn connection(id: &str, host: &str) -> Connection {
+        Connection {
+            id: id.into(),
+            metadata: crate::engine::controller::Metadata {
+                host: host.into(),
+                ..Default::default()
+            },
+            chains: vec!["proxy".into()],
+            rule: "rule".into(),
+            ..Default::default()
+        }
+    }
+
+    fn connection_sample(history: &mut ConnectionHistory, rows: Vec<Connection>) {
+        history.record(Some(&Arc::new(rows)));
+    }
+
+    #[test]
+    fn connection_history_uses_last_successful_sample_and_metadata() {
+        let mut history = ConnectionHistory::default();
+        connection_sample(
+            &mut history,
+            vec![connection("a", "old"), connection("b", "b")],
+        );
+        history.record(None);
+        assert_eq!(history.recent().len(), 0);
+        connection_sample(
+            &mut history,
+            vec![connection("a", "latest"), connection("b", "b")],
+        );
+        connection_sample(&mut history, vec![connection("b", "b")]);
+        let closed = history.recent().collect::<Vec<_>>();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].id, "a");
+        assert_eq!(closed[0].metadata.host, "latest");
+        assert_eq!(closed[0].chains, ["proxy"]);
+        assert_eq!(closed[0].rule, "rule");
+        connection_sample(&mut history, vec![connection("b", "b")]);
+        assert_eq!(history.recent().len(), 1);
+        connection_sample(&mut history, vec![]);
+        assert_eq!(
+            history.recent().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["b", "a"]
+        );
+    }
+
+    #[test]
+    fn connection_history_deduplicates_ids_and_allows_reuse() {
+        let mut history = ConnectionHistory::default();
+        connection_sample(
+            &mut history,
+            vec![
+                connection("", "unknown"),
+                connection("a", "first"),
+                connection("a", "last"),
+                connection("b", "b"),
+            ],
+        );
+        connection_sample(
+            &mut history,
+            vec![connection("b", "first"), connection("b", "last")],
+        );
+        assert_eq!(
+            history
+                .recent()
+                .map(|c| (&*c.id, &*c.metadata.host))
+                .collect::<Vec<_>>(),
+            [("a", "last")]
+        );
+        connection_sample(&mut history, vec![connection("a", "reused")]);
+        connection_sample(&mut history, vec![]);
+        assert_eq!(
+            history
+                .recent()
+                .map(|c| (&*c.id, &*c.metadata.host))
+                .collect::<Vec<_>>(),
+            [("a", "reused"), ("b", "last"), ("a", "last")]
+        );
+    }
+
+    #[test]
+    fn connection_history_is_bounded_and_has_deterministic_batch_order() {
+        let mut history = ConnectionHistory::default();
+        connection_sample(
+            &mut history,
+            (0..103)
+                .rev()
+                .map(|i| connection(&format!("{i:03}"), "host"))
+                .collect(),
+        );
+        connection_sample(&mut history, vec![]);
+        let ids = history.recent().map(|c| c.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids.len(), CLOSED_CONNECTION_LIMIT);
+        assert_eq!(ids[0], "102");
+        assert_eq!(ids[99], "003");
+    }
+
+    #[test]
+    fn clearing_telemetry_discards_connection_history_and_baseline() {
+        let mut snapshot = Snapshot::default();
+        connection_sample(
+            &mut snapshot.connection_history,
+            vec![connection("closed", "c"), connection("live", "l")],
+        );
+        connection_sample(
+            &mut snapshot.connection_history,
+            vec![connection("live", "l")],
+        );
+        snapshot.connections = Some(Arc::new(vec![connection("live", "l")]));
+        let snapshot = Mutex::new(snapshot);
+        clear_telemetry(&snapshot, 2);
+        let mut snapshot = snapshot.lock().unwrap();
+        assert!(snapshot.connections.is_none());
+        assert_eq!(snapshot.connection_history.recent().len(), 0);
+        connection_sample(&mut snapshot.connection_history, vec![]);
+        assert_eq!(snapshot.connection_history.recent().len(), 0);
+    }
+
+    #[test]
+    fn profile_generation_reset_discards_history_without_changing_active_list() {
+        let mut snapshot = Snapshot::default();
+        connection_sample(
+            &mut snapshot.connection_history,
+            vec![connection("old", "old"), connection("live", "live")],
+        );
+        connection_sample(
+            &mut snapshot.connection_history,
+            vec![connection("live", "live")],
+        );
+        let active = Arc::new(vec![connection("live", "live")]);
+        snapshot.connections = Some(Arc::clone(&active));
+        clear_connection_history(&mut snapshot);
+        assert!(Arc::ptr_eq(snapshot.connections.as_ref().unwrap(), &active));
+        assert_eq!(snapshot.connection_history.recent().len(), 0);
+        connection_sample(&mut snapshot.connection_history, vec![]);
+        assert_eq!(snapshot.connection_history.recent().len(), 0);
+    }
 
     #[test]
     fn rule_provider_reads_keep_unknown_empty_errors_and_sessions_distinct() {
