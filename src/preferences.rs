@@ -6,12 +6,14 @@ use std::{
 };
 
 const LIMIT: u64 = 64 * 1024;
+const PROFILE_LIMIT: usize = 32;
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Selections {
     engine: Option<PathBuf>,
     profile: Option<PathBuf>,
+    profiles: Vec<PathBuf>,
 }
 
 #[derive(Default)]
@@ -53,11 +55,12 @@ impl Preferences {
                         "Preferences exceed size limit",
                     ));
                 }
-                let value: Selections = serde_json::from_slice(&raw)?;
+                let mut value: Selections = serde_json::from_slice(&raw)?;
                 if value
                     .engine
                     .iter()
                     .chain(&value.profile)
+                    .chain(&value.profiles)
                     .any(|p| !p.is_absolute())
                 {
                     return Err(io::Error::new(
@@ -65,6 +68,14 @@ impl Preferences {
                         "Saved paths must be absolute",
                     ));
                 }
+                if let Some(path) = value.profile.as_ref()
+                    && !value.profiles.contains(path)
+                {
+                    value.profiles.push(path.clone());
+                }
+                let mut seen = std::collections::HashSet::new();
+                value.profiles.retain(|path| seen.insert(path.clone()));
+                value.profiles.truncate(PROFILE_LIMIT);
                 value
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Selections::default(),
@@ -87,21 +98,43 @@ impl Preferences {
         )
     }
 
+    pub fn profiles(&self) -> &[PathBuf] {
+        &self.selected.profiles
+    }
+
     pub fn remember(&mut self, engine: bool, path: &Path) -> io::Result<()> {
-        let Some(file) = self.file.as_ref() else {
-            return Ok(());
-        };
         let path = std::path::absolute(path)?;
-        let next = if engine {
-            Selections {
-                engine: Some(path),
-                profile: self.selected.profile.clone(),
-            }
+        let mut next = self.selected.clone();
+        if engine {
+            next.engine = Some(path);
         } else {
-            Selections {
-                engine: self.selected.engine.clone(),
-                profile: Some(path),
+            if !next.profiles.contains(&path) {
+                if next.profiles.len() >= PROFILE_LIMIT {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Profile list is full",
+                    ));
+                }
+                next.profiles.push(path.clone());
             }
+            next.profile = Some(path);
+        }
+        self.persist(next)
+    }
+
+    pub fn forget_profile(&mut self, path: &Path) -> io::Result<()> {
+        let mut next = self.selected.clone();
+        next.profiles.retain(|candidate| candidate != path);
+        if next.profile.as_deref() == Some(path) {
+            next.profile = None;
+        }
+        self.persist(next)
+    }
+
+    fn persist(&mut self, next: Selections) -> io::Result<()> {
+        let Some(file) = self.file.as_ref() else {
+            self.selected = next;
+            return Ok(());
         };
         let raw = serde_json::to_vec_pretty(&next)?;
         if raw.len() as u64 > LIMIT {
@@ -172,6 +205,30 @@ mod tests {
             Preferences::open(choices).unwrap().resolve(None, None),
             (Some(engine), Some(second))
         );
+    }
+
+    #[test]
+    fn migrates_legacy_profile_and_forgets_only_the_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let first = root.path().join("first.yaml");
+        let second = root.path().join("second.yaml");
+        fs::write(&first, "mode: rule").unwrap();
+        fs::write(
+            &file,
+            serde_json::to_vec(&serde_json::json!({"profile": first})).unwrap(),
+        )
+        .unwrap();
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        assert_eq!(prefs.profiles(), std::slice::from_ref(&first));
+        prefs.remember(false, &second).unwrap();
+        prefs.remember(false, &first).unwrap();
+        assert_eq!(prefs.profiles(), &[first.clone(), second.clone()]);
+        prefs.forget_profile(&first).unwrap();
+        assert_eq!(fs::read_to_string(first).unwrap(), "mode: rule");
+        let reopened = Preferences::open(file).unwrap();
+        assert_eq!(reopened.profiles(), &[second]);
+        assert_eq!(reopened.resolve(None, None), (None, None));
     }
 
     #[test]

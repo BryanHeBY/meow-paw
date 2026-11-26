@@ -812,7 +812,6 @@ impl Paw {
     }
 
     fn profiles(&self, cx: &mut Context<Self>) -> Div {
-        let name = self.profile_label();
         let path = self.profile.as_ref().map_or_else(
             || "No local YAML selected".into(),
             |p| p.display().to_string(),
@@ -839,21 +838,85 @@ impl Paw {
                     .child(path),
             )
             .child(div().flex_shrink_0().child(browse));
-        let box_ = card()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .child(
-                div()
-                    .min_w_0()
-                    .child(div().font_weight(FontWeight::BOLD).child(name))
-                    .child(div().mt_1().text_sm().text_color(rgb(FAINT)).child(
-                        "Paw uses a separate session copy and leaves the source file untouched.",
-                    )),
-            )
-            .child(chip("Local", BLUE, SOFT_BLUE));
-        let page = div().flex().flex_col().gap_3().child(import).child(box_);
+        let selected = self.profile.as_ref();
+        let mut profiles = self.preferences.profiles().iter().collect::<Vec<_>>();
+        if let Some(path) = selected
+            && !profiles.contains(&path)
+        {
+            profiles.insert(0, path);
+        }
+        let mut page = div().flex().flex_col().gap_3().child(import);
+        if profiles.is_empty() {
+            page = page.child(empty_state("No local profiles", "Import a YAML file. Paw prepares a separate session copy and leaves your file unchanged."));
+        } else {
+            page = page.children(profiles.into_iter().enumerate().map(|(index, profile)| {
+                let next = selected == Some(profile);
+                #[cfg(any(target_os = "linux", windows))]
+                let active =
+                    self.state().2.is_some() && self.snapshot.profile.as_ref() == Some(profile);
+                #[cfg(not(any(target_os = "linux", windows)))]
+                let active = false;
+                let use_path = profile.clone();
+                let forget_path = profile.clone();
+                let name = profile
+                    .file_name()
+                    .unwrap_or(profile.as_os_str())
+                    .to_string_lossy()
+                    .into_owned();
+                card()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .child(div().font_weight(FontWeight::BOLD).child(name))
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(rgb(FAINT))
+                                    .truncate()
+                                    .child(profile.display().to_string()),
+                            ),
+                    )
+                    .when(active, |el| el.child(chip("Running", 0x168460, 0xe2f6ec)))
+                    .when(next && !active, |el| {
+                        el.child(chip("Next session", BLUE, SOFT_BLUE))
+                    })
+                    .when(!next, |el| {
+                        el.child(secondary_button(("profile-use", index), "Use").on_click(
+                            cx.listener(move |paw, _, _, cx| {
+                                paw.select_local_profile(use_path.clone());
+                                cx.notify();
+                            }),
+                        ))
+                    })
+                    .when(
+                        !active && self.preferences.profiles().contains(profile),
+                        |el| {
+                            el.child(
+                                secondary_button(("profile-forget", index), "Forget").on_click(
+                                    cx.listener(move |paw, _, _, cx| {
+                                        match paw.preferences.forget_profile(&forget_path) {
+                                            Ok(()) => {
+                                                if paw.profile.as_ref() == Some(&forget_path) {
+                                                    paw.profile = None;
+                                                }
+                                                paw.error = None;
+                                            }
+                                            Err(error) => paw.error = Some(error.to_string()),
+                                        }
+                                        cx.notify();
+                                    }),
+                                ),
+                            )
+                        },
+                    )
+            }));
+        }
         #[cfg(any(target_os = "linux", windows))]
         if !self.snapshot.diagnostics.is_empty() {
             return page.child(
@@ -904,18 +967,25 @@ impl Paw {
                 let _ = weak.update(cx, |paw: &mut Paw, cx| {
                     if binary {
                         paw.choose_binary(path);
-                    } else if path.is_file() {
-                        paw.remember_selection(false, &path);
-                        paw.profile = Some(path);
-                        paw.error = None;
                     } else {
-                        paw.error = Some("Choose an existing local YAML file.".into());
+                        paw.select_local_profile(path);
                     }
                     cx.notify();
                 });
             }
         })
         .detach();
+    }
+
+    fn select_local_profile(&mut self, path: PathBuf) {
+        if !path.is_file() {
+            self.error = Some("Choose an existing local YAML file.".into());
+            return;
+        }
+        let path = std::path::absolute(&path).unwrap_or(path);
+        self.remember_selection(false, &path);
+        self.profile = Some(path);
+        self.error = None;
     }
 
     fn proxies(&self, cx: &mut Context<Self>) -> Div {
@@ -1012,7 +1082,7 @@ impl Paw {
                                             .child("This group has no candidate routes."),
                                     );
                                 }
-                                panel.child(div().flex().flex_col().gap_2().children(
+                                let candidates = div().flex().flex_col().gap_2().children(
                                     members.chunks(2).map(|pair| {
                                         let row = div().flex().gap_2().children(pair.iter().map(
                                             |&(index, member)| {
@@ -1081,7 +1151,19 @@ impl Paw {
                                             el.child(div().flex_1().min_w_0())
                                         })
                                     }),
-                                ))
+                                );
+                                if expandable && query.is_empty() {
+                                    panel.child(
+                                        candidates.with_animation(
+                                            SharedString::from(format!("expand:{name}")),
+                                            Animation::new(Duration::from_millis(150))
+                                                .with_easing(|t| 1. - (1. - t).powi(3)),
+                                            |view, delta| view.opacity(0.76 + 0.24 * delta),
+                                        ),
+                                    )
+                                } else {
+                                    panel.child(candidates)
+                                }
                             }),
                     )
                 })
@@ -1517,7 +1599,7 @@ fn line_icon(path: &'static str, color: u32, side: f32) -> impl IntoElement {
         .flex_shrink_0()
 }
 
-fn secondary_button(id: &'static str, label: &'static str) -> Stateful<Div> {
+fn secondary_button(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
     div()
         .id(id)
         .rounded_md()
@@ -1606,6 +1688,23 @@ fn route_matches(name: &str, normalized_query: &str) -> bool {
 }
 
 #[cfg(any(target_os = "linux", windows))]
+fn active_connection_row(a: Div, b: Div, c: Div, action: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .gap_3()
+        .items_center()
+        .px_4()
+        .py_3()
+        .border_b_1()
+        .border_color(rgb(LINE))
+        .text_sm()
+        .child(a.flex_1().min_w_0())
+        .child(b.flex_1().min_w_0().text_color(rgb(FAINT)))
+        .child(c.flex_1().min_w_0().text_color(rgb(FAINT)))
+        .child(div().w(px(54.)).flex_shrink_0().child(action))
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn connection_row(destination: Div, route: Div, rule: Div) -> Div {
     div()
         .flex()
@@ -1687,23 +1786,6 @@ fn bytes(value: u64) -> String {
         amount /= 1024.;
     }
     unreachable!()
-#[cfg(any(target_os = "linux", windows))]
-fn active_connection_row(a: Div, b: Div, c: Div, action: impl IntoElement) -> Div {
-    div()
-        .flex()
-        .gap_3()
-        .items_center()
-        .px_4()
-        .py_3()
-        .border_b_1()
-        .border_color(rgb(LINE))
-        .text_sm()
-        .child(a.flex_1().min_w_0())
-        .child(b.flex_1().min_w_0().text_color(rgb(FAINT)))
-        .child(c.flex_1().min_w_0().text_color(rgb(FAINT)))
-        .child(div().w(px(54.)).flex_shrink_0().child(action))
-}
-
 }
 
 fn paw_badge(size: f32) -> Div {
