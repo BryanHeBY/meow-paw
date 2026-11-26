@@ -93,6 +93,55 @@ pub enum ProxyProbeStatus {
     Unavailable,
 }
 
+const PROBE_RESULT_LIMIT: usize = 128;
+
+#[derive(Clone, Debug, Default)]
+pub struct ProxyProbeResults {
+    url: Option<url::Url>,
+    running: Option<ProxyProbeTarget>,
+    settled: Arc<VecDeque<(ProxyProbeTarget, ProxyProbeStatus)>>,
+}
+
+impl ProxyProbeResults {
+    pub fn is_running(&self) -> bool {
+        self.running.is_some()
+    }
+
+    pub fn status(&self, url: &url::Url, target: &ProxyProbeTarget) -> Option<ProxyProbeStatus> {
+        if self.url.as_ref() != Some(url) {
+            return None;
+        }
+        if self.running.as_ref() == Some(target) {
+            return Some(ProxyProbeStatus::Running);
+        }
+        self.settled
+            .iter()
+            .find(|(key, _)| key == target)
+            .map(|(_, status)| status.clone())
+    }
+
+    fn begin(&mut self, url: url::Url, target: ProxyProbeTarget) {
+        if self.url.as_ref() != Some(&url) {
+            self.url = Some(url);
+            self.settled = Arc::default();
+        }
+        self.running = Some(target);
+    }
+
+    fn finish(&mut self, target: ProxyProbeTarget, status: ProxyProbeStatus) {
+        if self.running.as_ref() != Some(&target) {
+            return;
+        }
+        self.running = None;
+        let rows = Arc::make_mut(&mut self.settled);
+        rows.retain(|(key, _)| key != &target);
+        if rows.len() >= PROBE_RESULT_LIMIT {
+            rows.pop_front();
+        }
+        rows.push_back((target, status));
+    }
+}
+
 pub fn parse_probe_url(value: &str) -> Option<url::Url> {
     let value = value.trim();
     let (scheme, remainder) = value.split_once("://")?;
@@ -139,7 +188,7 @@ pub struct Snapshot {
     pub refreshing_provider: Option<String>,
     pub provider_error: Option<String>,
     pub probe_epoch: u64,
-    pub probe: Option<(ProxyProbeTarget, ProxyProbeStatus)>,
+    pub probes: ProxyProbeResults,
 }
 
 const LOG_CAPACITY: usize = 256;
@@ -459,7 +508,7 @@ fn run(
                 change(snapshot, |s| {
                     s.engine = EngineStatus::Starting;
                     s.probe_epoch = generation;
-                    s.probe = None;
+                    s.probes = ProxyProbeResults::default();
                     s.profile = Some(path.clone());
                     s.diagnostics.clear();
                     s.action_error = None;
@@ -500,7 +549,7 @@ fn run(
                     s.refreshing_provider = None;
                     s.provider_error = None;
                     s.probe_epoch = generation;
-                    s.probe = None;
+                    s.probes = ProxyProbeResults::default();
                 });
                 let path = input.key();
                 let Some(active) = &session else {
@@ -641,9 +690,7 @@ fn run(
                     let controller = active.controller.clone();
                     let tx = probe_tx.clone();
                     let requested = target.clone();
-                    change(snapshot, |s| {
-                        s.probe = Some((target.clone(), ProxyProbeStatus::Running))
-                    });
+                    change(snapshot, |s| s.probes.begin(url.clone(), target.clone()));
                     probe_inflight = true;
                     if thread::Builder::new()
                         .name("paw-proxy-probe".into())
@@ -659,7 +706,7 @@ fn run(
                     {
                         probe_inflight = false;
                         change(snapshot, |s| {
-                            s.probe = Some((target, ProxyProbeStatus::Unavailable))
+                            s.probes.finish(target, ProxyProbeStatus::Unavailable)
                         });
                     }
                 }
@@ -765,17 +812,15 @@ fn finish_proxy_probe(
     target: ProxyProbeTarget,
     status: ProxyProbeStatus,
 ) {
-    if epoch == snapshot.probe_epoch
-        && snapshot.probe.as_ref() == Some(&(target.clone(), ProxyProbeStatus::Running))
-    {
-        snapshot.probe = Some((target, status));
+    if epoch == snapshot.probe_epoch {
+        snapshot.probes.finish(target, status);
     }
 }
 
 fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64) {
     change(snapshot, |s| {
         s.probe_epoch = generation;
-        s.probe = None;
+        s.probes = ProxyProbeResults::default();
         s.inventory = None;
         s.refreshing_provider = None;
         s.provider_error = None;
@@ -834,15 +879,61 @@ mod tests {
             origin,
             name: "Example".into(),
         };
+        let url = parse_probe_url("https://example.invalid/ping").unwrap();
         let mut s = Snapshot {
             probe_epoch: 12,
-            probe: Some((target.clone(), ProxyProbeStatus::Running)),
             ..Default::default()
         };
+        s.probes.begin(url.clone(), target.clone());
         finish_proxy_probe(&mut s, 11, target.clone(), ProxyProbeStatus::Measured(10));
-        assert_eq!(s.probe, Some((target.clone(), ProxyProbeStatus::Running)));
+        assert_eq!(
+            s.probes.status(&url, &target),
+            Some(ProxyProbeStatus::Running)
+        );
         finish_proxy_probe(&mut s, 12, target.clone(), ProxyProbeStatus::Measured(20));
-        assert_eq!(s.probe, Some((target, ProxyProbeStatus::Measured(20))));
+        assert_eq!(
+            s.probes.status(&url, &target),
+            Some(ProxyProbeStatus::Measured(20))
+        );
+    }
+
+    #[test]
+    fn probe_results_are_bounded_by_recency_and_bound_to_the_test_url() {
+        let first_url = parse_probe_url("https://example.invalid/a").unwrap();
+        let second_url = parse_probe_url("https://example.invalid/b").unwrap();
+        let target = |i: usize| ProxyProbeTarget {
+            name: format!("Node {i}"),
+            origin: Origin::Provider("Provider".into()),
+        };
+        let mut results = ProxyProbeResults::default();
+        for i in 0..PROBE_RESULT_LIMIT {
+            results.begin(first_url.clone(), target(i));
+            results.finish(target(i), ProxyProbeStatus::Measured(20));
+        }
+        results.begin(first_url.clone(), target(0));
+        results.finish(target(0), ProxyProbeStatus::Unavailable);
+        results.begin(first_url.clone(), target(PROBE_RESULT_LIMIT));
+        assert!(results.is_running());
+        assert_eq!(
+            results.status(&first_url, &target(0)),
+            Some(ProxyProbeStatus::Unavailable)
+        );
+        assert_eq!(results.status(&second_url, &target(0)), None);
+        results.finish(target(PROBE_RESULT_LIMIT), ProxyProbeStatus::Measured(5));
+        assert!(!results.is_running());
+        assert_eq!(results.settled.len(), PROBE_RESULT_LIMIT);
+        assert_eq!(results.status(&first_url, &target(1)), None);
+        assert_eq!(
+            results.status(&first_url, &target(0)),
+            Some(ProxyProbeStatus::Unavailable)
+        );
+        results.begin(second_url.clone(), target(2));
+        assert_eq!(results.status(&first_url, &target(0)), None);
+        assert_eq!(results.status(&second_url, &target(0)), None);
+        assert_eq!(
+            results.status(&second_url, &target(2)),
+            Some(ProxyProbeStatus::Running)
+        );
     }
 
     #[test]

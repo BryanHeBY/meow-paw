@@ -1218,7 +1218,8 @@ impl Paw {
             let columns = route_columns(window_width);
             use meow_paw::app::{ProxyProbeStatus, ProxyProbeTarget, parse_probe_url};
             let delays = unambiguous_route_delays(inventory);
-            let probe_ready = parse_probe_url(&self.probe_url.read(cx).value()).is_some();
+            let probe_url = parse_probe_url(&self.probe_url.read(cx).value());
+            let probe_ready = probe_url.is_some();
             let mut probe_candidates = std::collections::HashMap::new();
             for node in &inventory.nodes {
                 probe_candidates
@@ -1226,7 +1227,7 @@ impl Paw {
                     .and_modify(|origin| *origin = None)
                     .or_insert(Some(&node.origin));
             }
-            let probe_busy = matches!(self.snapshot.probe, Some((_, ProxyProbeStatus::Running)));
+            let probe_busy = self.snapshot.probes.is_running();
             let epoch = self.snapshot.probe_epoch;
             let groups = mode_groups(inventory, self.snapshot.mode)
                 .into_iter()
@@ -1361,14 +1362,13 @@ impl Paw {
                                                         name: member.into(),
                                                         origin: origin.clone(),
                                                     });
-                                                let status_text = self
-                                                    .snapshot
-                                                    .probe
+                                                let status_text = target
                                                     .as_ref()
-                                                    .filter(|(tested, _)| {
-                                                        Some(tested) == target.as_ref()
+                                                    .zip(probe_url.as_ref())
+                                                    .and_then(|(target, url)| {
+                                                        self.snapshot.probes.status(url, target)
                                                     })
-                                                    .map(|(_, status)| match status {
+                                                    .map(|status| match status {
                                                         ProxyProbeStatus::Running => {
                                                             "Testing…".into()
                                                         }
