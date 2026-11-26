@@ -455,6 +455,33 @@ fn subscribe_probe_url(input: &Entity<InputState>, cx: &mut Context<Paw>) -> Sub
     })
 }
 
+#[cfg(any(target_os = "linux", windows))]
+fn register_page_filter_shortcut(
+    paw: WeakEntity<Paw>,
+    window: &Window,
+    cx: &mut App,
+) -> Subscription {
+    let window_id = window.window_handle().window_id();
+    // A Div action cannot receive a key when no element in the window
+    // has focus. Scope this interceptor to the originating window and
+    // keep it alive only as long as this view.
+    cx.intercept_keystrokes(move |event, window, cx| {
+        if window.window_handle().window_id() == window_id
+            && event.keystroke.key == "f"
+            && event.keystroke.modifiers
+                == (Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                })
+            && paw
+                .update(cx, |paw, cx| paw.focus_page_filter(window, cx))
+                .unwrap_or(false)
+        {
+            cx.stop_propagation();
+        }
+    })
+}
+
 pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let query = paw.read(cx).search.read(cx).value();
     let search = cx.new(|cx| InputState::new(window, cx).default_value(query));
@@ -471,6 +498,11 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let query = paw.read(cx).subscription_url.read(cx).value();
     let subscription_url = cx.new(|cx| InputState::new(window, cx).default_value(query));
     paw.update(cx, |state, cx| {
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            state._page_filter_shortcut =
+                register_page_filter_shortcut(cx.weak_entity(), window, cx);
+        }
         state._subscription_url_changes = subscribe_subscription_url(&subscription_url, cx);
         state.subscription_url = subscription_url;
         state.subscription_name = subscription_name;
@@ -518,32 +550,9 @@ pub fn open(
                 Ok(paths) => (paths, None),
                 Err(_) => (Vec::new(), Some(Message::ListSubscriptionsFailed)),
             });
-        #[cfg(any(target_os = "linux", windows))]
-        let page_filter_shortcut = {
-            let paw = cx.weak_entity();
-            let window_id = window.window_handle().window_id();
-            // A Div action cannot receive a key when no element in the window
-            // has focus. Scope this interceptor to the originating window and
-            // keep it alive only as long as this view.
-            cx.intercept_keystrokes(move |event, window, cx| {
-                if window.window_handle().window_id() == window_id
-                    && event.keystroke.key == "f"
-                    && event.keystroke.modifiers
-                        == (Modifiers {
-                            control: true,
-                            ..Modifiers::default()
-                        })
-                    && paw
-                        .update(cx, |paw, cx| paw.focus_page_filter(window, cx))
-                        .unwrap_or(false)
-                {
-                    cx.stop_propagation();
-                }
-            })
-        };
         let mut paw = Paw {
             #[cfg(any(target_os = "linux", windows))]
-            _page_filter_shortcut: page_filter_shortcut,
+            _page_filter_shortcut: register_page_filter_shortcut(cx.weak_entity(), window, cx),
             page,
             locale,
             profile,
