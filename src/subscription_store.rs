@@ -160,6 +160,33 @@ impl SubscriptionStore {
         self.write(id, &record, commit)
     }
 
+    pub fn ids(&self) -> io::Result<Vec<SubscriptionId>> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut ids = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_file()
+                && let Some(id) = self.id_for_record(&entry.path())
+            {
+                ids.push(id);
+            }
+        }
+        ids.sort_unstable_by_key(|id| id.0);
+        Ok(ids)
+    }
+
+    pub fn id_for_record(&self, path: &Path) -> Option<SubscriptionId> {
+        if path.parent() != Some(self.dir.as_path()) || path.extension()? != "json" {
+            return None;
+        }
+        let id = path.file_stem()?.to_str()?.parse().ok()?;
+        (self.record_path(id) == path).then_some(id)
+    }
+
     pub fn record_path(&self, id: SubscriptionId) -> PathBuf {
         self.dir.join(format!("{id}.json"))
     }

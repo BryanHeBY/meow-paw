@@ -98,6 +98,10 @@ impl Preferences {
         )
     }
 
+    pub fn subscription_dir(&self) -> Option<PathBuf> {
+        Some(self.file.as_ref()?.parent()?.join("subscriptions"))
+    }
+
     pub fn profiles(&self) -> &[PathBuf] {
         &self.selected.profiles
     }

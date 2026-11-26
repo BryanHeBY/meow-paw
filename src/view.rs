@@ -2,6 +2,8 @@ use crate::preferences::Preferences;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use meow_paw::subscription;
+use meow_paw::subscription_store::{RefreshPolicy, SubscriptionId, SubscriptionStore};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -76,6 +78,15 @@ impl Page {
     }
 }
 
+fn subscription_paths(dir: PathBuf) -> std::io::Result<Vec<PathBuf>> {
+    let store = SubscriptionStore::new(dir);
+    Ok(store
+        .ids()?
+        .into_iter()
+        .map(|id| store.record_path(id))
+        .collect())
+}
+
 pub struct Paw {
     page: Page,
     profile: Option<PathBuf>,
@@ -84,6 +95,9 @@ pub struct Paw {
     copied_listener: Option<u16>,
     show_usage: bool,
     preferences: Preferences,
+    subscription_paths: Vec<PathBuf>,
+    subscription_busy: bool,
+    subscription_notice: Option<&'static str>,
     preference_warning: Option<String>,
     search: Entity<InputState>,
     _search_changes: Subscription,
@@ -133,6 +147,13 @@ pub fn open(
     cx.new(|cx| {
         let search_changes = subscribe_search(&search, cx);
         let connection_filter_changes = subscribe_search(&connection_filter, cx);
+        let (subscription_paths, subscription_notice) = preferences
+            .subscription_dir()
+            .map(subscription_paths)
+            .map_or((Vec::new(), None), |result| match result {
+                Ok(paths) => (paths, None),
+                Err(_) => (Vec::new(), Some("Could not list saved subscriptions.")),
+            });
         let mut paw = Paw {
             page,
             profile,
@@ -147,6 +168,9 @@ pub fn open(
             copied_listener: None,
             show_usage: false,
             preferences,
+            subscription_paths,
+            subscription_busy: false,
+            subscription_notice,
             preference_warning: warning.map(str::to_owned),
             search,
             _search_changes: search_changes,
@@ -191,10 +215,15 @@ impl Paw {
                 return;
             };
             let Some(profile) = self.profile.clone() else {
-                self.error = Some("Choose a local YAML file in Profiles before starting.".into());
+                self.error = Some("Choose a profile in Profiles before starting.".into());
                 return;
             };
-            self.error = desktop.start(profile).err().map(|e| e.to_string());
+            let result = if let Some((store, id)) = self.subscription_for(&profile) {
+                desktop.start_subscription(store, id)
+            } else {
+                desktop.start(profile)
+            };
+            self.error = result.err().map(|e| e.to_string());
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         {
@@ -785,29 +814,29 @@ impl Paw {
         ("—".into(), "—".into(), "—".into())
     }
 
+    fn display_profile_name(&self, path: &std::path::Path) -> String {
+        if let Some((_, id)) = self.subscription_for(path) {
+            return format!("Subscription {}", &id.to_string()[..8]);
+        }
+        path.file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn profile_label(&self) -> String {
-        self.profile
-            .as_ref()
-            .map(|p| {
-                p.file_name()
-                    .unwrap_or(p.as_os_str())
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .unwrap_or_else(|| "No profile selected".into())
+        self.profile.as_deref().map_or_else(
+            || "No profile selected".into(),
+            |path| self.display_profile_name(path),
+        )
     }
 
     fn overview_profile_label(&self) -> String {
         #[cfg(any(target_os = "linux", windows))]
         if self.state().2.is_some() {
-            return self.snapshot.profile.as_ref().map_or_else(
+            return self.snapshot.profile.as_deref().map_or_else(
                 || "Unconfirmed live profile".into(),
-                |path| {
-                    path.file_name()
-                        .unwrap_or(path.as_os_str())
-                        .to_string_lossy()
-                        .into_owned()
-                },
+                |path| self.display_profile_name(path),
             );
         }
         self.profile_label()
@@ -815,8 +844,14 @@ impl Paw {
 
     fn profiles(&self, cx: &mut Context<Self>) -> Div {
         let path = self.profile.as_ref().map_or_else(
-            || "No local YAML selected".into(),
-            |p| p.display().to_string(),
+            || "No profile selected".into(),
+            |path| {
+                if self.subscription_for(path).is_some() {
+                    self.display_profile_name(path)
+                } else {
+                    path.display().to_string()
+                }
+            },
         );
         let browse = secondary_button("select-profile", "Import local YAML")
             .on_click(cx.listener(|this, _, _, cx| this.choose_file(false, cx)));
@@ -847,7 +882,30 @@ impl Paw {
         {
             profiles.insert(0, path);
         }
+        for path in &self.subscription_paths {
+            if !profiles.contains(&path) {
+                profiles.push(path);
+            }
+        }
         let mut page = div().flex().flex_col().gap_3().child(import);
+        if self.preferences.subscription_dir().is_some() && !self.subscription_busy {
+            page = page.child(
+                secondary_button(
+                    "import-subscription",
+                    "Import HTTPS subscription from clipboard",
+                )
+                .on_click(cx.listener(|paw, _, _, cx| paw.import_subscription(cx))),
+            );
+        }
+        if self.subscription_busy || self.subscription_notice.is_some() {
+            page = page.child(div().text_sm().text_color(rgb(FAINT)).child(
+                if self.subscription_busy {
+                    "Downloading subscription…"
+                } else {
+                    self.subscription_notice.unwrap_or_default()
+                },
+            ));
+        }
         if self.state().2.is_some() {
             page = page.child(div().text_sm().text_color(rgb(FAINT)).child(
                 "Apply live and Reload keep Meow running, but can disconnect active connections.",
@@ -873,11 +931,13 @@ impl Paw {
                 let apply_path = profile.clone();
                 let use_path = profile.clone();
                 let forget_path = profile.clone();
-                let name = profile
-                    .file_name()
-                    .unwrap_or(profile.as_os_str())
-                    .to_string_lossy()
-                    .into_owned();
+                let subscription = self.subscription_for(profile).map(|(_, id)| id);
+                let name = self.display_profile_name(profile);
+                let details = if subscription.is_some() {
+                    "HTTPS subscription · Refresh does not change the running profile".to_owned()
+                } else {
+                    profile.display().to_string()
+                };
                 card()
                     .flex()
                     .items_center()
@@ -894,7 +954,7 @@ impl Paw {
                                     .text_xs()
                                     .text_color(rgb(FAINT))
                                     .truncate()
-                                    .child(profile.display().to_string()),
+                                    .child(details),
                             ),
                     )
                     .when(active, |el| el.child(chip("Running", 0x168460, 0xe2f6ec)))
@@ -918,6 +978,18 @@ impl Paw {
                             )),
                         )
                     })
+                    .when_some(
+                        subscription.filter(|_| !self.subscription_busy),
+                        |el, id| {
+                            el.child(
+                                secondary_button(("profile-refresh", index), "Refresh").on_click(
+                                    cx.listener(move |paw, _, _, cx| {
+                                        paw.refresh_subscription(id, cx);
+                                    }),
+                                ),
+                            )
+                        },
+                    )
                     .when(!next, |el| {
                         el.child(secondary_button(("profile-use", index), "Use").on_click(
                             cx.listener(move |paw, _, _, cx| {
@@ -927,7 +999,8 @@ impl Paw {
                         ))
                     })
                     .when(
-                        !active
+                        subscription.is_none()
+                            && !active
                             && applying != Some(profile)
                             && self.preferences.profiles().contains(profile),
                         |el| {
@@ -1011,13 +1084,98 @@ impl Paw {
         .detach();
     }
 
+    fn subscription_for(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<(SubscriptionStore, SubscriptionId)> {
+        let store = SubscriptionStore::new(self.preferences.subscription_dir()?);
+        let id = store.id_for_record(path)?;
+        Some((store, id))
+    }
+
+    fn import_subscription(&mut self, cx: &mut Context<Self>) {
+        if self.subscription_busy {
+            return;
+        }
+        let Some(url) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            self.subscription_notice =
+                Some("Copy an HTTPS subscription URL to the clipboard first.");
+            cx.notify();
+            return;
+        };
+        self.subscription_job(cx, move |store| {
+            let candidate = subscription::fetch(&url).map_err(|err| err.to_string())?;
+            let id = store
+                .import(&url, candidate, RefreshPolicy::default())
+                .map_err(|_| "Could not save the subscription".to_owned())?;
+            Ok(Some(store.record_path(id)))
+        });
+    }
+
+    fn refresh_subscription(&mut self, id: SubscriptionId, cx: &mut Context<Self>) {
+        self.subscription_job(cx, move |store| {
+            let prior = store
+                .read(id)
+                .map_err(|_| "Could not read the saved subscription".to_owned())?;
+            let candidate = prior.fetch_latest().map_err(|err| err.to_string())?;
+            store
+                .refresh(id, candidate)
+                .map_err(|_| "Could not save the refreshed subscription".to_owned())?;
+            Ok(None)
+        });
+    }
+
+    fn subscription_job(
+        &mut self,
+        cx: &mut Context<Self>,
+        job: impl FnOnce(&mut SubscriptionStore) -> Result<Option<PathBuf>, String> + Send + 'static,
+    ) {
+        let Some(dir) = self.preferences.subscription_dir() else {
+            return;
+        };
+        if self.subscription_busy {
+            return;
+        }
+        self.subscription_busy = true;
+        self.subscription_notice = None;
+        self.error = None;
+        cx.notify();
+        cx.spawn(async move |weak, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { job(&mut SubscriptionStore::new(dir)) })
+                .await;
+            let _ = weak.update(cx, |paw, cx| {
+                paw.subscription_busy = false;
+                match result {
+                    Ok(Some(path)) => {
+                        if !paw.subscription_paths.contains(&path) {
+                            paw.subscription_paths.push(path);
+                        }
+                        paw.subscription_notice =
+                            Some("Subscription saved. Select Use or Apply live when ready.");
+                    }
+                    Ok(None) => {
+                        paw.subscription_notice =
+                            Some("Subscription refreshed. The running profile is unchanged.")
+                    }
+                    Err(error) => paw.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn apply_local_profile(&mut self, path: PathBuf) {
         #[cfg(any(target_os = "linux", windows))]
         if let Some(desktop) = &self.desktop {
-            self.error = desktop
-                .apply_profile(path)
-                .err()
-                .map(|error| error.to_string());
+            let result = if let Some((store, id)) = self.subscription_for(&path) {
+                desktop.apply_subscription(store, id)
+            } else {
+                desktop.apply_profile(path)
+            };
+            self.error = result.err().map(|error| error.to_string());
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         let _ = path;
