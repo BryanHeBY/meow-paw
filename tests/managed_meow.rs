@@ -96,3 +96,58 @@ fn isolated_session_proxies_loopback_traffic_and_cleans_up() {
     session.stop().unwrap();
     assert!(TcpStream::connect_timeout(&mixed.into(), Duration::from_millis(100)).is_err());
 }
+
+#[test]
+#[ignore = "requires a local Meow binary: MEOW_BIN=/path/to/meow"]
+fn closes_only_the_selected_loopback_connection() {
+    let binary = PathBuf::from(std::env::var_os("MEOW_BIN").expect("set MEOW_BIN"));
+    let profile = Profile::parse("mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
+    let session = Session::launch(&binary, &profile, || false).unwrap();
+    let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let endpoint = origin.local_addr().unwrap();
+    let mixed = (Ipv4Addr::LOCALHOST, session.mixed_port);
+
+    let tunnel = || {
+        let mut client = TcpStream::connect(mixed).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        write!(
+            client,
+            "CONNECT {endpoint} HTTP/1.1\r\nHost: {endpoint}\r\n\r\n"
+        )
+        .unwrap();
+        let (server, _) = origin.accept().unwrap();
+        let mut reply = Vec::new();
+        while !reply.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            client.read_exact(&mut byte).unwrap();
+            reply.push(byte[0]);
+        }
+        assert!(std::str::from_utf8(&reply).unwrap().contains(" 200 "));
+        (client, server)
+    };
+
+    let (mut first, _first_origin) = tunnel();
+    let [first_connection] = session
+        .controller
+        .connections()
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let (mut second, mut second_origin) = tunnel();
+    session
+        .controller
+        .close_connection(&first_connection.id)
+        .unwrap();
+    match first.read(&mut [0]) {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        outcome => panic!("closed connection should not remain readable: {outcome:?}"),
+    }
+    second_origin.write_all(b"P").unwrap();
+    let mut marker = [0];
+    second.read_exact(&mut marker).unwrap();
+    assert_eq!(&marker, b"P");
+    assert_eq!(session.controller.connections().unwrap().len(), 1);
+}

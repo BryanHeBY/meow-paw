@@ -87,6 +87,8 @@ pub struct Paw {
     preference_warning: Option<String>,
     search: Entity<InputState>,
     _search_changes: Subscription,
+    connection_filter: Entity<InputState>,
+    _connection_filter_changes: Subscription,
     #[cfg(any(target_os = "linux", windows))]
     desktop: Option<meow_paw::app::Desktop>,
     #[cfg(any(target_os = "linux", windows))]
@@ -106,9 +108,13 @@ fn subscribe_search(search: &Entity<InputState>, cx: &mut Context<Paw>) -> Subsc
 pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let query = paw.read(cx).search.read(cx).value();
     let search = cx.new(|cx| InputState::new(window, cx).default_value(query));
+    let query = paw.read(cx).connection_filter.read(cx).value();
+    let connection_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
     paw.update(cx, |state, cx| {
         state._search_changes = subscribe_search(&search, cx);
         state.search = search;
+        state._connection_filter_changes = subscribe_search(&connection_filter, cx);
+        state.connection_filter = connection_filter;
         cx.notify();
     });
 }
@@ -123,8 +129,10 @@ pub fn open(
     cx: &mut App,
 ) -> Entity<Paw> {
     let search = cx.new(|cx| InputState::new(window, cx));
+    let connection_filter = cx.new(|cx| InputState::new(window, cx));
     cx.new(|cx| {
         let search_changes = subscribe_search(&search, cx);
+        let connection_filter_changes = subscribe_search(&connection_filter, cx);
         let mut paw = Paw {
             page,
             profile,
@@ -142,6 +150,8 @@ pub fn open(
             preference_warning: warning.map(str::to_owned),
             search,
             _search_changes: search_changes,
+            connection_filter,
+            _connection_filter_changes: connection_filter_changes,
             #[cfg(any(target_os = "linux", windows))]
             snapshot: Default::default(),
         };
@@ -1105,54 +1115,107 @@ impl Paw {
         )
     }
 
-    fn connections(&self) -> Div {
+    fn connections(&self, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
-        if let Some(list) = self.snapshot.connections.as_ref().filter(|c| !c.is_empty()) {
-            return card()
-                .child(section_label(format!("{} ACTIVE CONNECTIONS", list.len())))
-                .child(
-                    connection_row(
-                        section_label("DESTINATION"),
-                        section_label("ROUTE"),
-                        section_label("MATCHED RULE"),
-                    )
-                    .mt_3()
-                    .bg(rgb(SOFT_BLUE))
-                    .rounded_md(),
-                )
-                .children(list.iter().map(|c| {
+        if let Some(list) = self.snapshot.connections.as_ref() {
+            let value = self.connection_filter.read(cx).value();
+            let query = value.trim().to_lowercase();
+            let results = list
+                .iter()
+                .filter_map(|c| {
                     let target = if c.metadata.host.is_empty() {
                         &c.metadata.destination_ip
                     } else {
                         &c.metadata.host
                     };
-                    let dest = destination_label(target, &c.metadata.destination_port);
-                    let route = if c.chains.is_empty() {
-                        "—".into()
-                    } else {
-                        c.chains.join(" / ")
-                    };
-                    connection_row(
-                        div().font_weight(FontWeight::MEDIUM).child(dest),
-                        div().text_color(rgb(FAINT)).child(route),
-                        div().text_color(rgb(FAINT)).child(if c.rule.is_empty() {
-                            "—".into()
-                        } else {
-                            c.rule.clone()
-                        }),
+                    let destination = destination_label(target, &c.metadata.destination_port);
+                    let route = c.chains.join(" / ");
+                    if !(route_matches(&destination, &query)
+                        || route_matches(&route, &query)
+                        || route_matches(&c.rule, &query))
+                    {
+                        return None;
+                    }
+                    Some((c, destination, route))
+                })
+                .collect::<Vec<_>>();
+            let toolbar = div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(div().text_sm().text_color(rgb(FAINT)).child("Filter"))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(Input::new(&self.connection_filter).cleanable(true)),
+                )
+                .child(chip(format!("{} active", list.len()), BLUE, SOFT_BLUE));
+            let table = if results.is_empty() {
+                if query.is_empty() {
+                    empty_state(
+                        "No active connections",
+                        "Traffic handled by the Paw listener appears here.",
                     )
-                    .border_b_1()
-                    .border_color(rgb(LINE))
-                }));
+                } else {
+                    empty_state(
+                        "No matching connections",
+                        "Filter by destination, policy chain, or matched rule.",
+                    )
+                }
+            } else {
+                card()
+                    .p_0()
+                    .child(
+                        active_connection_row(
+                            section_label("DESTINATION"),
+                            section_label("ROUTE"),
+                            section_label("RULE"),
+                            div(),
+                        )
+                        .bg(rgb(CHROME)),
+                    )
+                    .children(results.into_iter().map(|(c, destination, route)| {
+                        let key = c.id.clone();
+                        let close = div()
+                            .id(SharedString::from(format!("connection-close:{key}")))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(rgb(BLUE))
+                            .hover(|s| s.bg(rgb(SOFT_BLUE)))
+                            .child("Close")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.error = this
+                                    .desktop
+                                    .as_ref()
+                                    .and_then(|d| d.close_connection(key.clone()).err())
+                                    .map(|err| err.to_string());
+                                cx.notify();
+                            }));
+                        active_connection_row(
+                            div().font_weight(FontWeight::MEDIUM).child(destination),
+                            div().child(if route.is_empty() {
+                                "—".into()
+                            } else {
+                                route
+                            }),
+                            div().child(if c.rule.is_empty() {
+                                "—".into()
+                            } else {
+                                c.rule.clone()
+                            }),
+                            close,
+                        )
+                    }))
+            };
+            return div().flex().flex_col().gap_3().child(toolbar).child(table);
         }
-        let running = self.state().2.is_some();
+        let _ = cx;
         empty_state(
             "No active connections",
-            if running {
-                "Once an app sends a request through Paw’s local listener, its destination and matched rule appear here."
-            } else {
-                "Start a local session, then send an app’s traffic through its listener to see connections here."
-            },
+            "Start a profile to monitor its live connections.",
         )
     }
 
@@ -1280,7 +1343,7 @@ impl Render for Paw {
             Page::Overview => self.overview(window.viewport_size().width >= px(960.), cx),
             Page::Proxies => self.proxies(cx),
             Page::Profiles => self.profiles(cx),
-            Page::Connections => self.connections(),
+            Page::Connections => self.connections(cx),
             Page::Rules => self.rules(cx),
             Page::Logs => self.logs(cx),
             Page::Unlock => empty_state(
@@ -1624,6 +1687,23 @@ fn bytes(value: u64) -> String {
         amount /= 1024.;
     }
     unreachable!()
+#[cfg(any(target_os = "linux", windows))]
+fn active_connection_row(a: Div, b: Div, c: Div, action: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .gap_3()
+        .items_center()
+        .px_4()
+        .py_3()
+        .border_b_1()
+        .border_color(rgb(LINE))
+        .text_sm()
+        .child(a.flex_1().min_w_0())
+        .child(b.flex_1().min_w_0().text_color(rgb(FAINT)))
+        .child(c.flex_1().min_w_0().text_color(rgb(FAINT)))
+        .child(div().w(px(54.)).flex_shrink_0().child(action))
+}
+
 }
 
 fn paw_badge(size: f32) -> Div {

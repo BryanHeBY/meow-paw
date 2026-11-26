@@ -367,6 +367,22 @@ impl Controller {
         serde_json::from_slice(&frame).map_err(|_| ControllerError::InvalidResponse)
     }
 
+    pub fn close_connection(&self, id: &str) -> Result<(), ControllerError> {
+        if id.is_empty() {
+            return Err(ControllerError::InvalidResponse);
+        }
+        let url = self.endpoint(&["connections", id]);
+        let mut request = self.agent.delete(url.as_str());
+        if !self.secret.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", self.secret));
+        }
+        let response = request.call().map_err(http_error)?;
+        if response.status().as_u16() != 204 {
+            return Err(ControllerError::Status(response.status().as_u16()));
+        }
+        Ok(())
+    }
+
     pub fn connections(&self) -> Result<Vec<Connection>, ControllerError> {
         #[derive(Deserialize)]
         struct Snapshot {

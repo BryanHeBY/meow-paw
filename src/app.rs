@@ -174,6 +174,7 @@ enum Command {
     Select { group: String, member: String },
     SetMode(RoutingMode),
     ReadRules,
+    CloseConnection(String),
 }
 
 pub struct Desktop {
@@ -225,6 +226,10 @@ impl Desktop {
 
     pub fn read_rules(&self) -> io::Result<()> {
         self.send(Command::ReadRules)
+    }
+
+    pub fn close_connection(&self, id: String) -> io::Result<()> {
+        self.send(Command::CloseConnection(id))
     }
 
     pub fn stop(&self) {
@@ -390,6 +395,15 @@ fn run(
                         }
                         Err(error) => s.action_error = Some(error.to_string()),
                     });
+                }
+            }
+            Ok(Command::CloseConnection(id)) => {
+                if let Some(active) = &session {
+                    let result = active.controller.close_connection(&id);
+                    change(snapshot, |s| {
+                        s.action_error = result.err().map(|e| e.to_string())
+                    });
+                    next_sample = Instant::now();
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
