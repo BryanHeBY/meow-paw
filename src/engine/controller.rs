@@ -49,6 +49,8 @@ pub struct Inventory {
     pub groups: BTreeMap<String, Proxy>,
     pub nodes: Vec<Node>,
     pub providers: BTreeMap<String, ProviderStatus>,
+    /// A failed provider read leaves route data usable but ownership unknown.
+    pub provider_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -316,7 +318,13 @@ impl Controller {
                 });
             }
         }
-        let providers: Providers = self.get(self.endpoint(&["providers", "proxies"]))?;
+        let providers: Providers = match self.get(self.endpoint(&["providers", "proxies"])) {
+            Ok(providers) => providers,
+            Err(error) => {
+                inventory.provider_error = Some(error.to_string());
+                return Ok(inventory);
+            }
+        };
         for (provider, value) in providers.providers {
             // Even a provider with no proxies yet has an independent status.
             inventory.providers.insert(provider.clone(), value.status);
@@ -675,16 +683,36 @@ mod tests {
                 reader.read_line(&mut line).unwrap();
                 assert!(line.starts_with(expected), "{line:?}");
                 let mut authorized = false;
+                let mut content_length = 0;
                 loop {
                     line.clear();
                     if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
                         break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value.trim().parse::<usize>().unwrap();
                     }
                     authorized |= line
                         .trim()
                         .eq_ignore_ascii_case("authorization: Bearer fake-secret");
                 }
                 assert!(authorized);
+                if content_length != 0 {
+                    let mut request_body = vec![0; content_length];
+                    std::io::Read::read_exact(&mut reader, &mut request_body).unwrap();
+                    if expected.starts_with("PUT /proxies/G ") {
+                        let payload: serde_json::Value =
+                            serde_json::from_slice(&request_body).unwrap();
+                        assert_eq!(payload, serde_json::json!({"name": "B"}));
+                    }
+                } else {
+                    assert!(
+                        !expected.starts_with("PUT /proxies/G "),
+                        "missing selector body"
+                    );
+                }
                 write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
             }
         });
@@ -732,6 +760,59 @@ mod tests {
             c.endpoint(&["proxies", "HK #1 / test"]).path(),
             "/proxies/HK%20%231%20%2F%20test"
         );
+    }
+
+    #[test]
+    fn routes_continue_through_provider_outage_and_recover() {
+        let (c, worker) = fixture(vec![
+            (
+                "GET /proxies HTTP/",
+                r#"{"proxies":{"G":{"type":"Selector","all":["A","B"],"now":"A"},"A":{"type":"Direct"}}}"#,
+            ),
+            ("GET /providers/proxies HTTP/", "x"),
+            ("PUT /proxies/G HTTP/", "!"),
+            (
+                "GET /proxies HTTP/",
+                r#"{"proxies":{"G":{"type":"Selector","all":["A","B"],"now":"B"},"A":{"type":"Direct"}}}"#,
+            ),
+            ("GET /providers/proxies HTTP/", "x"),
+            (
+                "GET /proxies HTTP/",
+                r#"{"proxies":{"G":{"type":"Selector","all":["A","B"],"now":"B"},"A":{"type":"Direct"}}}"#,
+            ),
+            (
+                "GET /providers/proxies HTTP/",
+                r#"{"providers":{"Feed":{"vehicleType":"HTTP","proxies":[{"name":"B","type":"Direct"}]}}}"#,
+            ),
+            (
+                "GET /proxies HTTP/",
+                r#"{"proxies":{"G":{"type":"Selector","all":["A","B"],"now":"A"},"A":{"type":"Direct"}}}"#,
+            ),
+            ("GET /providers/proxies HTTP/", "x"),
+        ]);
+        let first = c.inventory().unwrap();
+        assert_eq!(first.groups["G"].now.as_deref(), Some("A"));
+        assert!(first.provider_error.is_some());
+        assert!(first.providers.is_empty());
+        c.select("G", "B").unwrap();
+        let changed = c.inventory().unwrap();
+        assert_eq!(changed.groups["G"].now.as_deref(), Some("B"));
+        assert!(changed.provider_error.is_some());
+        let recovered = c.inventory().unwrap();
+        assert!(recovered.provider_error.is_none());
+        assert!(recovered.providers.contains_key("Feed"));
+        assert!(
+            recovered
+                .nodes
+                .iter()
+                .any(|n| { n.name == "B" && n.origin == Origin::Provider("Feed".into()) })
+        );
+        let failed_again = c.inventory().unwrap();
+        assert_eq!(failed_again.groups["G"].now.as_deref(), Some("A"));
+        assert!(failed_again.provider_error.is_some());
+        assert!(failed_again.providers.is_empty());
+        assert!(failed_again.nodes.iter().all(|n| n.origin == Origin::Local));
+        worker.join().unwrap();
     }
 
     #[test]

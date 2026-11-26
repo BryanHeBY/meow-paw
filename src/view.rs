@@ -1891,12 +1891,14 @@ impl Paw {
 
     fn overview_route(&self, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
-        let (detail, selections, excess) =
-            if self.state().2.is_some() && self.snapshot.applying_profile.is_none() {
-                overview_route_summary(self.snapshot.mode, self.snapshot.inventory.as_deref())
-            } else {
-                (Message::OverviewRouteUnavailable, Vec::new(), 0)
-            };
+        let (detail, selections, excess) = if self.state().2.is_some()
+            && self.snapshot.applying_profile.is_none()
+            && !self.snapshot.inventory_stale
+        {
+            overview_route_summary(self.snapshot.mode, self.snapshot.inventory.as_deref())
+        } else {
+            (Message::OverviewRouteUnavailable, Vec::new(), 0)
+        };
         #[cfg(not(any(target_os = "linux", windows)))]
         let (detail, selections, excess): (Message, Vec<String>, usize) =
             (Message::OverviewRouteUnavailable, Vec::new(), 0);
@@ -2872,6 +2874,8 @@ impl Paw {
             let delays = unambiguous_route_delays(inventory);
             let probe_url = parse_probe_url(&self.probe_url.read(cx).value());
             let probe_ready = probe_url.is_some();
+            let ownership_available =
+                !self.snapshot.inventory_stale && inventory.provider_error.is_none();
             let mut probe_candidates = std::collections::HashMap::new();
             for node in &inventory.nodes {
                 probe_candidates
@@ -2975,7 +2979,8 @@ impl Paw {
                                 18.,
                             ))
                         });
-                    let mutable = group.kind.eq_ignore_ascii_case("selector");
+                    let mutable = !self.snapshot.inventory_stale
+                        && group.kind.eq_ignore_ascii_case("selector");
                     Some(
                         div()
                             .flex()
@@ -3032,7 +3037,7 @@ impl Paw {
                                     },
                                 )
                                 .when(
-                                    running || (probe_ready && !probe_busy),
+                                    running || (ownership_available && probe_ready && !probe_busy),
                                     |button| {
                                         button.on_click(cx.listener(move |paw, _, _, cx| {
                                             if let Some(desktop) = &paw.desktop {
@@ -3156,7 +3161,10 @@ impl Paw {
                                                     .copied()
                                                     .flatten()
                                                     .filter(|_| {
-                                                        !inventory.groups.contains_key(member)
+                                                        ownership_available
+                                                            && !inventory
+                                                                .groups
+                                                                .contains_key(member)
                                                     })
                                                     .map(|origin| ProxyProbeTarget {
                                                         name: member.into(),
@@ -3350,6 +3358,7 @@ impl Paw {
             let providers = inventory
                 .providers
                 .iter()
+                .filter(|_| ownership_available)
                 .map(|(name, status)| {
                     let label = name.clone();
                     let pending =
@@ -3467,6 +3476,16 @@ impl Paw {
                 .flex_col()
                 .gap_3()
                 .child(toolbar)
+                .when(self.snapshot.inventory_stale || inventory.provider_error.is_some(), |page| {
+                    page.child(div().text_sm().text_color(rgb(FAINT)).child(
+                        match (self.snapshot.inventory_stale, self.locale) {
+                            (true, Locale::En) => "Route and provider data may be stale; route selection, node tests and provider refresh are disabled.",
+                            (true, Locale::ZhCn) => "路线和提供者数据可能已过期；路线选择、节点测试和提供者刷新已停用。",
+                            (false, Locale::En) => "Provider data unavailable; node tests and provider refresh are disabled. Routes remain available.",
+                            (false, Locale::ZhCn) => "提供者数据不可用；节点测试和提供者刷新已停用。路线仍可使用。",
+                        },
+                    ))
+                })
                 .child(probe_settings)
                 .when(!providers.is_empty(), |page| {
                     page.child(
@@ -3516,6 +3535,16 @@ impl Paw {
             };
         }
         let _ = (window_width, cx);
+        #[cfg(any(target_os = "linux", windows))]
+        if self.snapshot.inventory_stale {
+            return empty_state(
+                self.locale.message(Message::OverviewRouteUnavailable),
+                match self.locale {
+                    Locale::En => "Waiting for the controller to provide routes.",
+                    Locale::ZhCn => "正在等待控制器提供路线。",
+                },
+            );
+        }
         empty_state(
             self.locale.message(Message::NoProxyGroups),
             self.locale.message(Message::StartToViewGroups),

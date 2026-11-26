@@ -230,7 +230,7 @@ pub fn parse_probe_url(value: &str) -> Option<url::Url> {
 }
 
 pub fn unique_proxy(inventory: &Inventory, name: &str) -> Option<Origin> {
-    if inventory.groups.contains_key(name) {
+    if inventory.provider_error.is_some() || inventory.groups.contains_key(name) {
         return None;
     }
     let mut candidates = inventory.nodes.iter().filter(|node| node.name == name);
@@ -245,6 +245,7 @@ const GROUP_PROBE_MEMBER_LIMIT: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GroupProbePreparationError {
+    ProviderUnavailable,
     MissingGroup,
     InventoryTooLarge,
     MembershipTooLarge,
@@ -258,6 +259,9 @@ pub fn group_probe_targets(
     inventory: &Inventory,
     group: &str,
 ) -> Result<Vec<ProxyProbeTarget>, GroupProbePreparationError> {
+    if inventory.provider_error.is_some() {
+        return Err(GroupProbePreparationError::ProviderUnavailable);
+    }
     if !inventory.groups.contains_key(group) {
         return Err(GroupProbePreparationError::MissingGroup);
     }
@@ -398,6 +402,7 @@ pub struct Snapshot {
     pub applying_profile: Option<PathBuf>,
     pub diagnostics: Vec<Diagnostic>,
     pub inventory: Option<Arc<Inventory>>,
+    pub inventory_stale: bool,
     pub mode: Option<RoutingMode>,
     pub rules: Option<Arc<Vec<Rule>>>,
     pub rule_providers: Option<Arc<BTreeMap<String, RuleProviderStatus>>>,
@@ -432,6 +437,7 @@ pub struct GroupComparison {
 impl GroupComparison {
     fn valid_target(&self, snapshot: &Snapshot, index: usize, target: &ProxyProbeTarget) -> bool {
         self.active
+            && !snapshot.inventory_stale
             && self.results.epoch == snapshot.probe_epoch
             && self.results.run_id == snapshot.group_run_id
             && parse_probe_url(self.results.url.as_str()).as_ref() == Some(&self.results.url)
@@ -662,6 +668,7 @@ impl Desktop {
             || s.probe_epoch != epoch
             || !matches!(s.engine, EngineStatus::Running { .. })
             || s.probe_busy
+            || s.inventory_stale
             || s.group_probe.as_ref().is_some_and(|g| g.active)
         {
             return Err(Error::new(
@@ -921,6 +928,7 @@ fn run(
                             s.profile = Some(path);
                             s.mode = mode;
                             s.inventory = None;
+                            s.inventory_stale = false;
                             s.rules = None;
                         }
                         Err(error) => {
@@ -937,6 +945,12 @@ fn run(
             }
             Ok(Command::Select { group, member }) => {
                 if let Some(active) = &session {
+                    if snapshot.lock().expect("snapshot poisoned").inventory_stale {
+                        change(snapshot, |s| {
+                            s.action_error = Some("Route inventory is stale".into())
+                        });
+                        continue;
+                    }
                     let result = active.controller.select(&group, &member);
                     change(snapshot, |s| {
                         s.action_error = result.err().map(|e| e.to_string())
@@ -976,13 +990,15 @@ fn run(
                         });
                         continue;
                     }
-                    let available = snapshot
-                        .lock()
-                        .expect("snapshot poisoned")
-                        .inventory
-                        .as_ref()
-                        .and_then(|inv| inv.providers.get(&name))
-                        .is_some_and(|p| p.vehicle_type.eq_ignore_ascii_case("http"));
+                    let available = {
+                        let s = snapshot.lock().expect("snapshot poisoned");
+                        !s.inventory_stale
+                            && s.inventory
+                                .as_ref()
+                                .filter(|inv| inv.provider_error.is_none())
+                                .and_then(|inv| inv.providers.get(&name))
+                                .is_some_and(|p| p.vehicle_type.eq_ignore_ascii_case("http"))
+                    };
                     if !available {
                         change(snapshot, |s| {
                             s.provider_error = Some("Provider is no longer refreshable".into())
@@ -1025,6 +1041,7 @@ fn run(
                         .and_then(|inventory| unique_proxy(inventory, &target.name));
                     if s.group_probe.as_ref().is_some_and(|g| g.active)
                         || cancelled()
+                        || s.inventory_stale
                         || resolved != Some(target.origin.clone())
                     {
                         continue;
@@ -1270,6 +1287,7 @@ fn run(
 }
 
 fn retain_inventory(snapshot: &mut Snapshot, fresh: Option<Arc<Inventory>>) {
+    snapshot.inventory_stale = fresh.is_none();
     if fresh.is_some() {
         snapshot.inventory = fresh;
     }
@@ -1407,6 +1425,7 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64) {
         s.probes = ProxyProbeResults::default();
         s.group_probe = None;
         s.inventory = None;
+        s.inventory_stale = false;
         s.refreshing_provider = None;
         s.provider_error = None;
         s.mode = None;
@@ -2125,6 +2144,98 @@ mod tests {
         ] {
             assert!(parse_probe_url(value).is_none(), "accepted {value}");
         }
+    }
+
+    #[test]
+    fn provider_outage_blocks_identity_resolution_and_recovery_restores_it() {
+        use crate::engine::controller::{Node, Proxy};
+        let mut inventory = Inventory::default();
+        inventory.groups.insert(
+            "G".into(),
+            Proxy {
+                all: Some(vec!["A".into()]),
+                ..Default::default()
+            },
+        );
+        inventory.nodes.push(Node {
+            name: "A".into(),
+            origin: Origin::Local,
+            proxy: Proxy::default(),
+        });
+        let target = ProxyProbeTarget {
+            name: "A".into(),
+            origin: Origin::Local,
+        };
+        let mut snapshot = Snapshot {
+            inventory: Some(Arc::new(inventory)),
+            probe_epoch: 1,
+            group_run_id: 1,
+            ..Default::default()
+        };
+        let results = GroupProbeResults::new(
+            1,
+            1,
+            parse_probe_url("https://example.invalid/").unwrap(),
+            vec![target.clone()],
+        )
+        .unwrap();
+        snapshot.group_probe = Some(GroupComparison {
+            group: "G".into(),
+            results,
+            active: true,
+            interrupted: false,
+            mode: None,
+        });
+        assert!(
+            snapshot
+                .group_probe
+                .as_ref()
+                .unwrap()
+                .valid_target(&snapshot, 0, &target)
+        );
+        Arc::make_mut(snapshot.inventory.as_mut().unwrap()).provider_error = Some("503".into());
+        let degraded = snapshot.inventory.as_ref().unwrap();
+        assert_eq!(unique_proxy(degraded, "A"), None);
+        assert_eq!(
+            group_probe_targets(degraded, "G"),
+            Err(GroupProbePreparationError::ProviderUnavailable)
+        );
+        assert!(
+            !snapshot
+                .group_probe
+                .as_ref()
+                .unwrap()
+                .valid_target(&snapshot, 0, &target)
+        );
+        let mut recovered = (**degraded).clone();
+        recovered.provider_error = None;
+        retain_inventory(&mut snapshot, Some(Arc::new(recovered)));
+        assert_eq!(
+            unique_proxy(snapshot.inventory.as_ref().unwrap(), "A"),
+            Some(Origin::Local)
+        );
+        assert_eq!(
+            group_probe_targets(snapshot.inventory.as_ref().unwrap(), "G").unwrap(),
+            vec![target.clone()]
+        );
+        assert!(
+            snapshot
+                .group_probe
+                .as_ref()
+                .unwrap()
+                .valid_target(&snapshot, 0, &target)
+        );
+        retain_inventory(&mut snapshot, None);
+        assert!(snapshot.inventory_stale);
+        assert!(
+            !snapshot
+                .group_probe
+                .as_ref()
+                .unwrap()
+                .valid_target(&snapshot, 0, &target)
+        );
+        retain_inventory(&mut snapshot, Some(Arc::new(Inventory::default())));
+        assert!(!snapshot.inventory_stale);
     }
 
     #[test]
