@@ -435,6 +435,28 @@ pub struct GroupComparison {
 }
 
 impl GroupComparison {
+    /// Whether this completed comparison still belongs to the current snapshot.
+    pub fn is_current_completed(
+        &self,
+        snapshot: &Snapshot,
+        group: &str,
+        url: Option<&url::Url>,
+    ) -> bool {
+        self.group == group
+            && url == Some(self.results.url())
+            && !self.active
+            && !self.interrupted
+            && self.results.epoch == snapshot.probe_epoch
+            && self.results.run_id == snapshot.group_run_id
+            && self.mode == snapshot.mode
+            && self.results.rows.iter().all(|(_, status)| {
+                matches!(
+                    status,
+                    Some(ProxyProbeStatus::Measured(_) | ProxyProbeStatus::Unavailable)
+                )
+            })
+    }
+
     fn valid_target(&self, snapshot: &Snapshot, index: usize, target: &ProxyProbeTarget) -> bool {
         self.active
             && !snapshot.inventory_stale
@@ -1998,6 +2020,12 @@ mod tests {
             mode: s.mode,
         });
         assert!(s.group_probe.as_ref().unwrap().valid_target(&s, 0, &a));
+        assert!(
+            !s.group_probe
+                .as_ref()
+                .unwrap()
+                .is_current_completed(&s, "group", Some(&url))
+        );
         assert!(s.group_probe.as_mut().unwrap().results.begin(0));
         finish_group_probe(&mut s, 7, 41, &url, 0, &a, ProxyProbeStatus::Measured(1));
         assert!(s.group_probe.as_ref().unwrap().active);
@@ -2008,6 +2036,23 @@ mod tests {
         assert!(!g.active && !g.interrupted);
         assert_eq!(g.results.rows()[0].1, Some(ProxyProbeStatus::Measured(15)));
         assert_eq!(g.results.rows()[1].1, Some(ProxyProbeStatus::Unavailable));
+        assert!(g.is_current_completed(&s, "group", Some(&url)));
+        assert!(!g.is_current_completed(&s, "other", Some(&url)));
+        assert!(!g.is_current_completed(&s, "group", None));
+        let other_url = parse_probe_url("https://example.invalid/other").unwrap();
+        assert!(!g.is_current_completed(&s, "group", Some(&other_url)));
+        let mut stale = s.clone();
+        stale.probe_epoch += 1;
+        assert!(!g.is_current_completed(&stale, "group", Some(&url)));
+        stale = s.clone();
+        stale.group_run_id += 1;
+        assert!(!g.is_current_completed(&stale, "group", Some(&url)));
+        stale = s.clone();
+        stale.mode = Some(RoutingMode::Direct);
+        assert!(!g.is_current_completed(&stale, "group", Some(&url)));
+        let mut interrupted = g.clone();
+        interrupted.interrupted = true;
+        assert!(!interrupted.is_current_completed(&s, "group", Some(&url)));
 
         for change in 0..5 {
             let results = GroupProbeResults::new(7, 43, url.clone(), vec![a.clone()]).unwrap();
