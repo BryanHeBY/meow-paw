@@ -28,6 +28,33 @@ kernel executable and run:
 cargo test --locked --test managed_meow -- --ignored
 ```
 
+The owner-exit regressions start Paw's managed session with a synthetic
+direct-only profile, terminate a test-owned supervisor, and verify that the
+owned Meow exits and its mixed listener closes. The Windows test also checks
+the controller listener. Both are opt-in and require a trusted local Meow
+executable. The Linux test also requires pidfd support and
+readable `/proc`. Run it with a private PID and loopback-only network namespace:
+
+```sh
+MEOW_BIN="$PWD/target/release/meow" \
+  unshare -Urnpf --kill-child --mount-proc sh -c \
+  'ip link set lo up && cargo test --offline --locked --test linux_owner_exit -- --ignored --exact owner_exit_stops_managed_core'
+```
+
+On Windows, point to a trusted native test fixture, not an executable
+controlled by another application:
+
+```powershell
+$env:MEOW_BIN = 'C:\path\to\trusted\meow.exe'
+cargo test --offline --locked --lib engine::session::windows::tests::windows_real_session_dies_after_abrupt_owner_exit -- --ignored --exact
+```
+
+The tests exercise process ownership, not the system proxy or interactive
+desktop. A hard termination can still bypass normal temporary-directory
+cleanup. On Linux Paw creates new session directories and generated
+configuration with permissions no broader than `0700` and `0600`,
+respectively.
+
 ## Language
 
 The shell currently supports English and Simplified Chinese (`zh-CN`). Use
