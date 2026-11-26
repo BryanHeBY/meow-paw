@@ -1,6 +1,9 @@
 #![cfg(any(target_os = "linux", windows))]
 
-use meow_paw::{engine::session::Session, profile::Profile};
+use meow_paw::{
+    engine::{controller::RoutingMode, session::Session},
+    profile::Profile,
+};
 use std::{
     io::{Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
@@ -18,6 +21,15 @@ fn isolated_session_proxies_loopback_traffic_and_cleans_up() {
         "mode: rule\nipv6: false\ndns: {enable: false}\nproxy-groups:\n  - {name: Test, type: select, proxies: [DIRECT, REJECT]}\nrules: ['MATCH,Test']\n",
     ).unwrap();
     let session = Session::launch(&binary, &profile, || false).unwrap();
+    assert_eq!(session.controller.mode().unwrap(), RoutingMode::Rule);
+    for mode in [RoutingMode::Global, RoutingMode::Direct, RoutingMode::Rule] {
+        session.controller.set_mode(mode).unwrap();
+        assert_eq!(session.controller.mode().unwrap(), mode);
+    }
+    let rules = session.controller.rules().unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].kind, "Match");
+    assert_eq!(rules[0].proxy, "Test");
     assert_eq!(
         session.controller.inventory().unwrap().groups["Test"]
             .now

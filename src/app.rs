@@ -2,7 +2,7 @@
 
 use crate::{
     engine::{
-        controller::{Connection, Inventory, Traffic},
+        controller::{Connection, Inventory, RoutingMode, Rule, Traffic},
         session::Session,
     },
     profile::{Diagnostic, MAX_PROFILE_BYTES, Profile},
@@ -86,6 +86,8 @@ pub struct Snapshot {
     pub profile: Option<PathBuf>,
     pub diagnostics: Vec<Diagnostic>,
     pub inventory: Option<Arc<Inventory>>,
+    pub mode: Option<RoutingMode>,
+    pub rules: Option<Arc<Vec<Rule>>>,
     pub traffic: Option<Traffic>,
     pub traffic_history: TrafficHistory,
     pub connections: Option<Arc<Vec<Connection>>>,
@@ -96,6 +98,8 @@ pub struct Snapshot {
 enum Command {
     Start(PathBuf),
     Select { group: String, member: String },
+    SetMode(RoutingMode),
+    ReadRules,
 }
 
 pub struct Desktop {
@@ -139,6 +143,14 @@ impl Desktop {
 
     pub fn select(&self, group: String, member: String) -> io::Result<()> {
         self.send(Command::Select { group, member })
+    }
+
+    pub fn set_mode(&self, mode: RoutingMode) -> io::Result<()> {
+        self.send(Command::SetMode(mode))
+    }
+
+    pub fn read_rules(&self) -> io::Result<()> {
+        self.send(Command::ReadRules)
     }
 
     pub fn stop(&self) {
@@ -241,7 +253,13 @@ fn run(
                 });
                 match result {
                     Ok(active) => {
+                        let mode = if cancelled() {
+                            None
+                        } else {
+                            active.controller.mode().ok()
+                        };
                         change(snapshot, |s| {
+                            s.mode = mode;
                             s.engine = EngineStatus::Running {
                                 mixed_port: active.mixed_port,
                             }
@@ -262,6 +280,35 @@ fn run(
                         s.action_error = result.err().map(|e| e.to_string())
                     });
                     next_sample = Instant::now();
+                }
+            }
+            Ok(Command::SetMode(mode)) => {
+                if let Some(active) = &session {
+                    let result = active.controller.set_mode(mode);
+                    let actual = if result.is_ok() && !cancelled() {
+                        active.controller.mode().ok().or(Some(mode))
+                    } else {
+                        None
+                    };
+                    change(snapshot, |s| {
+                        if actual.is_some() {
+                            s.mode = actual;
+                        }
+                        s.action_error = result.err().map(|e| e.to_string());
+                    });
+                    next_sample = Instant::now();
+                }
+            }
+            Ok(Command::ReadRules) => {
+                if let Some(active) = &session {
+                    let result = active.controller.rules();
+                    change(snapshot, |s| match result {
+                        Ok(rules) => {
+                            s.rules = Some(Arc::new(rules));
+                            s.action_error = None;
+                        }
+                        Err(error) => s.action_error = Some(error.to_string()),
+                    });
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -307,6 +354,8 @@ fn run(
 fn clear_telemetry(snapshot: &Mutex<Snapshot>) {
     change(snapshot, |s| {
         s.inventory = None;
+        s.mode = None;
+        s.rules = None;
         s.connections = None;
         s.traffic = None;
         s.traffic_history = TrafficHistory::default();

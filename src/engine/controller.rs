@@ -65,6 +65,34 @@ pub struct Metadata {
     pub destination_port: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingMode {
+    Rule,
+    Global,
+    Direct,
+}
+
+impl RoutingMode {
+    pub const ALL: [Self; 3] = [Self::Rule, Self::Global, Self::Direct];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Rule => "Rule",
+            Self::Global => "Global",
+            Self::Direct => "Direct",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Rule {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub payload: String,
+    pub proxy: String,
+}
+
 #[derive(Debug)]
 pub enum ControllerError {
     InvalidAddress,
@@ -232,6 +260,37 @@ impl Controller {
         Ok(self.get::<Delay>(url)?.delay)
     }
 
+    pub fn mode(&self) -> Result<RoutingMode, ControllerError> {
+        #[derive(Deserialize)]
+        struct Config {
+            mode: RoutingMode,
+        }
+        Ok(self.get::<Config>(self.endpoint(&["configs"]))?.mode)
+    }
+
+    pub fn set_mode(&self, mode: RoutingMode) -> Result<(), ControllerError> {
+        let url = self.endpoint(&["configs"]);
+        let mut request = self.agent.patch(url.as_str());
+        if !self.secret.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", self.secret));
+        }
+        let response = request
+            .send_json(serde_json::json!({"mode": mode.label().to_ascii_lowercase()}))
+            .map_err(http_error)?;
+        if response.status().as_u16() != 204 {
+            return Err(ControllerError::Status(response.status().as_u16()));
+        }
+        Ok(())
+    }
+
+    pub fn rules(&self) -> Result<Vec<Rule>, ControllerError> {
+        #[derive(Deserialize)]
+        struct Rules {
+            rules: Vec<Rule>,
+        }
+        Ok(self.get::<Rules>(self.endpoint(&["rules"]))?.rules)
+    }
+
     pub fn traffic(&self) -> Result<Traffic, ControllerError> {
         // This endpoint is an open NDJSON stream in Meow 0.29; do not
         // read the whole body to EOF to sample one frame.
@@ -311,6 +370,26 @@ mod tests {
             }
         });
         (controller, worker)
+    }
+
+    #[test]
+    fn reads_mode_and_preserves_rule_order() {
+        let (c, worker) = fixture(vec![
+            (
+                "GET /configs HTTP/",
+                r#"{"mode":"global","tun":{"enable":false}}"#,
+            ),
+            (
+                "GET /rules HTTP/",
+                r#"{"rules":[{"type":"Domain","payload":"example.invalid","proxy":"LOCAL"},{"type":"Match","payload":"","proxy":"DIRECT"}]}"#,
+            ),
+        ]);
+        assert_eq!(c.mode().unwrap(), RoutingMode::Global);
+        let rules = c.rules().unwrap();
+        assert_eq!(rules[0].kind, "Domain");
+        assert_eq!(rules[0].payload, "example.invalid");
+        assert_eq!(rules[1].proxy, "DIRECT");
+        worker.join().unwrap();
     }
 
     #[test]
