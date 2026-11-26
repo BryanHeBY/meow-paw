@@ -961,43 +961,51 @@ impl Paw {
         let supported = cfg!(any(target_os = "linux", windows));
         let enabled = supported && phase != "Stopping";
         let running = phase == "Running" || phase == "Starting";
-        let action = div()
-            .id("session-control")
-            .rounded_md()
-            .px_4()
-            .py_2()
-            .bg(rgb(if enabled { BLUE } else { LINE }))
-            .text_color(rgb(if enabled { 0xffffff } else { FAINT }))
-            .font_weight(FontWeight::SEMIBOLD)
-            .child(self.locale.message(if running {
-                Message::StopSession
-            } else if phase == "Stopping" {
-                Message::Stopping
-            } else if supported && !ready {
-                Message::ChooseEngine
-            } else if supported && self.profile.is_none() {
-                Message::ChooseProfile
-            } else {
-                Message::StartSession
-            }))
-            .when(enabled, |e| {
-                e.cursor_pointer()
-                    .hover(|style| style.bg(rgb(0x1149ae)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if running {
-                            this.stop();
-                        } else if !ready {
-                            this.page = Page::Settings;
-                        } else if this.profile.is_none() {
-                            this.page = Page::Profiles;
-                            this.load_subscription_metadata(cx);
-                        } else {
-                            this.start();
-                        }
-                        cx.notify();
-                    }))
-            });
-        div().child(action)
+        let label = self.locale.message(if running {
+            Message::StopSession
+        } else if phase == "Stopping" {
+            Message::Stopping
+        } else if supported && !ready {
+            Message::ChooseEngine
+        } else if supported && self.profile.is_none() {
+            Message::ChooseProfile
+        } else {
+            Message::StartSession
+        });
+        div().child(
+            SemanticButton::new("session-control")
+                .disabled(!enabled)
+                .accessibility_label(label)
+                .rounded_md()
+                .px_4()
+                .py_2()
+                .bg(rgb(if enabled { BLUE } else { LINE }))
+                .text_color(rgb(if enabled { 0xffffff } else { FAINT }))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(label)
+                .when(enabled, |button| {
+                    button
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0x1149ae)))
+                        .focus_visible(|style| style.border_2().border_color(rgb(0x9eb9ee)))
+                        .on_click(cx.listener(move |this, event, _, cx| {
+                            if matches!(event, ClickEvent::Keyboard(_)) {
+                                cx.stop_propagation();
+                            }
+                            if running {
+                                this.stop();
+                            } else if !ready {
+                                this.page = Page::Settings;
+                            } else if this.profile.is_none() {
+                                this.page = Page::Profiles;
+                                this.load_subscription_metadata(cx);
+                            } else {
+                                this.start();
+                            }
+                            cx.notify();
+                        }))
+                }),
+        )
     }
 
     fn proxy_header(&self, cx: &mut Context<Self>) -> Div {
