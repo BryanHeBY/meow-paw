@@ -2,7 +2,7 @@
 
 use crate::{
     engine::{
-        controller::{Connection, Inventory, RoutingMode, Rule, Traffic},
+        controller::{Connection, Inventory, LogEntry, RoutingMode, Rule, Traffic},
         session::Session,
     },
     profile::{Diagnostic, MAX_PROFILE_BYTES, Profile},
@@ -88,11 +88,85 @@ pub struct Snapshot {
     pub inventory: Option<Arc<Inventory>>,
     pub mode: Option<RoutingMode>,
     pub rules: Option<Arc<Vec<Rule>>>,
+    pub logs: Option<LogHistory>,
     pub traffic: Option<Traffic>,
     pub traffic_history: TrafficHistory,
     pub connections: Option<Arc<Vec<Connection>>>,
     pub last_update: Option<Instant>,
     pub action_error: Option<String>,
+}
+
+const LOG_CAPACITY: usize = 256;
+
+#[derive(Clone, Debug, Default)]
+pub struct LogHistory(Arc<Mutex<VecDeque<LogEntry>>>);
+
+impl LogHistory {
+    pub fn recent(&self) -> Vec<LogEntry> {
+        self.0
+            .lock()
+            .expect("log history poisoned")
+            .iter()
+            .rev()
+            .cloned()
+            .collect()
+    }
+
+    pub fn clear(&self) {
+        self.0.lock().expect("log history poisoned").clear();
+    }
+
+    fn push(&self, entry: LogEntry) {
+        let mut history = self.0.lock().expect("log history poisoned");
+        if history.len() == LOG_CAPACITY {
+            history.pop_front();
+        }
+        history.push_back(entry);
+    }
+}
+
+struct LogWorker {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl LogWorker {
+    fn start(controller: crate::engine::controller::Controller, history: LogHistory) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = thread::Builder::new()
+            .name("paw-meow-logs".into())
+            .spawn({
+                let stop = stop.clone();
+                move || {
+                    let cancelled = || stop.load(Ordering::Acquire);
+                    while !cancelled() {
+                        let result =
+                            controller.read_log_stream(|entry| history.push(entry), cancelled);
+                        if matches!(
+                            result,
+                            Err(crate::engine::controller::ControllerError::Status(404))
+                        ) {
+                            break;
+                        }
+                        if !cancelled() {
+                            thread::park_timeout(Duration::from_millis(250));
+                        }
+                    }
+                }
+            })
+            .ok();
+        Self { stop, worker }
+    }
+}
+
+impl Drop for LogWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let _ = worker.join();
+        }
+    }
 }
 
 enum Command {
@@ -185,6 +259,7 @@ fn run(
     stop: &AtomicBool,
     quit: &AtomicBool,
 ) {
+    let mut logs = None;
     let mut session: Option<Session> = None;
     let mut next_sample = Instant::now();
     let cancelled = || stop.load(Ordering::Acquire) || quit.load(Ordering::Acquire);
@@ -207,6 +282,7 @@ fn run(
             } else {
                 change(snapshot, |s| s.engine = EngineStatus::Stopped);
             }
+            logs.take();
             clear_telemetry(snapshot);
             continue;
         }
@@ -216,6 +292,7 @@ fn run(
                 Ok(None) => {}
                 Ok(Some(code)) => {
                     session.take();
+                    logs.take();
                     change(snapshot, |s| {
                         s.engine = EngineStatus::Error(format!("Meow exited ({code})"))
                     });
@@ -223,6 +300,7 @@ fn run(
                 }
                 Err(error) => {
                     session.take();
+                    logs.take();
                     change(snapshot, |s| {
                         s.engine = EngineStatus::Error(error.to_string())
                     });
@@ -258,7 +336,10 @@ fn run(
                         } else {
                             active.controller.mode().ok()
                         };
+                        let history = LogHistory::default();
+                        logs = Some(LogWorker::start(active.controller.clone(), history.clone()));
                         change(snapshot, |s| {
+                            s.logs = Some(history);
                             s.mode = mode;
                             s.engine = EngineStatus::Running {
                                 mixed_port: active.mixed_port,
@@ -356,6 +437,7 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>) {
         s.inventory = None;
         s.mode = None;
         s.rules = None;
+        s.logs = None;
         s.connections = None;
         s.traffic = None;
         s.traffic_history = TrafficHistory::default();
@@ -386,6 +468,24 @@ fn load_profile(path: &PathBuf) -> io::Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_history_is_bounded_and_newest_first() {
+        let history = LogHistory::default();
+        for i in 0..LOG_CAPACITY + 3 {
+            history.push(LogEntry {
+                time: String::new(),
+                level: "info".into(),
+                message: i.to_string(),
+            });
+        }
+        let entries = history.recent();
+        assert_eq!(entries.len(), LOG_CAPACITY);
+        assert_eq!(entries[0].message, (LOG_CAPACITY + 2).to_string());
+        assert_eq!(entries[LOG_CAPACITY - 1].message, "3");
+        history.clear();
+        assert!(history.recent().is_empty());
+    }
 
     #[test]
     fn traffic_history_bounds_gaps_and_preserves_zero() {

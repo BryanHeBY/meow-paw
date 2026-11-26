@@ -93,6 +93,13 @@ pub struct Rule {
     pub proxy: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LogEntry {
+    pub time: String,
+    pub level: String,
+    pub message: String,
+}
+
 #[derive(Debug)]
 pub enum ControllerError {
     InvalidAddress,
@@ -118,6 +125,7 @@ impl fmt::Display for ControllerError {
 
 impl std::error::Error for ControllerError {}
 
+#[derive(Clone)]
 pub struct Controller {
     address: Url,
     agent: ureq::Agent,
@@ -291,6 +299,54 @@ impl Controller {
         Ok(self.get::<Rules>(self.endpoint(&["rules"]))?.rules)
     }
 
+    pub fn read_log_stream(
+        &self,
+        mut sink: impl FnMut(LogEntry),
+        cancelled: impl Fn() -> bool,
+    ) -> Result<(), ControllerError> {
+        // A stream needs an idle read deadline, not the short global command deadline.
+        let config = ureq::Agent::config_builder()
+            .proxy(None)
+            .max_redirects(0)
+            .timeout_connect(Some(Duration::from_secs(2)))
+            .timeout_per_read(Some(Duration::from_secs(4)))
+            .build();
+        let agent: ureq::Agent = config.into();
+        let mut url = self.endpoint(&["logs"]);
+        url.query_pairs_mut().append_pair("format", "structured");
+        let mut request = agent.get(url.as_str());
+        if !self.secret.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", self.secret));
+        }
+        let mut response = request.call().map_err(http_error)?;
+        if response.status().as_u16() != 200 {
+            return Err(ControllerError::Status(response.status().as_u16()));
+        }
+
+        const MAX_FRAME_BYTES: u64 = 16 * 1024;
+        let mut reader = BufReader::new(response.body_mut().as_reader());
+        let mut frame = Vec::new();
+        while !cancelled() {
+            frame.clear();
+            if reader
+                .by_ref()
+                .take(MAX_FRAME_BYTES)
+                .read_until(b'\n', &mut frame)
+                .map_err(|_| ControllerError::Unreachable)?
+                == 0
+            {
+                break;
+            }
+            if frame.last() != Some(&b'\n') {
+                return Err(ControllerError::InvalidResponse);
+            }
+            if let Ok(log) = serde_json::from_slice(&frame) {
+                sink(log);
+            }
+        }
+        Ok(())
+    }
+
     pub fn traffic(&self) -> Result<Traffic, ControllerError> {
         // This endpoint is an open NDJSON stream in Meow 0.29; do not
         // read the whole body to EOF to sample one frame.
@@ -370,6 +426,19 @@ mod tests {
             }
         });
         (controller, worker)
+    }
+
+    #[test]
+    fn streams_ordered_structured_log_entries() {
+        let (c, worker) = fixture(vec![(
+            "GET /logs?format=structured HTTP/",
+            "{\"time\":\"00:00:00\",\"level\":\"info\",\"message\":\"one\"}\ninvalid\n{\"time\":\"00:00:01\",\"level\":\"warn\",\"message\":\"two\"}\n",
+        )]);
+        let mut logs = Vec::new();
+        c.read_log_stream(|log| logs.push(log), || false).unwrap();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[1].message, "two");
+        worker.join().unwrap();
     }
 
     #[test]

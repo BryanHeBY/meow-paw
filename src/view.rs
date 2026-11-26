@@ -512,6 +512,73 @@ impl Paw {
         )
     }
 
+    fn logs(&self, cx: &mut Context<Self>) -> Div {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(history) = self.snapshot.logs.as_ref() {
+            let entries = history.recent();
+            let clear = history.clone();
+            let panel = div().flex().flex_col().gap_3().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(chip(
+                        format!("{} retained entries", entries.len()),
+                        BLUE,
+                        SOFT_BLUE,
+                    ))
+                    .child(
+                        secondary_button("clear-logs", "Clear").on_click(cx.listener(
+                            move |_, _, _, cx| {
+                                clear.clear();
+                                cx.notify();
+                            },
+                        )),
+                    ),
+            );
+            if entries.is_empty() {
+                return panel.child(empty_state(
+                    "Waiting for log entries",
+                    "New messages from this Meow session appear here.",
+                ));
+            }
+            return panel.child(card().children(entries.into_iter().map(|entry| {
+                let color = match entry.level.as_str() {
+                    "error" => 0xa83a33,
+                    "warn" => STREAM_UP,
+                    _ => BLUE,
+                };
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(LINE))
+                    .child(
+                        div()
+                            .w(px(70.))
+                            .flex_shrink_0()
+                            .text_sm()
+                            .text_color(rgb(FAINT))
+                            .child(entry.time),
+                    )
+                    .child(
+                        div()
+                            .w(px(56.))
+                            .flex_shrink_0()
+                            .child(chip(entry.level, color, BG)),
+                    )
+                    .child(div().min_w_0().flex_1().text_sm().child(entry.message))
+            })));
+        }
+        let _ = cx;
+        empty_state(
+            "No running session",
+            "Start a profile to view live Meow logs. Entries are kept only for the current session.",
+        )
+    }
+
     fn desktop_available(&self) -> bool {
         #[cfg(any(target_os = "linux", windows))]
         {
@@ -1221,7 +1288,7 @@ impl Render for Paw {
             Page::Profiles => self.profiles(cx),
             Page::Connections => self.connections(),
             Page::Rules => self.rules(cx),
-            Page::Logs => empty_state("Logs", "A live log viewer is not available in this build."),
+            Page::Logs => self.logs(cx),
             Page::Unlock => empty_state(
                 "Unlock",
                 "Service availability tests are not available in this build.",
