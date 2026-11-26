@@ -103,6 +103,8 @@ pub struct Paw {
     _search_changes: Subscription,
     connection_filter: Entity<InputState>,
     _connection_filter_changes: Subscription,
+    probe_url: Entity<InputState>,
+    _probe_url_changes: Subscription,
     #[cfg(any(target_os = "linux", windows))]
     desktop: Option<meow_paw::app::Desktop>,
     #[cfg(any(target_os = "linux", windows))]
@@ -126,7 +128,11 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let search = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).connection_filter.read(cx).value();
     let connection_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
+    let query = paw.read(cx).probe_url.read(cx).value();
+    let probe_url = cx.new(|cx| InputState::new(window, cx).default_value(query));
     paw.update(cx, |state, cx| {
+        state._probe_url_changes = subscribe_search(&probe_url, cx);
+        state.probe_url = probe_url;
         state._search_changes = subscribe_search(&search, cx);
         state.search = search;
         state._connection_filter_changes = subscribe_search(&connection_filter, cx);
@@ -146,7 +152,9 @@ pub fn open(
 ) -> Entity<Paw> {
     let search = cx.new(|cx| InputState::new(window, cx));
     let connection_filter = cx.new(|cx| InputState::new(window, cx));
+    let probe_url = cx.new(|cx| InputState::new(window, cx));
     cx.new(|cx| {
+        let probe_url_changes = subscribe_search(&probe_url, cx);
         let search_changes = subscribe_search(&search, cx);
         let connection_filter_changes = subscribe_search(&connection_filter, cx);
         let (subscription_paths, subscription_notice) = preferences
@@ -180,6 +188,8 @@ pub fn open(
             _search_changes: search_changes,
             connection_filter,
             _connection_filter_changes: connection_filter_changes,
+            probe_url,
+            _probe_url_changes: probe_url_changes,
             #[cfg(any(target_os = "linux", windows))]
             snapshot: Default::default(),
         };
@@ -1205,7 +1215,18 @@ impl Paw {
             let value = self.search.read(cx).value();
             let query = value.trim().to_lowercase();
             let mut count = 0;
+            use meow_paw::app::{ProxyProbeStatus, ProxyProbeTarget, parse_probe_url};
             let delays = unambiguous_route_delays(inventory);
+            let probe_ready = parse_probe_url(&self.probe_url.read(cx).value()).is_some();
+            let mut probe_candidates = std::collections::HashMap::new();
+            for node in &inventory.nodes {
+                probe_candidates
+                    .entry(node.name.as_str())
+                    .and_modify(|origin| *origin = None)
+                    .or_insert(Some(&node.origin));
+            }
+            let probe_busy = matches!(self.snapshot.probe, Some((_, ProxyProbeStatus::Running)));
+            let epoch = self.snapshot.probe_epoch;
             let groups = mode_groups(inventory, self.snapshot.mode)
                 .into_iter()
                 .filter_map(|(name, group)| {
@@ -1328,6 +1349,35 @@ impl Paw {
                                             |&(index, member)| {
                                                 let (g, n) = (name.clone(), member.to_owned());
                                                 let selected = group.now.as_deref() == Some(member);
+                                                let target = probe_candidates
+                                                    .get(member)
+                                                    .copied()
+                                                    .flatten()
+                                                    .filter(|_| {
+                                                        !inventory.groups.contains_key(member)
+                                                    })
+                                                    .map(|origin| ProxyProbeTarget {
+                                                        name: member.into(),
+                                                        origin: origin.clone(),
+                                                    });
+                                                let status_text = self
+                                                    .snapshot
+                                                    .probe
+                                                    .as_ref()
+                                                    .filter(|(tested, _)| {
+                                                        Some(tested) == target.as_ref()
+                                                    })
+                                                    .map(|(_, status)| match status {
+                                                        ProxyProbeStatus::Running => {
+                                                            "Testing…".into()
+                                                        }
+                                                        ProxyProbeStatus::Measured(ms) => {
+                                                            format!("Test: {ms} ms")
+                                                        }
+                                                        ProxyProbeStatus::Unavailable => {
+                                                            "Test unavailable".into()
+                                                        }
+                                                    });
                                                 card()
                                                     .id(SharedString::from(format!(
                                                         "proxy:{name}:{index}"
@@ -1377,6 +1427,56 @@ impl Paw {
                                                             17.,
                                                         ))
                                                     })
+                                                    .when_some(status_text, |el, status| {
+                                                        el.child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(FAINT))
+                                                                .child(status),
+                                                        )
+                                                    })
+                                                    .when_some(
+                                                        target.filter(|_| probe_ready),
+                                                        |el, target| {
+                                                            let test = secondary_button(
+                                                                SharedString::from(format!(
+                                                                    "probe:{name}:{index}"
+                                                                )),
+                                                                "Test",
+                                                            )
+                                                            .on_click(cx.listener(
+                                                                move |paw, _, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    if !probe_busy {
+                                                                        let value = paw
+                                                                            .probe_url
+                                                                            .read(cx)
+                                                                            .value();
+                                                                        paw.error = paw
+                                                                            .desktop
+                                                                            .as_ref()
+                                                                            .and_then(|desktop| {
+                                                                                desktop
+                                                                                    .probe_proxy(
+                                                                                        epoch,
+                                                                                        target
+                                                                                            .clone(
+                                                                                            ),
+                                                                                        &value,
+                                                                                    )
+                                                                                    .err()
+                                                                                    .map(|e| {
+                                                                                        e.to_string(
+                                                                                        )
+                                                                                    })
+                                                                            });
+                                                                        cx.notify();
+                                                                    }
+                                                                },
+                                                            ));
+                                                            el.child(test)
+                                                        },
+                                                    )
                                                     .when(mutable && !selected, |el| {
                                                         el.cursor_pointer()
                                                             .hover(|style| style.bg(rgb(SOFT_BLUE)))
@@ -1507,9 +1607,22 @@ impl Paw {
                         })
                 })
                 .collect::<Vec<_>>();
-            let page = div().flex().flex_col().gap_3().child(toolbar).when(
-                !providers.is_empty(),
-                |page| {
+            let probe_settings =
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_sm().text_color(rgb(FAINT)).child(
+                        "Latency test · Meow opens this HTTPS URL through the chosen proxy.",
+                    ))
+                    .child(Input::new(&self.probe_url).cleanable(true));
+            let page = div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(toolbar)
+                .child(probe_settings)
+                .when(!providers.is_empty(), |page| {
                     page.child(
                         div()
                             .mt_2()
@@ -1518,8 +1631,7 @@ impl Paw {
                             .child("Providers"),
                     )
                     .children(providers)
-                },
-            );
+                });
             return if groups.is_empty() {
                 page.child(empty_state(
                     "No matching groups",

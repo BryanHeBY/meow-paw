@@ -3,7 +3,7 @@
 use crate::subscription_store::{SubscriptionId, SubscriptionStore};
 use crate::{
     engine::{
-        controller::{Connection, Inventory, LogEntry, RoutingMode, Rule, Traffic},
+        controller::{Connection, Inventory, LogEntry, Origin, RoutingMode, Rule, Traffic},
         session::{ApplyError, Session},
     },
     profile::{Diagnostic, MAX_PROFILE_BYTES, Profile},
@@ -80,6 +80,46 @@ impl TrafficHistory {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProxyProbeTarget {
+    pub name: String,
+    pub origin: Origin,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProxyProbeStatus {
+    Running,
+    Measured(u32),
+    Unavailable,
+}
+
+pub fn parse_probe_url(value: &str) -> Option<url::Url> {
+    let value = value.trim();
+    let (scheme, remainder) = value.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("https")
+        || remainder.starts_with(['/', '\\'])
+        || remainder.split(['/', '?', '#']).next()?.contains('@')
+    {
+        return None;
+    }
+    let url = url::Url::parse(value).ok()?;
+    (url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none())
+    .then_some(url)
+}
+
+pub fn unique_proxy(inventory: &Inventory, name: &str) -> Option<Origin> {
+    if inventory.groups.contains_key(name) {
+        return None;
+    }
+    let mut candidates = inventory.nodes.iter().filter(|node| node.name == name);
+    let first = candidates.next()?;
+    candidates.next().is_none().then(|| first.origin.clone())
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub revision: u64,
@@ -98,6 +138,8 @@ pub struct Snapshot {
     pub action_error: Option<String>,
     pub refreshing_provider: Option<String>,
     pub provider_error: Option<String>,
+    pub probe_epoch: u64,
+    pub probe: Option<(ProxyProbeTarget, ProxyProbeStatus)>,
 }
 
 const LOG_CAPACITY: usize = 256;
@@ -204,10 +246,18 @@ impl ProfileInput {
 enum Command {
     Start(ProfileInput),
     ApplyProfile(ProfileInput),
-    Select { group: String, member: String },
+    Select {
+        group: String,
+        member: String,
+    },
     SetMode(RoutingMode),
     ReadRules,
     RefreshProvider(String),
+    ProbeProxy {
+        epoch: u64,
+        target: ProxyProbeTarget,
+        url: url::Url,
+    },
     CloseConnection(String),
 }
 
@@ -281,6 +331,16 @@ impl Desktop {
         self.send(Command::SetMode(mode))
     }
 
+    pub fn probe_proxy(&self, epoch: u64, target: ProxyProbeTarget, value: &str) -> io::Result<()> {
+        let url = parse_probe_url(value).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "Enter a valid HTTPS test URL without credentials or a fragment",
+            )
+        })?;
+        self.send(Command::ProbeProxy { epoch, target, url })
+    }
+
     pub fn refresh_provider(&self, name: String) -> io::Result<()> {
         self.send(Command::RefreshProvider(name))
     }
@@ -332,6 +392,8 @@ fn run(
     let (refresh_tx, refresh_rx) = mpsc::channel();
     let mut generation = 0_u64;
     let mut refresh_inflight = false;
+    let (probe_tx, probe_rx) = mpsc::channel();
+    let mut probe_inflight = false;
     let cancelled = || stop.load(Ordering::Acquire) || quit.load(Ordering::Acquire);
     loop {
         if quit.load(Ordering::Acquire) {
@@ -354,7 +416,7 @@ fn run(
                 change(snapshot, |s| s.engine = EngineStatus::Stopped);
             }
             logs.take();
-            clear_telemetry(snapshot);
+            clear_telemetry(snapshot, generation);
             continue;
         }
 
@@ -368,7 +430,7 @@ fn run(
                     change(snapshot, |s| {
                         s.engine = EngineStatus::Error(format!("Meow exited ({code})"))
                     });
-                    clear_telemetry(snapshot);
+                    clear_telemetry(snapshot, generation);
                 }
                 Err(error) => {
                     generation = generation.wrapping_add(1);
@@ -377,7 +439,7 @@ fn run(
                     change(snapshot, |s| {
                         s.engine = EngineStatus::Error(error.to_string())
                     });
-                    clear_telemetry(snapshot);
+                    clear_telemetry(snapshot, generation);
                 }
             }
         }
@@ -396,6 +458,8 @@ fn run(
                 generation = generation.wrapping_add(1);
                 change(snapshot, |s| {
                     s.engine = EngineStatus::Starting;
+                    s.probe_epoch = generation;
+                    s.probe = None;
                     s.profile = Some(path.clone());
                     s.diagnostics.clear();
                     s.action_error = None;
@@ -435,6 +499,8 @@ fn run(
                 change(snapshot, |s| {
                     s.refreshing_provider = None;
                     s.provider_error = None;
+                    s.probe_epoch = generation;
+                    s.probe = None;
                 });
                 let path = input.key();
                 let Some(active) = &session else {
@@ -558,6 +624,46 @@ fn run(
                     }
                 }
             }
+            Ok(Command::ProbeProxy { epoch, target, url }) => {
+                if let Some(active) = &session
+                    && epoch == generation
+                    && !probe_inflight
+                {
+                    let resolved = snapshot
+                        .lock()
+                        .expect("snapshot poisoned")
+                        .inventory
+                        .as_ref()
+                        .and_then(|inventory| unique_proxy(inventory, &target.name));
+                    if resolved != Some(target.origin.clone()) {
+                        continue;
+                    }
+                    let controller = active.controller.clone();
+                    let tx = probe_tx.clone();
+                    let requested = target.clone();
+                    change(snapshot, |s| {
+                        s.probe = Some((target.clone(), ProxyProbeStatus::Running))
+                    });
+                    probe_inflight = true;
+                    if thread::Builder::new()
+                        .name("paw-proxy-probe".into())
+                        .spawn(move || {
+                            let status = controller
+                                .delay(&requested.origin, &requested.name, &url)
+                                .ok()
+                                .filter(|ms| *ms > 0)
+                                .map_or(ProxyProbeStatus::Unavailable, ProxyProbeStatus::Measured);
+                            let _ = tx.send((epoch, requested, status));
+                        })
+                        .is_err()
+                    {
+                        probe_inflight = false;
+                        change(snapshot, |s| {
+                            s.probe = Some((target, ProxyProbeStatus::Unavailable))
+                        });
+                    }
+                }
+            }
             Ok(Command::ReadRules) => {
                 if let Some(active) = &session {
                     let result = active.controller.rules();
@@ -589,6 +695,12 @@ fn run(
                 continue;
             }
             change(snapshot, |s| finish_provider_refresh(s, result));
+            next_sample = Instant::now();
+        }
+
+        while let Ok((epoch, target, status)) = probe_rx.try_recv() {
+            probe_inflight = false;
+            change(snapshot, |s| finish_proxy_probe(s, epoch, target, status));
             next_sample = Instant::now();
         }
 
@@ -647,8 +759,23 @@ fn finish_provider_refresh(
     });
 }
 
-fn clear_telemetry(snapshot: &Mutex<Snapshot>) {
+fn finish_proxy_probe(
+    snapshot: &mut Snapshot,
+    epoch: u64,
+    target: ProxyProbeTarget,
+    status: ProxyProbeStatus,
+) {
+    if epoch == snapshot.probe_epoch
+        && snapshot.probe.as_ref() == Some(&(target.clone(), ProxyProbeStatus::Running))
+    {
+        snapshot.probe = Some((target, status));
+    }
+}
+
+fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64) {
     change(snapshot, |s| {
+        s.probe_epoch = generation;
+        s.probe = None;
         s.inventory = None;
         s.refreshing_provider = None;
         s.provider_error = None;
@@ -685,6 +812,54 @@ fn load_profile(path: &std::path::Path) -> io::Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_probe_rejects_ambiguous_targets_and_stale_completions() {
+        use crate::engine::controller::{Node, Proxy};
+        let node = |origin| Node {
+            origin,
+            name: "Example".into(),
+            proxy: Proxy::default(),
+        };
+        let mut inventory = Inventory::default();
+        inventory.nodes.push(node(Origin::Provider("One".into())));
+        let origin = unique_proxy(&inventory, "Example").unwrap();
+        inventory.nodes.push(node(Origin::Provider("Two".into())));
+        assert!(unique_proxy(&inventory, "Example").is_none());
+        inventory.nodes.pop();
+        inventory.groups.insert("Example".into(), Proxy::default());
+        assert!(unique_proxy(&inventory, "Example").is_none());
+
+        let target = ProxyProbeTarget {
+            origin,
+            name: "Example".into(),
+        };
+        let mut s = Snapshot {
+            probe_epoch: 12,
+            probe: Some((target.clone(), ProxyProbeStatus::Running)),
+            ..Default::default()
+        };
+        finish_proxy_probe(&mut s, 11, target.clone(), ProxyProbeStatus::Measured(10));
+        assert_eq!(s.probe, Some((target.clone(), ProxyProbeStatus::Running)));
+        finish_proxy_probe(&mut s, 12, target.clone(), ProxyProbeStatus::Measured(20));
+        assert_eq!(s.probe, Some((target, ProxyProbeStatus::Measured(20))));
+    }
+
+    #[test]
+    fn probe_urls_are_explicit_https_without_credentials_or_fragments() {
+        assert!(parse_probe_url(" https://127.0.0.1:1234/check?x=1 ").is_some());
+        for value in [
+            "",
+            "example.invalid",
+            "http://127.0.0.1",
+            "https:example.invalid",
+            "https://a:b@example.invalid",
+            "https://@example.invalid",
+            "https://example.invalid/#x",
+        ] {
+            assert!(parse_probe_url(value).is_none(), "accepted {value}");
+        }
+    }
 
     #[test]
     fn failed_provider_refresh_and_lost_sample_preserve_last_inventory() {
