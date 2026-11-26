@@ -336,6 +336,8 @@ pub struct Snapshot {
     pub rules: Option<Arc<Vec<Rule>>>,
     pub rule_providers: Option<Arc<BTreeMap<String, RuleProviderStatus>>>,
     pub rule_provider_error: Option<String>,
+    /// A requested read is running or waiting for an older session's read to finish.
+    pub rule_provider_pending: bool,
     pub logs: Option<LogHistory>,
     pub traffic: Option<Traffic>,
     pub traffic_history: TrafficHistory,
@@ -652,8 +654,7 @@ impl Desktop {
         self.stop.store(true, Ordering::Release);
         change(&self.snapshot, |s| {
             s.group_probe = None;
-            s.rule_providers = None;
-            s.rule_provider_error = None;
+            clear_rule_provider_state(s);
         });
     }
 
@@ -705,7 +706,7 @@ fn run(
     let mut generation = 0_u64;
     let mut refresh_inflight = false;
     let (rule_provider_tx, rule_provider_rx) = mpsc::channel();
-    let mut rule_provider_inflight = false;
+    let mut rule_provider_inflight = None;
     let (probe_tx, probe_rx) = mpsc::channel();
     let mut probe_inflight = false;
     let cancelled = || stop.load(Ordering::Acquire) || quit.load(Ordering::Acquire);
@@ -775,8 +776,7 @@ fn run(
                     s.probe_epoch = generation;
                     s.probes = ProxyProbeResults::default();
                     s.group_probe = None;
-                    s.rule_providers = None;
-                    s.rule_provider_error = None;
+                    clear_rule_provider_state(s);
                     s.profile = Some(path.clone());
                     s.diagnostics.clear();
                     s.action_error = None;
@@ -816,8 +816,7 @@ fn run(
                 change(snapshot, |s| {
                     s.refreshing_provider = None;
                     s.provider_error = None;
-                    s.rule_providers = None;
-                    s.rule_provider_error = None;
+                    clear_rule_provider_state(s);
                     s.probe_epoch = generation;
                     s.probes = ProxyProbeResults::default();
                     s.group_probe = None;
@@ -999,31 +998,10 @@ fn run(
                 }
             }
             Ok(Command::ReadRuleProviders) => {
-                if let Some(active) = &session {
-                    if rule_provider_inflight {
-                        change(snapshot, |s| {
-                            s.rule_provider_error =
-                                Some("Rule provider read is still finishing".into());
-                        });
-                        continue;
-                    }
-                    let controller = active.controller.clone();
-                    let tx = rule_provider_tx.clone();
-                    let epoch = generation;
-                    change(snapshot, |s| s.rule_provider_error = None);
-                    rule_provider_inflight = true;
-                    if thread::Builder::new()
-                        .name("paw-rule-provider-read".into())
-                        .spawn(move || {
-                            let _ = tx.send((epoch, controller.rule_providers()));
-                        })
-                        .is_err()
-                    {
-                        rule_provider_inflight = false;
-                        change(snapshot, |s| {
-                            s.rule_provider_error =
-                                Some("Could not start rule provider read".into());
-                        });
+                if session.is_some() {
+                    let mut s = snapshot.lock().expect("snapshot poisoned");
+                    if !cancelled() && begin_rule_provider_read(&mut s, generation) {
+                        s.revision = s.revision.wrapping_add(1);
                     }
                 }
             }
@@ -1050,12 +1028,40 @@ fn run(
         }
 
         while let Ok((epoch, result)) = rule_provider_rx.try_recv() {
-            rule_provider_inflight = false;
-            change(snapshot, |s| {
-                if !cancelled() {
+            if release_rule_provider_read(&mut rule_provider_inflight, epoch) && !cancelled() {
+                change(snapshot, |s| {
                     finish_rule_provider_read(s, epoch, result);
+                });
+            }
+        }
+
+        // Keep at most one read worker, including across profile changes. A read
+        // requested for the current profile waits here for the old worker to exit.
+        if let Some(active) = &session
+            && rule_provider_inflight.is_none()
+        {
+            let mut s = snapshot.lock().expect("snapshot poisoned");
+            if !cancelled()
+                && s.probe_epoch == generation
+                && s.rule_provider_pending
+                && matches!(s.engine, EngineStatus::Running { .. })
+            {
+                let controller = active.controller.clone();
+                let tx = rule_provider_tx.clone();
+                let epoch = generation;
+                rule_provider_inflight = Some(epoch);
+                if thread::Builder::new()
+                    .name("paw-rule-provider-read".into())
+                    .spawn(move || {
+                        let _ = tx.send((epoch, controller.rule_providers()));
+                    })
+                    .is_err()
+                {
+                    rule_provider_inflight = None;
+                    fail_rule_provider_spawn(&mut s, epoch);
+                    s.revision = s.revision.wrapping_add(1);
                 }
-            });
+            }
         }
 
         while let Ok(completion) = probe_rx.try_recv() {
@@ -1199,14 +1205,51 @@ fn retain_inventory(snapshot: &mut Snapshot, fresh: Option<Arc<Inventory>>) {
     }
 }
 
+fn clear_rule_provider_state(snapshot: &mut Snapshot) {
+    snapshot.rule_providers = None;
+    snapshot.rule_provider_error = None;
+    snapshot.rule_provider_pending = false;
+}
+
+fn begin_rule_provider_read(snapshot: &mut Snapshot, epoch: u64) -> bool {
+    if epoch != snapshot.probe_epoch
+        || !matches!(snapshot.engine, EngineStatus::Running { .. })
+        || snapshot.rule_provider_pending
+    {
+        return false;
+    }
+    snapshot.rule_provider_pending = true;
+    snapshot.rule_provider_error = None;
+    true
+}
+
+fn release_rule_provider_read(inflight: &mut Option<u64>, epoch: u64) -> bool {
+    if *inflight != Some(epoch) {
+        return false;
+    }
+    *inflight = None;
+    true
+}
+
+fn fail_rule_provider_spawn(snapshot: &mut Snapshot, epoch: u64) {
+    if epoch == snapshot.probe_epoch && snapshot.rule_provider_pending {
+        snapshot.rule_provider_pending = false;
+        snapshot.rule_provider_error = Some("Could not start rule provider read".into());
+    }
+}
+
 fn finish_rule_provider_read(
     snapshot: &mut Snapshot,
     epoch: u64,
     result: Result<BTreeMap<String, RuleProviderStatus>, ControllerError>,
 ) {
-    if epoch != snapshot.probe_epoch || !matches!(snapshot.engine, EngineStatus::Running { .. }) {
+    if epoch != snapshot.probe_epoch
+        || !matches!(snapshot.engine, EngineStatus::Running { .. })
+        || !snapshot.rule_provider_pending
+    {
         return;
     }
+    snapshot.rule_provider_pending = false;
     match result {
         Ok(providers) => {
             snapshot.rule_providers = Some(Arc::new(providers));
@@ -1291,8 +1334,7 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64) {
         s.provider_error = None;
         s.mode = None;
         s.rules = None;
-        s.rule_providers = None;
-        s.rule_provider_error = None;
+        clear_rule_provider_state(s);
         s.logs = None;
         s.connections = None;
         s.traffic = None;
@@ -1337,16 +1379,20 @@ mod tests {
             ..Default::default()
         };
         assert!(snapshot.rule_providers.is_none());
+        assert!(begin_rule_provider_read(&mut snapshot, 7));
         finish_rule_provider_read(&mut snapshot, 7, Err(ControllerError::Status(404)));
+        assert!(!snapshot.rule_provider_pending);
         assert!(snapshot.rule_providers.is_none());
         assert_eq!(
             snapshot.rule_provider_error.as_deref(),
             Some("Could not read rule providers: Controller returned HTTP 404")
         );
+        assert!(begin_rule_provider_read(&mut snapshot, 7));
         finish_rule_provider_read(&mut snapshot, 7, Ok(BTreeMap::new()));
         let empty = Arc::clone(snapshot.rule_providers.as_ref().unwrap());
         assert!(empty.is_empty());
         assert!(snapshot.rule_provider_error.is_none());
+        assert!(begin_rule_provider_read(&mut snapshot, 7));
         finish_rule_provider_read(&mut snapshot, 7, Err(ControllerError::InvalidResponse));
         assert!(Arc::ptr_eq(
             &empty,
@@ -1369,6 +1415,107 @@ mod tests {
         state.engine = EngineStatus::Stopped;
         finish_rule_provider_read(&mut state, 8, Ok(BTreeMap::new()));
         assert!(state.rule_providers.is_none());
+    }
+
+    #[test]
+    fn rule_provider_pending_deduplicates_and_retains_last_good_on_failure() {
+        let providers = Arc::new(BTreeMap::new());
+        let mut snapshot = Snapshot {
+            engine: EngineStatus::Running { mixed_port: 1234 },
+            probe_epoch: 7,
+            rule_providers: Some(Arc::clone(&providers)),
+            rule_provider_error: Some("previous failure".into()),
+            ..Default::default()
+        };
+        assert!(begin_rule_provider_read(&mut snapshot, 7));
+        assert!(snapshot.rule_provider_pending);
+        assert!(snapshot.rule_provider_error.is_none());
+        assert!(!begin_rule_provider_read(&mut snapshot, 7));
+        assert!(snapshot.rule_provider_pending);
+        assert!(snapshot.rule_provider_error.is_none());
+        finish_rule_provider_read(&mut snapshot, 7, Err(ControllerError::InvalidResponse));
+        assert!(!snapshot.rule_provider_pending);
+        assert!(snapshot.rule_provider_error.is_some());
+        assert!(Arc::ptr_eq(
+            &providers,
+            snapshot.rule_providers.as_ref().unwrap()
+        ));
+        assert!(begin_rule_provider_read(&mut snapshot, 7));
+        assert!(snapshot.rule_provider_error.is_none());
+        finish_rule_provider_read(&mut snapshot, 7, Ok(BTreeMap::new()));
+        assert!(!snapshot.rule_provider_pending);
+        assert!(snapshot.rule_provider_error.is_none());
+    }
+
+    #[test]
+    fn old_rule_provider_completion_cannot_cancel_new_profile_request() {
+        let mut snapshot = Snapshot {
+            engine: EngineStatus::Running { mixed_port: 1234 },
+            probe_epoch: 7,
+            ..Default::default()
+        };
+        assert!(begin_rule_provider_read(&mut snapshot, 7));
+        let mut inflight = Some(7);
+        clear_rule_provider_state(&mut snapshot);
+        snapshot.probe_epoch = 8;
+        assert!(begin_rule_provider_read(&mut snapshot, 8));
+        assert!(!begin_rule_provider_read(&mut snapshot, 8));
+        assert_eq!(inflight, Some(7)); // The new request waits for the sole worker.
+        assert!(release_rule_provider_read(&mut inflight, 7));
+        finish_rule_provider_read(&mut snapshot, 7, Err(ControllerError::Status(503)));
+        assert!(snapshot.rule_provider_pending);
+        assert!(snapshot.rule_provider_error.is_none());
+        assert!(snapshot.rule_providers.is_none());
+        assert_eq!(inflight, None);
+        inflight = Some(8);
+        assert!(!release_rule_provider_read(&mut inflight, 7));
+        assert_eq!(inflight, Some(8));
+        assert!(release_rule_provider_read(&mut inflight, 8));
+        finish_rule_provider_read(&mut snapshot, 8, Ok(BTreeMap::new()));
+        assert!(!snapshot.rule_provider_pending);
+        assert!(snapshot.rule_providers.is_some());
+    }
+
+    #[test]
+    fn rule_provider_spawn_failure_and_stop_clear_only_current_pending() {
+        let providers = Arc::new(BTreeMap::new());
+        let mut snapshot = Snapshot {
+            engine: EngineStatus::Running { mixed_port: 1234 },
+            probe_epoch: 8,
+            rule_providers: Some(Arc::clone(&providers)),
+            ..Default::default()
+        };
+        assert!(begin_rule_provider_read(&mut snapshot, 8));
+        fail_rule_provider_spawn(&mut snapshot, 7);
+        assert!(snapshot.rule_provider_pending);
+        fail_rule_provider_spawn(&mut snapshot, 8);
+        assert!(!snapshot.rule_provider_pending);
+        assert_eq!(
+            snapshot.rule_provider_error.as_deref(),
+            Some("Could not start rule provider read")
+        );
+        assert!(Arc::ptr_eq(
+            &providers,
+            snapshot.rule_providers.as_ref().unwrap()
+        ));
+        assert!(begin_rule_provider_read(&mut snapshot, 8));
+
+        let (command, _receiver) = mpsc::sync_channel(1);
+        let desktop = Desktop {
+            command,
+            snapshot: Arc::new(Mutex::new(snapshot)),
+            stop: Arc::new(AtomicBool::new(false)),
+            quit: Arc::new(AtomicBool::new(false)),
+            worker: None,
+        };
+        desktop.stop();
+        let mut state = desktop.snapshot.lock().unwrap();
+        assert!(!state.rule_provider_pending);
+        assert!(state.rule_providers.is_none());
+        assert!(state.rule_provider_error.is_none());
+        finish_rule_provider_read(&mut state, 8, Ok(BTreeMap::new()));
+        assert!(state.rule_providers.is_none());
+        assert!(!state.rule_provider_pending);
     }
 
     #[test]

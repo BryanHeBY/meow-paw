@@ -975,14 +975,23 @@ impl Paw {
 
     #[cfg(any(target_os = "linux", windows))]
     fn rule_sets(&self, cx: &mut Context<Self>) -> Div {
+        let pending = self.snapshot.rule_provider_pending;
         let read = subscription_button(
             "read-rule-sets",
-            self.locale.message(Message::ReadRuleSets),
+            self.locale.message(if pending {
+                Message::ReadingRuleSets
+            } else {
+                Message::ReadRuleSets
+            }),
             false,
             cx,
         )
         .track_focus(&self.rule_sets_read_focus)
+        .when(pending, |read| read.opacity(0.65))
         .on_click(cx.listener(|this, _, _, cx| {
+            if this.snapshot.rule_provider_pending {
+                return;
+            }
             this.rule_sets_read_failed = this
                 .desktop
                 .as_ref()
@@ -1021,7 +1030,10 @@ impl Paw {
             );
         }
         match &self.snapshot.rule_providers {
-            None if !self.rule_sets_read_failed && self.snapshot.rule_provider_error.is_none() => {
+            None if !pending
+                && !self.rule_sets_read_failed
+                && self.snapshot.rule_provider_error.is_none() =>
+            {
                 panel.child(
                     div()
                         .text_sm()

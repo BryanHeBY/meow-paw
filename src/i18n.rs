@@ -161,6 +161,7 @@ pub enum Message {
     CloseConnection,
     RuleSets,
     ReadRuleSets,
+    ReadingRuleSets,
     RuleSetsReadOnly,
     RuleSetsNotLoaded,
     RuleSetsEmpty,
@@ -479,6 +480,7 @@ fn english(key: Message) -> &'static str {
         Message::CloseConnection => "Close",
         Message::RuleSets => "Rule sets",
         Message::ReadRuleSets => "Read rule sets",
+        Message::ReadingRuleSets => "Reading rule sets…",
         Message::RuleSetsReadOnly => "Read-only · This list does not update providers.",
         Message::RuleSetsNotLoaded => "Rule sets have not been loaded.",
         Message::RuleSetsEmpty => "No rule sets found.",
@@ -676,6 +678,7 @@ fn chinese(key: Message) -> &'static str {
         Message::CloseConnection => "关闭",
         Message::RuleSets => "规则集",
         Message::ReadRuleSets => "读取规则集",
+        Message::ReadingRuleSets => "正在读取规则集…",
         Message::RuleSetsReadOnly => "只读 · 此列表不会更新提供者。",
         Message::RuleSetsNotLoaded => "尚未加载规则集。",
         Message::RuleSetsEmpty => "未找到规则集。",
@@ -951,6 +954,11 @@ mod tests {
         let cases = [
             (Message::RuleSets, "Rule sets", "规则集"),
             (Message::ReadRuleSets, "Read rule sets", "读取规则集"),
+            (
+                Message::ReadingRuleSets,
+                "Reading rule sets…",
+                "正在读取规则集…",
+            ),
             (
                 Message::RuleSetsReadOnly,
                 "Read-only · This list does not update providers.",
