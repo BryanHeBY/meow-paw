@@ -19,6 +19,8 @@ the bundle. The two binaries remain separate processes.
 The Linux and Windows CI jobs check formatting, lint the desktop targets,
 and execute the headless test suite with locked dependencies. They do not
 build or publish the kernel submodule or run a graphical tray session.
+See the [Windows packaging and visual acceptance runbook](docs/windows-packaging-visual-acceptance.md)
+for local provenance checks and isolated synthetic captures.
 To run the real managed-kernel test separately, set `MEOW_BIN` to the local
 kernel executable and run:
 
