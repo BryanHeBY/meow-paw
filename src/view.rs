@@ -679,7 +679,7 @@ impl Paw {
             ))
             .child(form_row(
                 "Proxy groups",
-                "Review the route selected by each policy.",
+                "Selected routes",
                 secondary_button("home-proxies", "Proxies").on_click(cx.listener(
                     |this, _, _, cx| {
                         this.page = Page::Proxies;
@@ -692,7 +692,7 @@ impl Paw {
             .child(form_row("Local listener", address, copy))
             .child(form_row(
                 "System proxy",
-                "Paw leaves your existing proxy untouched.",
+                "Existing system proxy",
                 chip("Unmanaged", FAINT, BG),
             ));
         let usage_toggle = secondary_button(
@@ -707,86 +707,86 @@ impl Paw {
             this.show_usage = !this.show_usage;
             cx.notify();
         }));
+        let (up, down, total) = self.traffic();
         div()
             .flex()
             .flex_col()
             .gap_3()
             .child(metric_row().child(width(profile)).child(width(network)))
-            .child(form_card("Traffic").child(form_row(
-                "Session usage",
-                "Live upload, download and session totals.",
-                usage_toggle,
-            )))
-            .when(self.show_usage, |body| {
-                let (up, down, total) = self.traffic();
-                body.child(
-                    metric_row()
-                        .child(metric("UPLOAD", up))
-                        .child(metric("DOWNLOAD", down))
-                        .child(metric("SESSION TOTAL", total)),
-                )
-                .child(self.traffic_timeline())
-            })
+            .child(
+                card()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(div().font_weight(FontWeight::BOLD).child("Traffic"))
+                            .child(usage_toggle),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(traffic_metric("Download", down, STREAM_DOWN))
+                            .child(traffic_metric("Upload", up, STREAM_UP))
+                            .child(traffic_metric("Session total", total, INK)),
+                    )
+                    .child(self.traffic_chart(28.)),
+            )
+            .when(self.show_usage, |body| body.child(self.traffic_timeline()))
     }
 
     fn traffic_timeline(&self) -> Div {
-        let label = div()
-            .flex()
-            .justify_between()
-            .items_center()
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Traffic activity"),
-            )
+        card()
             .child(
                 div()
                     .flex()
-                    .gap_4()
-                    .child(traffic_legend("Download", STREAM_DOWN))
-                    .child(traffic_legend("Upload", STREAM_UP)),
-            );
-        let frame = card().child(label);
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Traffic activity"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_4()
+                            .child(traffic_legend("Download", STREAM_DOWN))
+                            .child(traffic_legend("Upload", STREAM_UP)),
+                    ),
+            )
+            .child(self.traffic_chart(60.))
+    }
+
+    fn traffic_chart(&self, height: f32) -> Div {
         #[cfg(any(target_os = "linux", windows))]
         {
             use meow_paw::app::TRAFFIC_WINDOW_SECS;
             let samples: Vec<_> = self.snapshot.traffic_history.recent().collect();
-            if samples.iter().any(Option::is_some) {
-                let peak = samples
-                    .iter()
-                    .flatten()
-                    .map(|s| s.up.max(s.down))
-                    .max()
-                    .unwrap_or(0);
-                let pad = TRAFFIC_WINDOW_SECS.saturating_sub(samples.len());
-                let columns = std::iter::repeat_n(None, pad).chain(samples).map(|sample| {
-                    let (up, down) = sample.map_or((0., 0.), |s| {
-                        (traffic_bar(s.up, peak), traffic_bar(s.down, peak))
-                    });
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_end()
-                        .gap(px(1.))
-                        .h_full()
-                        .child(div().flex_1().rounded_sm().h(px(down)).bg(rgb(STREAM_DOWN)))
-                        .child(div().flex_1().rounded_sm().h(px(up)).bg(rgb(STREAM_UP)))
+            if let Some((peak, bars)) = traffic_bars(&samples, height) {
+                let pad = TRAFFIC_WINDOW_SECS.saturating_sub(bars.len());
+                let columns = std::iter::repeat_n(None, pad).chain(bars).map(|sample| {
+                    let column = div().flex_1().flex().items_end().gap(px(1.)).h_full();
+                    match sample {
+                        Some((0., 0.)) => {
+                            column.child(div().flex_1().h(px(2.)).rounded_sm().bg(rgb(LINE)))
+                        }
+                        Some((up, down)) => column
+                            .child(div().flex_1().rounded_sm().h(px(down)).bg(rgb(STREAM_DOWN)))
+                            .child(div().flex_1().rounded_sm().h(px(up)).bg(rgb(STREAM_UP))),
+                        None => column,
+                    }
                 });
-                return frame
+                return div()
                     .child(
                         div()
-                            .flex()
-                            .justify_between()
-                            .mt_3()
-                            .text_xs()
-                            .text_color(rgb(FAINT))
-                            .child("Shared scale")
-                            .child(format!("{}/s peak", bytes(peak))),
-                    )
-                    .child(
-                        div()
-                            .mt_1()
-                            .h(px(61.))
+                            .mt_2()
+                            .h(px(height + 1.))
                             .flex()
                             .items_end()
                             .gap(px(2.))
@@ -798,27 +798,20 @@ impl Paw {
                         div()
                             .flex()
                             .justify_between()
-                            .mt_2()
+                            .mt_1()
                             .text_xs()
                             .text_color(rgb(FAINT))
-                            .child("39 seconds ago")
-                            .child("Now"),
+                            .child("39s ago · gaps unavailable · grey zero")
+                            .child(format!("{}/s shared peak · now", bytes(peak))),
                     );
             }
         }
-        frame.child(
-            div()
-                .mt_4()
-                .h(px(70.))
-                .rounded_lg()
-                .bg(rgb(SOFT_BLUE))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(rgb(FAINT))
-                .child("Live activity appears when a session sends its first sample."),
-        )
+        let _ = height;
+        div()
+            .mt_2()
+            .text_xs()
+            .text_color(rgb(FAINT))
+            .child("No traffic samples available yet.")
     }
 
     fn traffic(&self) -> (String, String, String) {
@@ -1235,6 +1228,7 @@ impl Paw {
                 .into_iter()
                 .filter_map(|(name, group)| {
                     let all = unique_route_members(group.all.as_deref().unwrap_or_default());
+                    let route_count = all.len();
                     let show_all = route_matches(name, &query);
                     let mut members: Vec<_> = all
                         .into_iter()
@@ -1253,6 +1247,8 @@ impl Paw {
                     }
                     let toggle = name.clone();
                     let heading = card()
+                        .px_3()
+                        .py_2()
                         .id(SharedString::from(format!("group:{name}")))
                         .flex()
                         .items_center()
@@ -1271,27 +1267,36 @@ impl Paw {
                         .child(
                             div()
                                 .min_w_0()
+                                .flex_1()
                                 .child(
                                     div()
-                                        .text_base()
-                                        .font_weight(FontWeight::BOLD)
-                                        .child(name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .mt_1()
                                         .flex()
+                                        .flex_wrap()
                                         .items_center()
                                         .gap_2()
-                                        .child(chip(group.kind.clone(), BLUE, SOFT_BLUE))
                                         .child(
-                                            div().text_sm().text_color(rgb(FAINT)).child(
-                                                group
-                                                    .now
-                                                    .clone()
-                                                    .unwrap_or_else(|| "No active route".into()),
+                                            div()
+                                                .min_w_0()
+                                                .font_weight(FontWeight::BOLD)
+                                                .child(name.clone()),
+                                        )
+                                        .child(compact_chip(group.kind.clone(), BLUE, SOFT_BLUE))
+                                        .child(compact_chip(
+                                            format!(
+                                                "{route_count} {}",
+                                                if route_count == 1 { "route" } else { "routes" }
                                             ),
-                                        ),
+                                            FAINT,
+                                            BG,
+                                        )),
+                                )
+                                .child(
+                                    div().text_xs().text_color(rgb(FAINT)).child(
+                                        group
+                                            .now
+                                            .clone()
+                                            .unwrap_or_else(|| "No active route".into()),
+                                    ),
                                 ),
                         )
                         .when(expandable, |heading| {
@@ -1566,6 +1571,8 @@ impl Paw {
                         .clone()
                         .unwrap_or_else(|| "Awaiting first update".into());
                     card()
+                        .px_3()
+                        .py_2()
                         .flex()
                         .items_center()
                         .justify_between()
@@ -1573,15 +1580,39 @@ impl Paw {
                         .child(
                             div()
                                 .min_w_0()
-                                .child(div().font_weight(FontWeight::BOLD).child(name.clone()))
-                                .child(div().text_sm().text_color(rgb(FAINT)).child(format!(
-                                    "{} · {} {} · {}",
-                                    status.vehicle_type,
-                                    count,
-                                    if count == 1 { "node" } else { "nodes" },
-                                    updated
-                                )))
-                                .child(div().text_sm().text_color(rgb(FAINT)).child(usage)),
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .font_weight(FontWeight::BOLD)
+                                                .child(name.clone()),
+                                        )
+                                        .child(compact_chip(
+                                            status.vehicle_type.clone(),
+                                            BLUE,
+                                            SOFT_BLUE,
+                                        ))
+                                        .child(compact_chip(
+                                            format!(
+                                                "{count} {}",
+                                                if count == 1 { "node" } else { "nodes" }
+                                            ),
+                                            FAINT,
+                                            BG,
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(FAINT))
+                                        .child(format!("{updated} · {usage}")),
+                                ),
                         )
                         .when(status.vehicle_type.eq_ignore_ascii_case("http"), |row| {
                             row.child(
@@ -2036,6 +2067,10 @@ fn chip(label: impl Into<SharedString>, foreground: u32, background: u32) -> Div
         .child(label.into())
 }
 
+fn compact_chip(label: impl Into<SharedString>, foreground: u32, background: u32) -> Div {
+    chip(label, foreground, background).px_2().py(px(1.))
+}
+
 fn form_card(title: &'static str) -> Div {
     card().p_0().child(
         div()
@@ -2323,21 +2358,16 @@ fn destination_label(host: &str, port: &serde_json::Value) -> String {
     }
 }
 
-fn metric(label: &'static str, value: String) -> Div {
-    card()
+fn traffic_metric(label: &'static str, value: String, color: u32) -> Div {
+    div()
         .flex_1()
+        .min_w_0()
+        .child(div().text_xs().text_color(rgb(FAINT)).child(label))
         .child(
             div()
-                .text_xs()
+                .text_base()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(FAINT))
-                .child(label),
-        )
-        .child(
-            div()
-                .mt_2()
-                .text_xl()
-                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(color))
                 .child(value),
         )
 }
@@ -2354,11 +2384,25 @@ fn traffic_legend(label: &'static str, color: u32) -> Div {
 }
 
 #[cfg(any(target_os = "linux", windows))]
-fn traffic_bar(value: u64, peak: u64) -> f32 {
-    if peak == 0 || value == 0 {
-        return 0.;
-    }
-    (60. * (value.min(peak) as f64 / peak as f64) as f32).max(1.)
+type TrafficBars = Option<(u64, Vec<Option<(f32, f32)>>)>;
+
+#[cfg(any(target_os = "linux", windows))]
+fn traffic_bars(samples: &[Option<meow_paw::app::TrafficRate>], height: f32) -> TrafficBars {
+    let peak = samples.iter().flatten().map(|s| s.up.max(s.down)).max()?;
+    let scale = |value: u64| {
+        if peak == 0 || value == 0 {
+            0.
+        } else {
+            (height * (value.min(peak) as f64 / peak as f64) as f32).max(1.)
+        }
+    };
+    Some((
+        peak,
+        samples
+            .iter()
+            .map(|sample| sample.map(|s| (scale(s.up), scale(s.down))))
+            .collect(),
+    ))
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -2386,6 +2430,31 @@ fn paw_badge(size: f32) -> Div {
 #[cfg(test)]
 mod tests {
     use super::Page;
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn traffic_chart_keeps_unknown_and_zero_samples_distinct() {
+        use super::traffic_bars;
+        use meow_paw::app::TrafficRate;
+
+        assert_eq!(traffic_bars(&[], 28.), None);
+        assert_eq!(traffic_bars(&[None, None], 28.), None);
+        assert_eq!(
+            traffic_bars(&[None, Some(TrafficRate { up: 0, down: 0 })], 28.),
+            Some((0, vec![None, Some((0., 0.))]))
+        );
+        assert_eq!(
+            traffic_bars(
+                &[
+                    Some(TrafficRate { up: 5, down: 10 }),
+                    None,
+                    Some(TrafficRate { up: 0, down: 1 })
+                ],
+                60.,
+            ),
+            Some((10, vec![Some((30., 60.)), None, Some((0., 6.))]))
+        );
+    }
 
     #[test]
     #[cfg(any(target_os = "linux", windows))]
