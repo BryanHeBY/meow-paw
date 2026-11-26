@@ -1067,22 +1067,36 @@ impl Paw {
 
     fn overview_route(&self, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
-        let (detail, selections) =
+        let (detail, selections, excess) =
             if self.state().2.is_some() && self.snapshot.applying_profile.is_none() {
                 overview_route_summary(self.snapshot.mode, self.snapshot.inventory.as_deref())
             } else {
-                (Message::OverviewRouteUnavailable, Vec::new())
+                (Message::OverviewRouteUnavailable, Vec::new(), 0)
             };
         #[cfg(not(any(target_os = "linux", windows)))]
-        let (detail, selections): (Message, Vec<String>) =
-            (Message::OverviewRouteUnavailable, Vec::new());
-        form_card(self.locale.message(Message::OverviewCurrentRoute)).child(form_row(
+        let (detail, selections, excess): (Message, Vec<String>, usize) =
+            (Message::OverviewRouteUnavailable, Vec::new(), 0);
+        let mut preview = div().min_w_0();
+        if selections.is_empty() {
+            preview = preview.child("—");
+        } else {
+            for selection in selections {
+                preview = preview.child(
+                    div()
+                        .min_w_0()
+                        .h(px(16.))
+                        .overflow_hidden()
+                        .truncate()
+                        .child(selection),
+                );
+            }
+            if excess > 0 {
+                preview = preview.child(self.locale.overview_route_excess(excess));
+            }
+        }
+        form_card(self.locale.message(Message::OverviewCurrentRoute)).child(form_row_with_detail(
             self.locale.message(detail),
-            if selections.is_empty() {
-                "—".to_owned()
-            } else {
-                selections.join(" · ")
-            },
+            preview,
             secondary_button("home-proxies", self.locale.message(Message::Proxies)).on_click(
                 cx.listener(|this, _, _, cx| {
                     this.page = Page::Proxies;
@@ -2854,30 +2868,37 @@ fn overview_refresh_path<'a>(
 fn overview_route_summary(
     mode: Option<meow_paw::engine::controller::RoutingMode>,
     inventory: Option<&meow_paw::engine::controller::Inventory>,
-) -> (Message, Vec<String>) {
+) -> (Message, Vec<String>, usize) {
     use meow_paw::engine::controller::RoutingMode;
+    const PREVIEW_LIMIT: usize = 3;
     match mode {
-        Some(RoutingMode::Direct) => (Message::OverviewDirectRoute, Vec::new()),
+        Some(RoutingMode::Direct) => (Message::OverviewDirectRoute, Vec::new(), 0),
         Some(mode @ (RoutingMode::Rule | RoutingMode::Global)) => {
-            let selections = inventory
-                .map(|inventory| {
-                    mode_groups(inventory, Some(mode))
-                        .into_iter()
-                        .filter(|(name, _)| {
-                            mode != RoutingMode::Global || name.as_str() == "GLOBAL"
-                        })
-                        .filter_map(|(name, group)| {
-                            group
-                                .now
-                                .as_deref()
-                                .filter(|value| !value.is_empty())
-                                .map(|value| format!("{name} → {value}"))
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let mut selections = Vec::new();
+            let mut excess = 0;
+            if let Some(inventory) = inventory {
+                for (name, group) in mode_groups(inventory, Some(mode)) {
+                    if group.hidden
+                        || name.trim().is_empty()
+                        || (mode == RoutingMode::Global && name.as_str() != "GLOBAL")
+                    {
+                        continue;
+                    }
+                    if let Some(value) = group
+                        .now
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        if selections.len() < PREVIEW_LIMIT {
+                            selections.push(format!("{name} → {value}"));
+                        } else {
+                            excess += 1;
+                        }
+                    }
+                }
+            }
             if selections.is_empty() {
-                (Message::OverviewRouteUnavailable, selections)
+                (Message::OverviewRouteUnavailable, selections, 0)
             } else {
                 (
                     if mode == RoutingMode::Global {
@@ -2886,10 +2907,11 @@ fn overview_route_summary(
                         Message::OverviewRouteSelections
                     },
                     selections,
+                    excess,
                 )
             }
         }
-        None => (Message::OverviewRouteUnavailable, Vec::new()),
+        None => (Message::OverviewRouteUnavailable, Vec::new(), 0),
     }
 }
 
@@ -3218,26 +3240,138 @@ mod tests {
         );
         assert_eq!(
             overview_route_summary(None, Some(&inventory)),
-            (Message::OverviewRouteUnavailable, vec![])
+            (Message::OverviewRouteUnavailable, vec![], 0)
         );
         assert_eq!(
             overview_route_summary(Some(RoutingMode::Direct), Some(&inventory)),
-            (Message::OverviewDirectRoute, vec![])
+            (Message::OverviewDirectRoute, vec![], 0)
         );
         assert_eq!(
             overview_route_summary(Some(RoutingMode::Global), Some(&inventory)),
             (
                 Message::OverviewGlobalSelection,
-                vec!["GLOBAL → chosen".into()]
+                vec!["GLOBAL → chosen".into()],
+                0
             )
         );
         assert_eq!(
             overview_route_summary(Some(RoutingMode::Rule), Some(&inventory)),
-            (Message::OverviewRouteSelections, vec!["work → node".into()])
+            (
+                Message::OverviewRouteSelections,
+                vec!["work → node".into()],
+                0
+            )
         );
         assert_eq!(
             overview_route_summary(Some(RoutingMode::Rule), None),
-            (Message::OverviewRouteUnavailable, vec![])
+            (Message::OverviewRouteUnavailable, vec![], 0)
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn overview_rule_preview_is_bounded_sorted_and_counts_only_available_groups() {
+        use super::overview_route_summary;
+        use meow_paw::engine::controller::{Inventory, Proxy, RoutingMode};
+        use meow_paw::i18n::Message;
+
+        let mut inventory = Inventory::default();
+        for index in (0..30).rev() {
+            inventory.groups.insert(
+                format!("group-{index:02}"),
+                Proxy {
+                    now: Some(format!("node-{index:02}")),
+                    ..Proxy::default()
+                },
+            );
+        }
+        inventory.groups.insert(
+            "00-hidden".into(),
+            Proxy {
+                now: Some("secret".into()),
+                hidden: true,
+                ..Proxy::default()
+            },
+        );
+        inventory
+            .groups
+            .insert("01-missing".into(), Proxy::default());
+        inventory.groups.insert(
+            "02-empty".into(),
+            Proxy {
+                now: Some("  ".into()),
+                ..Proxy::default()
+            },
+        );
+        assert_eq!(
+            overview_route_summary(Some(RoutingMode::Rule), Some(&inventory)),
+            (
+                Message::OverviewRouteSelections,
+                vec![
+                    "group-00 → node-00".into(),
+                    "group-01 → node-01".into(),
+                    "group-02 → node-02".into()
+                ],
+                27,
+            )
+        );
+        inventory
+            .groups
+            .retain(|name, _| name == "group-00" || name == "group-01");
+        assert_eq!(
+            overview_route_summary(Some(RoutingMode::Rule), Some(&inventory)),
+            (
+                Message::OverviewRouteSelections,
+                vec!["group-00 → node-00".into(), "group-01 → node-01".into()],
+                0,
+            )
+        );
+        inventory.groups.clear();
+        assert_eq!(
+            overview_route_summary(Some(RoutingMode::Rule), Some(&inventory)),
+            (Message::OverviewRouteUnavailable, vec![], 0)
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn overview_global_reports_only_visible_global_selection() {
+        use super::overview_route_summary;
+        use meow_paw::engine::controller::{Inventory, Proxy, RoutingMode};
+        use meow_paw::i18n::Message;
+
+        let mut inventory = Inventory::default();
+        inventory.groups.insert(
+            "GLOBAL".into(),
+            Proxy {
+                now: Some("work".into()),
+                ..Proxy::default()
+            },
+        );
+        inventory.groups.insert(
+            "work".into(),
+            Proxy {
+                now: Some("node".into()),
+                ..Proxy::default()
+            },
+        );
+        assert_eq!(
+            overview_route_summary(Some(RoutingMode::Global), Some(&inventory)),
+            (
+                Message::OverviewGlobalSelection,
+                vec!["GLOBAL → work".into()],
+                0
+            )
+        );
+        inventory.groups.get_mut("GLOBAL").unwrap().hidden = true;
+        assert_eq!(
+            overview_route_summary(Some(RoutingMode::Global), Some(&inventory)),
+            (Message::OverviewRouteUnavailable, vec![], 0)
+        );
+        inventory.groups.remove("work");
+        assert_eq!(
+            overview_route_summary(Some(RoutingMode::Rule), Some(&inventory)),
+            (Message::OverviewRouteUnavailable, vec![], 0)
         );
     }
 

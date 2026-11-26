@@ -186,6 +186,14 @@ impl Locale {
         }
     }
 
+    pub fn overview_route_excess(self, count: usize) -> String {
+        match self {
+            Self::En if count == 1 => format!("{count} more group"),
+            Self::En => format!("{count} more groups"),
+            Self::ZhCn => format!("另有 {count} 个代理组"),
+        }
+    }
+
     pub fn connection_match_count(self, matched: usize, total: usize) -> String {
         match self {
             Self::En => format!("{matched} of {total} active"),
@@ -789,6 +797,13 @@ mod tests {
             assert_eq!(Locale::select(Some("unsupported"), None).message(key), en);
         }
     }
+    #[test]
+    fn overview_route_excess_is_localized() {
+        assert_eq!(Locale::En.overview_route_excess(1), "1 more group");
+        assert_eq!(Locale::En.overview_route_excess(27), "27 more groups");
+        assert_eq!(Locale::ZhCn.overview_route_excess(27), "另有 27 个代理组");
+    }
+
     #[test]
     fn connection_match_counts_are_localized() {
         assert_eq!(Locale::En.connection_match_count(2, 7), "2 of 7 active");
