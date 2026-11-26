@@ -2,6 +2,7 @@
 import contextlib
 import importlib.util
 import io
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -24,6 +25,17 @@ class BuildWithCoreTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.core = self.root / "vendor/meow-rs"
         self.core.mkdir(parents=True)
+        # Some Windows test hosts assign new directories to Administrators.
+        # Trust only the two repositories created by this test, not any real
+        # checkout or global Git setting; child processes inherit the scope.
+        config_count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+        fixture_git_config = {"GIT_CONFIG_COUNT": str(config_count + 2)}
+        for index, directory in enumerate((self.root, self.core), config_count):
+            fixture_git_config[f"GIT_CONFIG_KEY_{index}"] = "safe.directory"
+            fixture_git_config[f"GIT_CONFIG_VALUE_{index}"] = directory.resolve().as_posix()
+        config = mock.patch.dict(os.environ, fixture_git_config)
+        config.start()
+        self.addCleanup(config.stop)
         self.git(self.root, "init", "-q")
         self.git(self.core, "init", "-q")
         (self.core / "Cargo.toml").write_text("[package]\nname = 'core'\n")
@@ -80,9 +92,15 @@ class BuildWithCoreTest(unittest.TestCase):
         self.assert_preflight_fails()
 
     def test_uninitialized_and_wrong_top_level(self):
-        import shutil
-        shutil.rmtree(self.core / ".git")
-        self.assert_preflight_fails()
+        # Hide only this fixture's metadata rather than deleting Windows
+        # read-only Git object files. Restore it for temporary-dir cleanup.
+        metadata = self.core / ".git"
+        hidden = self.core / ".git-fixture-hidden"
+        metadata.rename(hidden)
+        try:
+            self.assert_preflight_fails()
+        finally:
+            hidden.rename(metadata)
 
     def test_dirty_core(self):
         for state in ("modified", "staged", "untracked"):
