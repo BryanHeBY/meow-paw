@@ -93,6 +93,7 @@ pub struct Paw {
     binary: Option<PathBuf>,
     error: Option<String>,
     copied_listener: Option<u16>,
+    show_engine_path: bool,
     show_usage: bool,
     preferences: Preferences,
     subscription_paths: Vec<PathBuf>,
@@ -178,6 +179,7 @@ pub fn open(
             proxy_order: Default::default(),
             error: None,
             copied_listener: None,
+            show_engine_path: false,
             show_usage: false,
             preferences,
             subscription_paths,
@@ -1769,6 +1771,7 @@ impl Paw {
                     self.desktop = Some(desktop);
                     self.remember_selection(true, &path);
                     self.binary = Some(path);
+                    self.show_engine_path = false;
                     self.snapshot = Default::default();
                     self.error = None;
                 }
@@ -1816,17 +1819,69 @@ impl Paw {
                 "Only apps configured to use Paw are routed through it.",
                 chip("Loopback", BLUE, SOFT_BLUE),
             ));
-        let engine = form_card("Meow engine").child(form_row(
-            "Meow executable",
-            binary,
-            if self.can_change_binary() {
-                secondary_button("select-binary", "Browse…")
-                    .on_click(cx.listener(|this, _, _, cx| this.choose_file(true, cx)))
-                    .into_any_element()
-            } else {
-                chip("Locked", FAINT, BG).into_any_element()
-            },
-        ));
+        let shown_path = binary.clone();
+        let path_detail = div()
+            .id("engine-path-preview")
+            .min_w_0()
+            .truncate()
+            .child(shown_path.clone())
+            .when(self.binary.is_some(), |detail| {
+                detail.tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(shown_path.clone()).build(window, cx)
+                })
+            });
+        let engine = form_card("Meow engine")
+            .child(form_row_with_detail(
+                "Meow executable",
+                path_detail,
+                if self.can_change_binary() {
+                    secondary_button("select-binary", "Browse…")
+                        .on_click(cx.listener(|this, _, _, cx| this.choose_file(true, cx)))
+                        .into_any_element()
+                } else {
+                    chip("Locked", FAINT, BG).into_any_element()
+                },
+            ))
+            .when(self.binary.is_some(), |engine| {
+                engine.child(
+                    div()
+                        .mx_4()
+                        .pb_3()
+                        .child(
+                            secondary_button(
+                                "engine-path-reveal",
+                                if self.show_engine_path {
+                                    "Hide full path"
+                                } else {
+                                    "Show full path"
+                                },
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_engine_path = !this.show_engine_path;
+                                cx.notify();
+                            })),
+                        )
+                        .when(self.show_engine_path, |row| {
+                            row.child(
+                                div()
+                                    .mt_2()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .text_color(rgb(FAINT))
+                                    .child(binary.clone()),
+                            )
+                            .child(
+                                secondary_button("engine-path-copy", "Copy path").on_click(
+                                    cx.listener(move |_, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            binary.clone(),
+                                        ));
+                                    }),
+                                ),
+                            )
+                        }),
+                )
+            });
         let app = form_card("Meow Paw")
             .child(form_row(
                 "Tray behavior",
@@ -1998,6 +2053,14 @@ fn form_row(
     detail: impl Into<SharedString>,
     control: impl IntoElement,
 ) -> Div {
+    form_row_with_detail(title, detail.into(), control)
+}
+
+fn form_row_with_detail(
+    title: &'static str,
+    detail: impl IntoElement,
+    control: impl IntoElement,
+) -> Div {
     div()
         .mx_4()
         .min_h(px(60.))
@@ -2013,13 +2076,7 @@ fn form_row(
                 .min_w_0()
                 .flex_1()
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
-                .child(
-                    div()
-                        .mt_1()
-                        .text_xs()
-                        .text_color(rgb(FAINT))
-                        .child(detail.into()),
-                ),
+                .child(div().mt_1().text_xs().text_color(rgb(FAINT)).child(detail)),
         )
         .child(div().flex_shrink_0().child(control))
 }
