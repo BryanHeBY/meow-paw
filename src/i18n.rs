@@ -141,6 +141,13 @@ impl Locale {
         }
     }
 
+    pub fn connection_match_count(self, matched: usize, total: usize) -> String {
+        match self {
+            Self::En => format!("{matched} of {total} active"),
+            Self::ZhCn => format!("{total} 个活动连接中匹配 {matched} 个"),
+        }
+    }
+
     pub fn message(self, key: Message) -> &'static str {
         match self {
             Self::En => english(key),
@@ -271,7 +278,9 @@ fn english(key: Message) -> &'static str {
         Message::NoActiveConnections => "No active connections",
         Message::ListenerConnectionsDetail => "Traffic handled by the Paw listener appears here.",
         Message::NoMatchingConnections => "No matching connections",
-        Message::ConnectionFilterDetail => "Filter by destination, policy chain, or matched rule.",
+        Message::ConnectionFilterDetail => {
+            "Change or clear the filter. Search destination, policy chain, or matched rule."
+        }
         Message::StartToViewConnections => "Start a profile to monitor its live connections.",
         Message::DestinationColumn => "DESTINATION",
         Message::RouteColumn => "ROUTE",
@@ -386,7 +395,7 @@ fn chinese(key: Message) -> &'static str {
         Message::NoActiveConnections => "暂无活动连接",
         Message::ListenerConnectionsDetail => "由 Paw 监听器处理的流量会显示在这里。",
         Message::NoMatchingConnections => "没有匹配的连接",
-        Message::ConnectionFilterDetail => "可按目标地址、策略链或匹配规则筛选。",
+        Message::ConnectionFilterDetail => "更改或清除筛选条件。可搜索目标地址、策略链或匹配规则。",
         Message::StartToViewConnections => "启动配置后即可监控实时连接。",
         Message::DestinationColumn => "目标地址",
         Message::RouteColumn => "路线",
@@ -494,6 +503,15 @@ mod tests {
         assert_eq!(Locale::En.message(Message::Home), "Home");
         assert_eq!(Locale::ZhCn.message(Message::Home), "首页");
     }
+    #[test]
+    fn connection_match_counts_are_localized() {
+        assert_eq!(Locale::En.connection_match_count(2, 7), "2 of 7 active");
+        assert_eq!(
+            Locale::ZhCn.connection_match_count(0, 7),
+            "7 个活动连接中匹配 0 个"
+        );
+    }
+
     #[test]
     fn profiles_and_connections_catalog() {
         let cases = [
@@ -634,8 +652,8 @@ mod tests {
             ),
             (
                 Message::ConnectionFilterDetail,
-                "Filter by destination, policy chain, or matched rule.",
-                "可按目标地址、策略链或匹配规则筛选。",
+                "Change or clear the filter. Search destination, policy chain, or matched rule.",
+                "更改或清除筛选条件。可搜索目标地址、策略链或匹配规则。",
             ),
             (
                 Message::StartToViewConnections,

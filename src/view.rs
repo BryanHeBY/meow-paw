@@ -2007,26 +2007,22 @@ impl Paw {
                         .child(Input::new(&self.connection_filter).cleanable(true)),
                 )
                 .child(chip(
-                    format!(
-                        "{} {}",
-                        list.len(),
-                        self.locale.message(Message::ActiveConnections)
-                    ),
+                    if query.is_empty() {
+                        format!(
+                            "{} {}",
+                            list.len(),
+                            self.locale.message(Message::ActiveConnections)
+                        )
+                    } else {
+                        self.locale
+                            .connection_match_count(results.len(), list.len())
+                    },
                     BLUE,
                     SOFT_BLUE,
                 ));
             let table = if results.is_empty() {
-                if query.is_empty() {
-                    empty_state(
-                        self.locale.message(Message::NoActiveConnections),
-                        self.locale.message(Message::ListenerConnectionsDetail),
-                    )
-                } else {
-                    empty_state(
-                        self.locale.message(Message::NoMatchingConnections),
-                        self.locale.message(Message::ConnectionFilterDetail),
-                    )
-                }
+                let (title, detail) = connection_empty_messages(list.len());
+                empty_state(self.locale.message(title), self.locale.message(detail))
             } else {
                 card()
                     .p_0()
@@ -2615,6 +2611,21 @@ fn route_matches(name: &str, normalized_query: &str) -> bool {
 }
 
 #[cfg(any(target_os = "linux", windows))]
+fn connection_empty_messages(total: usize) -> (Message, Message) {
+    if total == 0 {
+        (
+            Message::NoActiveConnections,
+            Message::ListenerConnectionsDetail,
+        )
+    } else {
+        (
+            Message::NoMatchingConnections,
+            Message::ConnectionFilterDetail,
+        )
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn active_connection_row(a: Div, b: Div, c: Div, action: impl IntoElement) -> Div {
     div()
         .flex()
@@ -2757,6 +2768,26 @@ mod tests {
                 60.,
             ),
             Some((10, vec![Some((30., 60.)), None, Some((0., 6.))]))
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn connection_empty_state_distinguishes_no_traffic_from_no_matches() {
+        use super::{Message, connection_empty_messages};
+        assert_eq!(
+            connection_empty_messages(0),
+            (
+                Message::NoActiveConnections,
+                Message::ListenerConnectionsDetail
+            )
+        );
+        assert_eq!(
+            connection_empty_messages(3),
+            (
+                Message::NoMatchingConnections,
+                Message::ConnectionFilterDetail
+            )
         );
     }
 
