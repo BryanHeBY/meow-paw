@@ -148,7 +148,7 @@ fn retain_when_tray_is_ready(
     locale: Locale,
     cx: &mut App,
 ) {
-    let signals = tray::start();
+    let signals = tray::start(locale);
     let visible = Rc::new(Cell::new(Some(initial)));
     let closed = visible.clone();
     let observer = cx.on_window_closed(move |_, id| {
@@ -164,6 +164,10 @@ fn retain_when_tray_is_ready(
                 .timer(Duration::from_millis(160))
                 .await;
             cx.update(|cx| {
+                if signals.take_quit() {
+                    cx.quit();
+                    return;
+                }
                 let available = signals.ready();
                 let show = signals.take_show() && available;
                 let restore = retained && !available && visible.get().is_none();

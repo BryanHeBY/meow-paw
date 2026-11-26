@@ -147,3 +147,59 @@ with tempfile.TemporaryDirectory(prefix="paw-tray-smoke-") as directory:
         finally:
             stop(app)
             stop(watcher)
+
+
+def menu_call(service, method, *args):
+    completed = sp.run(
+        ["busctl", "--user", "--", "call", service, "/MenuBar", "com.canonical.dbusmenu", method, *args],
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    assert completed.returncode == 0, (method, completed.stderr)
+    return completed.stdout.strip()
+
+
+def click_menu(service, item):
+    menu_call(service, "Event", "isvu", str(item), "clicked", "s", "", "0")
+
+
+with tempfile.TemporaryDirectory(prefix="paw-tray-menu-") as directory:
+    profile = Path(directory) / "isolated.yaml"
+    profile.write_text("mode: rule\nipv6: false\ndns: {enable: false}\nrules: ['MATCH,DIRECT']\n")
+    flags = ["--profile", str(profile), "--start"] if os.environ.get("MEOW_BIN") else []
+    watcher = sp.Popen(["target/debug/examples/tray_test_watcher"])
+    app = sp.Popen(["target/debug/meow-paw", "--no-preferences", "--locale", "zh-CN", *flags])
+    try:
+        first = eventually(lambda: one_window(app), "initial menu test window")
+        service = f"org.kde.StatusNotifierItem-{app.pid}-1"
+        eventually(lambda: item_ready(service), "menu item registration")
+        assert output("busctl", "--user", "get-property", service, "/StatusNotifierItem",
+                      "org.kde.StatusNotifierItem", "Menu") == 'o "/MenuBar"'
+        layout = menu_call(service, "GetLayout", "iias", "0", "-1", "0")
+        assert layout.startswith("u(ia{sv}av) "), layout
+        for label in ("显示", "退出"):
+            # busctl's text output can escape non-ASCII bytes regardless of locale.
+            escaped = "".join(f"\\{byte:03o}" for byte in label.encode())
+            assert label in layout or escaped in layout, layout
+        if flags:
+            eventually(lambda: running_ports(app), "running engine before menu command")
+        children = child_ids(app.pid)
+        if flags:
+            assert children, "expected a tracked managed engine"
+        time.sleep(.4)
+        wm_close(first)
+        eventually(lambda: not windows(app), "menu test window hidden")
+        assert app.poll() is None, "tray must retain app"
+        click_menu(service, 1)
+        eventually(lambda: one_window(app), "Show via DBusMenu reopens the window")
+        if flags:
+            assert child_ids(app.pid) == children, "Show should retain the same managed engine"
+        click_menu(service, 2)
+        assert app.wait(timeout=10) == 0, app.returncode
+        eventually(lambda: all(not Path(f"/proc/{pid}").exists() for pid in children),
+                   "Quit via DBusMenu reaps the managed engine")
+        print("SNI localized menu layout, Show and clean Quit: passed", flush=True)
+    finally:
+        stop(app)
+        stop(watcher)

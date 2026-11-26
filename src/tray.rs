@@ -8,6 +8,7 @@ use std::sync::{
 pub struct Signals {
     ready: AtomicBool,
     show: AtomicBool,
+    quit: AtomicBool,
 }
 
 impl Signals {
@@ -15,17 +16,23 @@ impl Signals {
         self.ready.load(Ordering::Acquire)
     }
 
+    pub fn take_quit(&self) -> bool {
+        self.quit.swap(false, Ordering::AcqRel)
+    }
+
     pub fn take_show(&self) -> bool {
         self.show.swap(false, Ordering::AcqRel)
     }
 }
 
-pub fn start() -> Arc<Signals> {
+pub fn start(locale: meow_paw::i18n::Locale) -> Arc<Signals> {
     let signals = Arc::new(Signals::default());
     #[cfg(target_os = "linux")]
-    linux::start(signals.clone());
+    linux::start(signals.clone(), locale);
     #[cfg(windows)]
     windows::start(signals.clone());
+    #[cfg(not(target_os = "linux"))]
+    let _ = locale;
     signals
 }
 
@@ -38,7 +45,9 @@ mod windows;
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
+    use meow_paw::i18n::Locale;
     use std::time::Duration;
+    mod menu;
     use zbus::{
         blocking::{Proxy, connection::Builder},
         zvariant::OwnedValue,
@@ -47,6 +56,7 @@ mod linux {
     const WATCHER: &str = "org.kde.StatusNotifierWatcher";
     const WATCHER_PATH: &str = "/StatusNotifierWatcher";
     const ITEM_PATH: &str = "/StatusNotifierItem";
+    const MENU_PATH: &str = "/MenuBar";
 
     struct Item(Arc<Signals>);
 
@@ -75,6 +85,11 @@ mod linux {
         #[zbus(property)]
         fn item_is_menu(&self) -> bool {
             false
+        }
+
+        #[zbus(property)]
+        fn menu(&self) -> zbus::zvariant::ObjectPath<'static> {
+            zbus::zvariant::ObjectPath::try_from(MENU_PATH).unwrap()
         }
 
         #[zbus(property)]
@@ -107,26 +122,25 @@ mod linux {
             self.activate(x, y);
         }
 
-        fn context_menu(&self, x: i32, y: i32) {
-            self.activate(x, y);
-        }
+        fn context_menu(&self, _x: i32, _y: i32) {}
     }
 
-    pub(super) fn start(signals: Arc<Signals>) {
+    pub(super) fn start(signals: Arc<Signals>, locale: Locale) {
         let _ = std::thread::Builder::new()
             .name("paw-status-notifier".into())
             .spawn(move || {
-                let _ = run(&signals);
+                let _ = run(&signals, locale);
                 signals.ready.store(false, Ordering::Release);
             });
     }
 
-    fn run(signals: &Arc<Signals>) -> zbus::Result<()> {
+    fn run(signals: &Arc<Signals>, locale: Locale) -> zbus::Result<()> {
         let name = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
         let bus = Builder::session()?
             .method_timeout(Duration::from_millis(800))
             .name(name.as_str())?
             .serve_at(ITEM_PATH, Item(signals.clone()))?
+            .serve_at(MENU_PATH, menu::Menu::new(signals.clone(), locale))?
             .build()?;
         let dbus = Proxy::new(
             &bus,
