@@ -2,6 +2,8 @@ use crate::preferences::{LanguagePreference, Preferences};
 use gpui_kit::base::{Disableable, Selectable};
 #[cfg(any(target_os = "linux", windows))]
 use gpui_kit::component::Sizable;
+#[cfg(any(target_os = "linux", windows))]
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -95,6 +97,24 @@ impl Page {
             Self::Unlock => "icons/lock-open.svg",
             Self::Settings => "icons/settings.svg",
         }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn page_filter_rendered(
+    page: Page,
+    snapshot: &meow_paw::app::Snapshot,
+    rule_sets_open: bool,
+    closed_connections_open: bool,
+) -> bool {
+    use meow_paw::app::EngineStatus;
+    let running = matches!(snapshot.engine, EngineStatus::Running { .. });
+    match page {
+        Page::Proxies => snapshot.inventory.is_some(),
+        Page::Rules => running && !rule_sets_open && snapshot.rules.is_some(),
+        Page::Connections => running && (closed_connections_open || snapshot.connections.is_some()),
+        Page::Logs => snapshot.logs.is_some(),
+        _ => false,
     }
 }
 
@@ -323,6 +343,8 @@ enum ConnectionDetailSelection {
 }
 
 pub struct Paw {
+    #[cfg(any(target_os = "linux", windows))]
+    _page_filter_shortcut: Subscription,
     page: Page,
     locale: Locale,
     profile: Option<PathBuf>,
@@ -496,7 +518,32 @@ pub fn open(
                 Ok(paths) => (paths, None),
                 Err(_) => (Vec::new(), Some(Message::ListSubscriptionsFailed)),
             });
+        #[cfg(any(target_os = "linux", windows))]
+        let page_filter_shortcut = {
+            let paw = cx.weak_entity();
+            let window_id = window.window_handle().window_id();
+            // A Div action cannot receive a key when no element in the window
+            // has focus. Scope this interceptor to the originating window and
+            // keep it alive only as long as this view.
+            cx.intercept_keystrokes(move |event, window, cx| {
+                if window.window_handle().window_id() == window_id
+                    && event.keystroke.key == "f"
+                    && event.keystroke.modifiers
+                        == (Modifiers {
+                            control: true,
+                            ..Modifiers::default()
+                        })
+                    && paw
+                        .update(cx, |paw, cx| paw.focus_page_filter(window, cx))
+                        .unwrap_or(false)
+                {
+                    cx.stop_propagation();
+                }
+            })
+        };
         let mut paw = Paw {
+            #[cfg(any(target_os = "linux", windows))]
+            _page_filter_shortcut: page_filter_shortcut,
             page,
             locale,
             profile,
@@ -3901,6 +3948,48 @@ impl Render for Paw {
     }
 }
 
+#[cfg(any(target_os = "linux", windows))]
+impl Paw {
+    fn focus_page_filter(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !page_filter_rendered(
+            self.page,
+            &self.snapshot,
+            self.rule_sets_open,
+            self.closed_connections_open,
+        ) {
+            return false;
+        }
+        // Leave keystrokes in active text inputs and their IME alone. The
+        // registry can lag a focus change, so also check Paw's own handles.
+        if window.has_active_dialog(cx)
+            || window.has_active_sheet(cx)
+            || window.has_focused_input(cx)
+            || [
+                &self.search,
+                &self.rule_filter,
+                &self.connection_filter,
+                &self.log_filter,
+                &self.probe_url,
+                &self.subscription_url,
+                &self.subscription_name,
+            ]
+            .iter()
+            .any(|input| input.focus_handle(cx).is_focused(window))
+        {
+            return false;
+        }
+        let input = match self.page {
+            Page::Proxies => &self.search,
+            Page::Rules => &self.rule_filter,
+            Page::Connections => &self.connection_filter,
+            Page::Logs => &self.log_filter,
+            _ => return false,
+        };
+        input.focus_handle(cx).focus(window, cx);
+        true
+    }
+}
+
 fn card() -> Div {
     div()
         .rounded_xl()
@@ -4657,6 +4746,43 @@ mod tests {
     }
 
     use super::Page;
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn shortcut_filter_visibility_tracks_rendered_page_states() {
+        use super::page_filter_rendered;
+        use meow_paw::app::{EngineStatus, LogHistory, Snapshot};
+        use meow_paw::engine::controller::Inventory;
+        use std::sync::Arc;
+
+        let mut snapshot = Snapshot::default();
+        let visible = |page, snapshot: &Snapshot, sets, closed| {
+            page_filter_rendered(page, snapshot, sets, closed)
+        };
+        for page in Page::ALL {
+            assert!(!visible(page, &snapshot, false, false));
+        }
+        snapshot.inventory = Some(Arc::new(Inventory::default()));
+        snapshot.logs = Some(LogHistory::default());
+        snapshot.rules = Some(Arc::new(vec![]));
+        snapshot.connections = Some(Arc::new(vec![]));
+        assert!(visible(Page::Proxies, &snapshot, false, false));
+        assert!(visible(Page::Logs, &snapshot, false, false));
+        assert!(!visible(Page::Rules, &snapshot, false, false));
+        assert!(!visible(Page::Connections, &snapshot, false, true));
+        snapshot.engine = EngineStatus::Running { mixed_port: 7890 };
+        assert!(visible(Page::Rules, &snapshot, false, false));
+        assert!(!visible(Page::Rules, &snapshot, true, false));
+        snapshot.rules = None;
+        assert!(!visible(Page::Rules, &snapshot, false, false));
+        assert!(visible(Page::Connections, &snapshot, false, false));
+        snapshot.connections = None;
+        assert!(!visible(Page::Connections, &snapshot, false, false));
+        assert!(visible(Page::Connections, &snapshot, false, true));
+        for page in [Page::Overview, Page::Profiles, Page::Unlock, Page::Settings] {
+            assert!(!visible(page, &snapshot, false, false));
+        }
+    }
 
     #[test]
     fn subscription_path_enumeration_does_not_read_records() {
