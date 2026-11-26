@@ -134,20 +134,7 @@ fn safe_rule_set_text(value: &str, hidden: &str) -> String {
     }
 }
 
-fn subscription_error(locale: Locale, error: subscription::DownloadError) -> String {
-    use subscription::DownloadError;
-    let message = match error {
-        DownloadError::InvalidUrl => Message::InvalidSubscriptionUrl,
-        DownloadError::Request => Message::SubscriptionDownloadFailed,
-        DownloadError::TooLarge => Message::SubscriptionTooLarge,
-        DownloadError::InvalidText => Message::SubscriptionInvalidText,
-        DownloadError::NoProxies => Message::SubscriptionNoProxies,
-        DownloadError::InvalidProfile(error) => return error.to_string(),
-    };
-    locale.message(message).to_owned()
-}
-
-fn import_error_message(error: subscription::DownloadError) -> Message {
+fn subscription_download_feedback(error: subscription::DownloadError) -> Message {
     use subscription::DownloadError;
     match error {
         DownloadError::InvalidUrl => Message::InvalidSubscriptionUrl,
@@ -2575,7 +2562,8 @@ impl Paw {
             let mut result = Some(
                 cx.background_executor()
                     .spawn(async move {
-                        let candidate = subscription::fetch(&url).map_err(import_error_message)?;
+                        let candidate =
+                            subscription::fetch(&url).map_err(subscription_download_feedback)?;
                         let mut store = SubscriptionStore::new(dir);
                         let id = store
                             .import(&url, candidate, RefreshPolicy::default())
@@ -2653,29 +2641,26 @@ impl Paw {
         if self.subscription_rename.is_some() {
             return;
         }
-        let locale = self.locale;
-        self.subscription_job(cx, move |store| {
+        self.run_subscription_refresh(cx, move |store| {
             let prior = store
                 .read(id)
-                .map_err(|_| locale.message(Message::SubscriptionReadFailed).to_owned())?;
+                .map_err(|_| Message::SubscriptionReadFailed)?;
             let candidate = prior
                 .fetch_latest()
-                .map_err(|err| subscription_error(locale, err))?;
-            store.refresh(id, candidate).map_err(|_| {
-                locale
-                    .message(Message::SubscriptionRefreshSaveFailed)
-                    .to_owned()
-            })?;
-            Ok((store.record_path(id), store.metadata(id).ok(), false))
+                .map_err(subscription_download_feedback)?;
+            store
+                .refresh(id, candidate)
+                .map_err(|_| Message::SubscriptionRefreshSaveFailed)?;
+            Ok((store.record_path(id), store.metadata(id).ok()))
         });
     }
 
-    fn subscription_job(
+    fn run_subscription_refresh(
         &mut self,
         cx: &mut Context<Self>,
         job: impl FnOnce(
             &mut SubscriptionStore,
-        ) -> Result<(PathBuf, Option<SubscriptionMetadata>, bool), String>
+        ) -> Result<(PathBuf, Option<SubscriptionMetadata>), Message>
         + Send
         + 'static,
     ) {
@@ -2688,7 +2673,6 @@ impl Paw {
         self.subscription_busy = true;
         self.subscription_busy_message = Message::DownloadingSubscription;
         self.subscription_notice = None;
-        self.error = None;
         cx.notify();
         cx.spawn(async move |weak, cx| {
             let result = cx
@@ -2698,18 +2682,14 @@ impl Paw {
             let _ = weak.update(cx, |paw, cx| {
                 paw.subscription_busy = false;
                 match result {
-                    Ok((path, metadata, imported)) => {
+                    Ok((path, metadata)) => {
                         if !paw.subscription_paths.contains(&path) {
                             paw.subscription_paths.push(path.clone());
                         }
                         paw.subscription_metadata.insert(path, metadata);
-                        paw.subscription_notice = Some(if imported {
-                            Message::SubscriptionSaved
-                        } else {
-                            Message::SubscriptionRefreshed
-                        });
+                        paw.subscription_notice = Some(Message::SubscriptionRefreshed);
                     }
-                    Err(error) => paw.error = Some(error),
+                    Err(notice) => paw.subscription_notice = Some(notice),
                 }
                 cx.notify();
             });
@@ -5243,12 +5223,12 @@ mod tests {
     }
 
     #[test]
-    fn import_failure_feedback_is_localized_and_does_not_expose_input() {
-        use super::{Locale, Message, import_error_message};
+    fn subscription_download_feedback_is_localized_and_does_not_expose_input() {
+        use super::{Locale, Message, subscription_download_feedback};
         use meow_paw::{profile::ProfileError, subscription::DownloadError};
 
         let secret = "https://example.invalid/profile?token=synthetic-secret";
-        let message = import_error_message(DownloadError::InvalidProfile(
+        let message = subscription_download_feedback(DownloadError::InvalidProfile(
             ProfileError::UnsupportedField(secret.to_owned()),
         ));
         assert_eq!(message, Message::SubscriptionInvalidProfile);
@@ -5262,7 +5242,7 @@ mod tests {
             (DownloadError::NoProxies, Message::SubscriptionNoProxies),
             (DownloadError::InvalidUrl, Message::InvalidSubscriptionUrl),
         ] {
-            assert_eq!(import_error_message(error), expected);
+            assert_eq!(subscription_download_feedback(error), expected);
         }
     }
 
