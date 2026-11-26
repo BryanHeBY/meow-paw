@@ -46,7 +46,7 @@ pub fn fetch(input: &str) -> Result<Download, DownloadError> {
     fetch_with(&agent, &url)
 }
 
-fn parse_url(input: &str) -> Result<Url, DownloadError> {
+pub(crate) fn parse_url(input: &str) -> Result<Url, DownloadError> {
     let url = Url::parse(input.trim()).map_err(|_| DownloadError::InvalidUrl)?;
     if url.scheme() != "https"
         || !url.has_host()

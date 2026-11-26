@@ -4,3 +4,4 @@ pub mod engine;
 pub mod profile;
 
 pub mod subscription;
+pub mod subscription_store;
