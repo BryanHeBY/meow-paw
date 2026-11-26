@@ -1159,60 +1159,67 @@ impl Paw {
         let mut page = div().flex().flex_col().gap_3().child(import);
         if self.preferences.subscription_dir().is_some() && !self.subscription_busy {
             if self.subscription_entry_open {
-                page = page.child(
-                    div()
-                        .id("subscription-entry")
-                        .on_key_down(cx.listener(|paw, event: &KeyDownEvent, window, cx| {
-                            // Leave input keystrokes to the input's IME and editing handlers.
-                            if event.keystroke.key == "escape"
-                                && !event.keystroke.modifiers.modified()
-                                && !paw.subscription_url.focus_handle(cx).is_focused(window)
-                            {
-                                paw.cancel_subscription(window, cx);
-                                cx.stop_propagation();
-                            }
-                        }))
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(section_label(self.locale.message(Message::SubscriptionUrl)))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_basis(px(260.))
-                                        .flex_grow(1.)
-                                        .min_w_0()
-                                        .child(Input::new(&self.subscription_url).cleanable(true)),
-                                )
-                                .child(
-                                    subscription_button(
-                                        "confirm-subscription",
-                                        self.locale.message(Message::ImportSubscription),
-                                        true,
-                                        cx,
+                page =
+                    page.child(
+                        div()
+                            .id("subscription-entry")
+                            .on_key_down(cx.listener(|paw, event: &KeyDownEvent, window, cx| {
+                                // Leave input keystrokes to the input's IME and editing handlers.
+                                if event.keystroke.key == "escape"
+                                    && !event.keystroke.modifiers.modified()
+                                    && !paw.subscription_url.focus_handle(cx).is_focused(window)
+                                {
+                                    paw.cancel_subscription(window, cx);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(section_label(self.locale.message(Message::SubscriptionUrl)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div().flex_basis(px(260.)).flex_grow(1.).min_w_0().child(
+                                            Input::new(&self.subscription_url).cleanable(true),
+                                        ),
                                     )
-                                    .on_click(cx.listener(
-                                        |paw, _, window, cx| paw.import_subscription(window, cx),
-                                    )),
-                                )
-                                .child(
-                                    subscription_button(
-                                        "cancel-subscription",
-                                        self.locale.message(Message::CancelSubscription),
-                                        false,
-                                        cx,
-                                    )
-                                    .on_click(cx.listener(
-                                        |paw, _, window, cx| paw.cancel_subscription(window, cx),
-                                    )),
-                                ),
-                        ),
-                );
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_shrink_0()
+                                            .gap_2()
+                                            .child(
+                                                subscription_button(
+                                                    "confirm-subscription",
+                                                    self.locale
+                                                        .message(Message::ImportSubscription),
+                                                    true,
+                                                    cx,
+                                                )
+                                                .on_click(cx.listener(|paw, _, window, cx| {
+                                                    paw.import_subscription(window, cx)
+                                                })),
+                                            )
+                                            .child(
+                                                subscription_button(
+                                                    "cancel-subscription",
+                                                    self.locale
+                                                        .message(Message::CancelSubscription),
+                                                    false,
+                                                    cx,
+                                                )
+                                                .on_click(cx.listener(|paw, _, window, cx| {
+                                                    paw.cancel_subscription(window, cx)
+                                                })),
+                                            ),
+                                    ),
+                            ),
+                    );
             } else {
                 page = page.child(
                     subscription_button(
