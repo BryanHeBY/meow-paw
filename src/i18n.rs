@@ -19,6 +19,7 @@ pub enum Message {
     Settings,
     Traffic,
     TrafficActivity,
+    TrafficNoSamples,
     SessionTotal,
     Upload,
     Download,
@@ -206,6 +207,20 @@ impl Locale {
         }
     }
 
+    pub fn traffic_chart_history(self, seconds: usize) -> String {
+        match self {
+            Self::En => format!("{seconds}s ago · gaps unavailable · grey zero"),
+            Self::ZhCn => format!("{seconds} 秒前 · 空隙表示数据不可用 · 灰色表示零流量"),
+        }
+    }
+
+    pub fn traffic_chart_peak(self, rate: &str) -> String {
+        match self {
+            Self::En => format!("{rate} shared peak · now"),
+            Self::ZhCn => format!("共用峰值 {rate} · 现在"),
+        }
+    }
+
     pub fn message(self, key: Message) -> &'static str {
         match self {
             Self::En => english(key),
@@ -227,6 +242,7 @@ fn english(key: Message) -> &'static str {
         Message::Settings => "Settings",
         Message::Traffic => "Traffic",
         Message::TrafficActivity => "Traffic activity",
+        Message::TrafficNoSamples => "No traffic samples available yet.",
         Message::SessionTotal => "Session total",
         Message::Upload => "Upload",
         Message::Download => "Download",
@@ -418,6 +434,7 @@ fn chinese(key: Message) -> &'static str {
         Message::Settings => "设置",
         Message::Traffic => "流量",
         Message::TrafficActivity => "流量趋势",
+        Message::TrafficNoSamples => "暂无流量采样数据。",
         Message::SessionTotal => "会话总流量",
         Message::Upload => "上传",
         Message::Download => "下载",
@@ -596,6 +613,34 @@ pub fn system_locale() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{Locale, Message};
+
+    #[test]
+    fn traffic_chart_text_preserves_time_rate_and_sample_meaning() {
+        assert_eq!(
+            Locale::En.traffic_chart_history(39),
+            "39s ago · gaps unavailable · grey zero"
+        );
+        assert_eq!(
+            Locale::ZhCn.traffic_chart_history(39),
+            "39 秒前 · 空隙表示数据不可用 · 灰色表示零流量"
+        );
+        assert_eq!(
+            Locale::En.traffic_chart_peak("1.5 KiB/s"),
+            "1.5 KiB/s shared peak · now"
+        );
+        assert_eq!(
+            Locale::ZhCn.traffic_chart_peak("1.5 KiB/s"),
+            "共用峰值 1.5 KiB/s · 现在"
+        );
+        assert_eq!(
+            Locale::En.message(Message::TrafficNoSamples),
+            "No traffic samples available yet."
+        );
+        assert_eq!(
+            Locale::ZhCn.message(Message::TrafficNoSamples),
+            "暂无流量采样数据。"
+        );
+    }
 
     #[test]
     fn selection_uses_override_and_falls_back_to_english() {

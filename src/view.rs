@@ -1014,12 +1014,20 @@ impl Paw {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .justify_between()
+                            .gap_2()
                             .mt_1()
                             .text_xs()
                             .text_color(rgb(FAINT))
-                            .child("39s ago · gaps unavailable · grey zero")
-                            .child(format!("{}/s shared peak · now", bytes(peak))),
+                            .child(
+                                self.locale
+                                    .traffic_chart_history(TRAFFIC_WINDOW_SECS.saturating_sub(1)),
+                            )
+                            .child(
+                                self.locale
+                                    .traffic_chart_peak(&format!("{}/s", bytes(peak))),
+                            ),
                     );
             }
         }
@@ -1028,7 +1036,7 @@ impl Paw {
             .mt_2()
             .text_xs()
             .text_color(rgb(FAINT))
-            .child("No traffic samples available yet.")
+            .child(self.locale.message(Message::TrafficNoSamples))
     }
 
     fn traffic(&self) -> (String, String, String) {
