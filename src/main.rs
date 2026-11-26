@@ -51,14 +51,21 @@ fn main() {
             }
         }
     }
-    let locale = Locale::select(locale_override.as_deref(), system_locale().as_deref());
     let binary = std::env::var_os("MEOW_BIN").map(PathBuf::from);
     #[cfg(feature = "visual-test")]
-    if screenshot.is_some() {
-        remember = false;
+    let capturing = screenshot.is_some();
+    #[cfg(not(feature = "visual-test"))]
+    let capturing = false;
+    if capturing {
         use_tray = false;
     }
-    let (prefs, warning) = preferences::Preferences::discover(remember);
+    let (prefs, warning) =
+        preferences::Preferences::discover(preferences_enabled(remember, capturing));
+    let locale = select_locale(
+        &prefs,
+        locale_override.as_deref(),
+        system_locale().as_deref(),
+    );
     let (binary, profile) = prefs.resolve(binary, profile);
     let binary = binary.or_else(bundled_engine);
     let app: Application = gpui_kit::application().with_assets(brand::PawAssets);
@@ -101,6 +108,18 @@ fn main() {
             .detach();
         }
     });
+}
+
+fn preferences_enabled(remember: bool, capturing: bool) -> bool {
+    remember && !capturing
+}
+
+fn select_locale(
+    prefs: &preferences::Preferences,
+    cli: Option<&str>,
+    system: Option<&str>,
+) -> Locale {
+    Locale::select(cli.or(prefs.language().locale_name()), system)
 }
 
 fn bundled_engine() -> Option<PathBuf> {
@@ -185,6 +204,46 @@ fn retain_when_tray_is_ready(
 #[cfg(test)]
 mod bundled_tests {
     use super::*;
+    use preferences::LanguagePreference;
+
+    #[test]
+    fn launch_language_uses_cli_then_saved_then_system() {
+        let mut prefs = preferences::Preferences::default();
+        assert_eq!(select_locale(&prefs, None, Some("zh-CN")), Locale::ZhCn);
+        prefs.set_language(LanguagePreference::En).unwrap();
+        assert_eq!(select_locale(&prefs, None, Some("zh-CN")), Locale::En);
+        assert_eq!(
+            select_locale(&prefs, Some("zh-CN"), Some("en")),
+            Locale::ZhCn
+        );
+        assert_eq!(
+            select_locale(&prefs, Some("unsupported"), Some("zh-CN")),
+            Locale::En
+        );
+        assert_eq!(prefs.language(), LanguagePreference::En);
+        prefs.set_language(LanguagePreference::ZhCn).unwrap();
+        assert_eq!(select_locale(&prefs, None, Some("en")), Locale::ZhCn);
+        assert_eq!(select_locale(&prefs, Some("en"), Some("zh-CN")), Locale::En);
+        prefs.set_language(LanguagePreference::System).unwrap();
+        assert_eq!(select_locale(&prefs, None, Some("en")), Locale::En);
+        assert_eq!(select_locale(&prefs, None, None), Locale::En);
+    }
+
+    #[test]
+    fn capture_and_no_preferences_disable_storage() {
+        for (remember, capturing) in [(false, false), (false, true), (true, true)] {
+            assert!(!preferences_enabled(remember, capturing));
+            let (mut prefs, _) =
+                preferences::Preferences::discover(preferences_enabled(remember, capturing));
+            assert_eq!(prefs.language(), LanguagePreference::System);
+            prefs.set_language(LanguagePreference::En).unwrap();
+            assert_eq!(
+                preferences::Preferences::discover(false).0.language(),
+                LanguagePreference::System
+            );
+        }
+        assert!(preferences_enabled(true, false));
+    }
 
     #[test]
     fn only_looks_beside_the_paw_executable_for_the_bundle() {

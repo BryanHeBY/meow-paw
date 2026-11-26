@@ -8,12 +8,40 @@ use std::{
 const LIMIT: u64 = 64 * 1024;
 const PROFILE_LIMIT: usize = 32;
 
+/// The language to use at the next launch. System is stored as a missing field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LanguagePreference {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "en")]
+    En,
+    #[serde(rename = "zh-CN")]
+    ZhCn,
+}
+
+impl LanguagePreference {
+    fn is_system(&self) -> bool {
+        *self == Self::System
+    }
+
+    pub fn locale_name(self) -> Option<&'static str> {
+        match self {
+            Self::System => None,
+            Self::En => Some("en"),
+            Self::ZhCn => Some("zh-CN"),
+        }
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Selections {
     engine: Option<PathBuf>,
     profile: Option<PathBuf>,
     profiles: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "LanguagePreference::is_system")]
+    language: LanguagePreference,
 }
 
 #[derive(Default)]
@@ -104,6 +132,19 @@ impl Preferences {
 
     pub fn profiles(&self) -> &[PathBuf] {
         &self.selected.profiles
+    }
+
+    /// Return the saved choice, independent of any temporary launch override.
+    pub fn language(&self) -> LanguagePreference {
+        self.selected.language
+    }
+
+    /// Save the choice for the next launch; the running UI keeps its locale.
+    #[allow(dead_code)] // Used by the forthcoming Settings UI.
+    pub fn set_language(&mut self, language: LanguagePreference) -> io::Result<()> {
+        let mut next = self.selected.clone();
+        next.language = language;
+        self.persist(next)
     }
 
     pub fn remember(&mut self, engine: bool, path: &Path) -> io::Result<()> {
@@ -248,5 +289,85 @@ mod tests {
             assert!(Preferences::open(file.clone()).is_err());
             assert_eq!(fs::read(&file).unwrap(), bytes);
         }
+    }
+
+    #[test]
+    fn language_defaults_and_round_trips_without_losing_other_choices() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let engine = root.path().join("engine");
+        fs::write(
+            &file,
+            serde_json::to_vec(&serde_json::json!({"engine": engine})).unwrap(),
+        )
+        .unwrap();
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        assert_eq!(prefs.language(), LanguagePreference::System);
+        for (language, stored) in [
+            (LanguagePreference::En, Some("en")),
+            (LanguagePreference::ZhCn, Some("zh-CN")),
+            (LanguagePreference::System, None),
+        ] {
+            prefs.set_language(language).unwrap();
+            assert_eq!(prefs.language(), language);
+            let raw: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+            assert_eq!(raw.get("language").and_then(|value| value.as_str()), stored);
+            let reopened = Preferences::open(file.clone()).unwrap();
+            assert_eq!(reopened.language(), language);
+            assert_eq!(reopened.resolve(None, None).0, Some(engine.clone()));
+        }
+        fs::write(&file, br#"{"language":"system"}"#).unwrap();
+        assert_eq!(
+            Preferences::open(file).unwrap().language(),
+            LanguagePreference::System
+        );
+    }
+
+    #[test]
+    fn invalid_language_and_unknown_fields_are_rejected_without_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        for raw in [
+            br#"{"language":"fr"}"#.as_slice(),
+            br#"{"language":null}"#,
+            br#"{"language":42}"#,
+            br#"{"language":"zh-cn"}"#,
+            br#"{"language":"en","unknown":true}"#,
+        ] {
+            fs::write(&file, raw).unwrap();
+            assert!(Preferences::open(file.clone()).is_err());
+            assert_eq!(fs::read(&file).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn disabled_preferences_do_not_read_or_write_and_changes_are_temporary() {
+        let (mut prefs, warning) = Preferences::discover(false);
+        assert!(warning.is_none());
+        assert!(prefs.file.is_none());
+        assert_eq!(prefs.language(), LanguagePreference::System);
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profile.yaml");
+        prefs.set_language(LanguagePreference::ZhCn).unwrap();
+        prefs.remember(false, &path).unwrap();
+        assert_eq!(prefs.language(), LanguagePreference::ZhCn);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        assert_eq!(
+            Preferences::discover(false).0.language(),
+            LanguagePreference::System
+        );
+    }
+
+    #[test]
+    fn failed_write_keeps_the_previous_choice_and_file() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        fs::write(&file, b"{}\n").unwrap();
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        // A directory cannot replace the existing preferences file.
+        prefs.file = Some(root.path().to_path_buf());
+        assert!(prefs.set_language(LanguagePreference::En).is_err());
+        assert_eq!(prefs.language(), LanguagePreference::System);
+        assert_eq!(fs::read(file).unwrap(), b"{}\n");
     }
 }
