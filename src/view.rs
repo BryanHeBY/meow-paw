@@ -96,6 +96,22 @@ impl Page {
     }
 }
 
+// Provider metadata is controller-supplied. Avoid displaying URL-like values or
+// control characters even if they appear in an otherwise displayable field.
+#[cfg(any(target_os = "linux", windows))]
+fn safe_rule_set_text(value: &str, hidden: &str) -> String {
+    if value.is_empty()
+        || value.chars().count() > 160
+        || value
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\' | '?' | '#' | '@'))
+    {
+        hidden.to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
 fn subscription_error(locale: Locale, error: subscription::DownloadError) -> String {
     use subscription::DownloadError;
     let message = match error {
@@ -244,6 +260,8 @@ pub struct Paw {
     rule_filter: Entity<InputState>,
     _rule_filter_changes: Subscription,
     rule_page: usize,
+    rule_sets_open: bool,
+    rule_sets_read_failed: bool,
     rule_previous_focus: FocusHandle,
     rule_next_focus: FocusHandle,
     connection_filter: Entity<InputState>,
@@ -408,6 +426,8 @@ pub fn open(
             rule_filter,
             _rule_filter_changes: rule_filter_changes,
             rule_page: 0,
+            rule_sets_open: false,
+            rule_sets_read_failed: false,
             rule_previous_focus: cx.focus_handle(),
             rule_next_focus: cx.focus_handle(),
             connection_filter,
@@ -486,6 +506,9 @@ impl Paw {
         if let Some(desktop) = &self.desktop {
             let snap = desktop.snapshot();
             if self.snapshot.revision != snap.revision {
+                if !matches!(&snap.engine, meow_paw::app::EngineStatus::Running { .. }) {
+                    self.rule_sets_read_failed = false;
+                }
                 self.snapshot = snap;
                 return true;
             }
@@ -766,11 +789,34 @@ impl Paw {
                         this.read_rules();
                         cx.notify();
                     }));
+            let toggle = subscription_button(
+                "toggle-rule-sets",
+                self.locale.message(if self.rule_sets_open {
+                    Message::HideRuleSets
+                } else {
+                    Message::RuleSets
+                }),
+                false,
+                cx,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.rule_sets_open = !this.rule_sets_open;
+                this.rule_sets_read_failed = false;
+                cx.notify();
+            }));
             let page = div()
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(div().flex().justify_end().child(button));
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .gap_3()
+                        .child(toggle)
+                        .child(button),
+                )
+                .when(self.rule_sets_open, |page| page.child(self.rule_sets(cx)));
             return match &self.snapshot.rules {
                 Some(rules) => {
                     const PAGE_SIZE: usize = 100;
@@ -908,6 +954,103 @@ impl Paw {
             self.locale.message(Message::NoRunningSession),
             self.locale.message(Message::StartToViewRules),
         )
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    fn rule_sets(&self, cx: &mut Context<Self>) -> Div {
+        let read = subscription_button(
+            "read-rule-sets",
+            self.locale.message(Message::ReadRuleSets),
+            false,
+            cx,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.rule_sets_read_failed = this
+                .desktop
+                .as_ref()
+                .is_none_or(|desktop| desktop.read_rule_providers().is_err());
+            cx.notify();
+        }));
+        let mut panel = card()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(self.locale.message(Message::RuleSets)),
+                    )
+                    .child(read),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(FAINT))
+                    .child(self.locale.message(Message::RuleSetsReadOnly)),
+            );
+        if self.rule_sets_read_failed || self.snapshot.rule_provider_error.is_some() {
+            panel = panel.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xa83a33))
+                    .child(self.locale.message(Message::RuleSetsUnavailable)),
+            );
+        }
+        match &self.snapshot.rule_providers {
+            None if !self.rule_sets_read_failed && self.snapshot.rule_provider_error.is_none() => {
+                panel.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child(self.locale.message(Message::RuleSetsNotLoaded)),
+                )
+            }
+            None => panel,
+            Some(providers) if providers.is_empty() => panel.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(FAINT))
+                    .child(self.locale.message(Message::RuleSetsEmpty)),
+            ),
+            Some(providers) => panel.children(providers.iter().map(|(name, provider)| {
+                let hidden = self.locale.message(Message::RuleSetRedacted);
+                let safe = |value: &str| safe_rule_set_text(value, hidden);
+                let mut details = format!(
+                    "{} / {} · {}: {}",
+                    safe(&provider.behavior),
+                    safe(&provider.format),
+                    self.locale.message(Message::RuleSetSource),
+                    safe(&provider.vehicle_type)
+                );
+                if let Some(count) = provider.rule_count {
+                    details.push_str(&format!(
+                        " · {}: {}",
+                        self.locale.message(Message::RuleSetCount),
+                        count
+                    ));
+                }
+                if let Some(updated) = &provider.updated_at {
+                    details.push_str(&format!(
+                        " · {}: {}",
+                        self.locale.message(Message::RuleSetUpdated),
+                        safe(updated)
+                    ));
+                }
+                div()
+                    .border_t_1()
+                    .border_color(rgb(LINE))
+                    .pt_2()
+                    .min_w_0()
+                    .child(div().font_weight(FontWeight::MEDIUM).child(safe(name)))
+                    .child(div().text_sm().text_color(rgb(FAINT)).child(details))
+            })),
+        }
     }
 
     fn logs(&self, cx: &mut Context<Self>) -> Div {
@@ -3793,6 +3936,25 @@ fn paw_badge(size: f32) -> Div {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn rule_set_text_hides_url_like_and_control_values() {
+        use super::safe_rule_set_text;
+        assert_eq!(safe_rule_set_text("work rules", "hidden"), "work rules");
+        assert_eq!(
+            safe_rule_set_text("2026-11-26T12:30:00Z", "hidden"),
+            "2026-11-26T12:30:00Z"
+        );
+        for value in [
+            "https://example.test/token",
+            "name?token=secret",
+            "user@host",
+            "line\nbreak",
+        ] {
+            assert_eq!(safe_rule_set_text(value, "hidden"), "hidden");
+        }
+    }
+
     use super::Page;
 
     #[test]
