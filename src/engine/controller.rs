@@ -102,6 +102,10 @@ pub struct Traffic {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Connection {
     pub id: String,
+    #[serde(default, deserialize_with = "optional_u64")]
+    pub upload: Option<u64>,
+    #[serde(default, deserialize_with = "optional_u64")]
+    pub download: Option<u64>,
     #[serde(default)]
     pub metadata: Metadata,
     #[serde(default)]
@@ -113,12 +117,44 @@ pub struct Connection {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Metadata {
+    #[serde(default, deserialize_with = "optional_network")]
+    pub network: Option<String>,
     #[serde(default)]
     pub host: String,
-    #[serde(default, rename = "destinationIP")]
+    #[serde(
+        default,
+        rename = "destinationIP",
+        deserialize_with = "nullable_destination"
+    )]
     pub destination_ip: String,
     #[serde(default)]
     pub destination_port: serde_json::Value,
+}
+
+fn nullable_destination<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn optional_u64<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?.as_u64())
+}
+
+fn optional_network<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    const MAX_NETWORK_BYTES: usize = 64;
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(network)
+            if !network.is_empty() && network.len() <= MAX_NETWORK_BYTES =>
+        {
+            Some(network)
+        }
+        _ => None,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -514,6 +550,71 @@ mod tests {
         net::TcpListener,
         thread,
     };
+
+    #[test]
+    fn decodes_connection_details_from_snapshot_fixture() {
+        #[derive(Deserialize)]
+        struct Snapshot {
+            connections: Vec<Connection>,
+        }
+        let snapshot: Snapshot = serde_json::from_str(
+            r#"{"uploadTotal":100,"downloadTotal":200,"connections":[{"id":"one","upload":0,"download":18446744073709551615,"metadata":{"network":"tcp","host":"example.invalid","destinationIP":"192.0.2.1","destinationPort":443},"chains":["DIRECT"],"rule":"MATCH"}]}"#,
+        )
+        .unwrap();
+        let connection = &snapshot.connections[0];
+        assert_eq!(connection.id, "one");
+        assert_eq!(connection.upload, Some(0));
+        assert_eq!(connection.download, Some(u64::MAX));
+        assert_eq!(connection.metadata.network.as_deref(), Some("tcp"));
+        assert_eq!(connection.metadata.host, "example.invalid");
+        assert_eq!(connection.metadata.destination_ip, "192.0.2.1");
+        assert_eq!(connection.metadata.destination_port, 443);
+        assert_eq!(connection.chains, ["DIRECT"]);
+        assert_eq!(connection.rule, "MATCH");
+    }
+
+    #[test]
+    fn absent_and_null_connection_details_are_none() {
+        let connections: Vec<Connection> = serde_json::from_str(
+            r#"[{"id":"absent"},{"id":"null","upload":null,"download":null,"metadata":{"network":null,"host":"example.invalid","destinationIP":null}}]"#,
+        )
+        .unwrap();
+        for connection in connections {
+            assert_eq!(connection.upload, None);
+            assert_eq!(connection.download, None);
+            assert_eq!(connection.metadata.network, None);
+            assert!(connection.metadata.destination_ip.is_empty());
+        }
+    }
+
+    #[test]
+    fn malformed_connection_details_do_not_discard_rows() {
+        let connections: Vec<Connection> = serde_json::from_str(
+            r#"[
+                {"id":"negative","upload":-1,"download":1.0,"metadata":{"network":""}},
+                {"id":"wrong types","upload":"12","download":true,"metadata":{"network":42}},
+                {"id":"nested","upload":{},"download":[1],"metadata":{"network":["tcp"]}},
+                {"id":"overflow","upload":18446744073709551616,"download":-2,"metadata":{"network":{}}}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(connections.len(), 4);
+        for connection in connections {
+            assert_eq!(connection.upload, None, "{}", connection.id);
+            assert_eq!(connection.download, None, "{}", connection.id);
+            assert_eq!(connection.metadata.network, None, "{}", connection.id);
+        }
+
+        for (network, expected) in [("a".repeat(64), true), ("é".repeat(33), false)] {
+            let connection: Connection = serde_json::from_value(serde_json::json!({
+                "id": "length", "upload": 7, "download": "bad", "metadata": {"network": network}
+            }))
+            .unwrap();
+            assert_eq!(connection.upload, Some(7));
+            assert_eq!(connection.download, None);
+            assert_eq!(connection.metadata.network.is_some(), expected);
+        }
+    }
 
     #[test]
     fn decodes_rule_provider_response_with_empty_and_partial_statuses() {
