@@ -173,6 +173,13 @@ pub enum Message {
     RefreshRulesDetail,
     NoRunningSession,
     StartToViewRules,
+    LogLevelAll,
+    LogLevelDebug,
+    LogLevelInfo,
+    LogLevelWarn,
+    LogLevelError,
+    NoMatchingLogs,
+    LogFilterDetail,
     ClearLogs,
     WaitingForLogs,
     WaitingForLogsDetail,
@@ -240,6 +247,13 @@ impl Locale {
         match self {
             Self::En => format!("Showing {start}–{end} of {total} matches"),
             Self::ZhCn => format!("显示 {total} 条匹配结果中的第 {start}–{end} 条"),
+        }
+    }
+
+    pub fn visible_log_count(self, visible: usize, retained: usize) -> String {
+        match self {
+            Self::En => format!("{visible} of {retained} retained entries visible"),
+            Self::ZhCn => format!("保留 {retained} 条日志，显示 {visible} 条"),
         }
     }
 
@@ -469,6 +483,13 @@ fn english(key: Message) -> &'static str {
         Message::StartToViewRules => {
             "Start a profile to inspect its rule order and routing policies."
         }
+        Message::LogLevelAll => "All levels",
+        Message::LogLevelDebug => "Debug",
+        Message::LogLevelInfo => "Info",
+        Message::LogLevelWarn => "Warning",
+        Message::LogLevelError => "Error",
+        Message::NoMatchingLogs => "No matching log entries",
+        Message::LogFilterDetail => "Try a different search or level.",
         Message::ClearLogs => "Clear",
         Message::WaitingForLogs => "Waiting for log entries",
         Message::WaitingForLogsDetail => "New messages from this Meow session appear here.",
@@ -647,6 +668,13 @@ fn chinese(key: Message) -> &'static str {
         Message::RefreshRulesDetail => "刷新以读取 Meow 的实时规则。",
         Message::NoRunningSession => "没有运行中的会话",
         Message::StartToViewRules => "启动配置后即可查看规则顺序和路由策略。",
+        Message::LogLevelAll => "全部级别",
+        Message::LogLevelDebug => "调试",
+        Message::LogLevelInfo => "信息",
+        Message::LogLevelWarn => "警告",
+        Message::LogLevelError => "错误",
+        Message::NoMatchingLogs => "没有匹配的日志",
+        Message::LogFilterDetail => "请尝试其他搜索词或级别。",
         Message::ClearLogs => "清空",
         Message::WaitingForLogs => "等待日志",
         Message::WaitingForLogsDetail => "此 Meow 会话的新消息会显示在这里。",
@@ -873,6 +901,18 @@ mod tests {
         assert_eq!(
             Locale::ZhCn.connection_match_count(0, 7),
             "7 个活动连接中匹配 0 个"
+        );
+    }
+
+    #[test]
+    fn visible_log_counts_cover_both_locales() {
+        assert_eq!(
+            Locale::En.visible_log_count(0, 3),
+            "0 of 3 retained entries visible"
+        );
+        assert_eq!(
+            Locale::ZhCn.visible_log_count(2, 3),
+            "保留 3 条日志，显示 2 条"
         );
     }
 

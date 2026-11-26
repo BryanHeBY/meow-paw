@@ -158,6 +158,63 @@ fn subscription_display_name(
         })
 }
 
+#[cfg(any(target_os = "linux", windows))]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum LogLevelFilter {
+    #[default]
+    All,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl LogLevelFilter {
+    const ALL: [Self; 5] = [Self::All, Self::Debug, Self::Info, Self::Warn, Self::Error];
+
+    fn label(self) -> Message {
+        match self {
+            Self::All => Message::LogLevelAll,
+            Self::Debug => Message::LogLevelDebug,
+            Self::Info => Message::LogLevelInfo,
+            Self::Warn => Message::LogLevelWarn,
+            Self::Error => Message::LogLevelError,
+        }
+    }
+
+    fn matches(self, level: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Debug => level.eq_ignore_ascii_case("debug"),
+            Self::Info => level.eq_ignore_ascii_case("info"),
+            Self::Warn => {
+                level.eq_ignore_ascii_case("warn") || level.eq_ignore_ascii_case("warning")
+            }
+            Self::Error => level.eq_ignore_ascii_case("error") || level.eq_ignore_ascii_case("err"),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn filter_logs<'a>(
+    entries: &'a [meow_paw::engine::controller::LogEntry],
+    query: &str,
+    level: LogLevelFilter,
+) -> Vec<&'a meow_paw::engine::controller::LogEntry> {
+    let query = query.trim().to_lowercase();
+    entries
+        .iter()
+        .filter(|entry| {
+            level.matches(&entry.level)
+                && (query.is_empty()
+                    || format!("{} {} {}", entry.time, entry.level, entry.message)
+                        .to_lowercase()
+                        .contains(&query))
+        })
+        .collect()
+}
+
 pub struct Paw {
     page: Page,
     locale: Locale,
@@ -189,6 +246,10 @@ pub struct Paw {
     rule_page: usize,
     connection_filter: Entity<InputState>,
     _connection_filter_changes: Subscription,
+    log_filter: Entity<InputState>,
+    _log_filter_changes: Subscription,
+    #[cfg(any(target_os = "linux", windows))]
+    log_level: LogLevelFilter,
     probe_url: Entity<InputState>,
     _probe_url_changes: Subscription,
     #[cfg(any(target_os = "linux", windows))]
@@ -250,6 +311,8 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let rule_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).connection_filter.read(cx).value();
     let connection_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
+    let query = paw.read(cx).log_filter.read(cx).value();
+    let log_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).probe_url.read(cx).value();
     let probe_url = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).subscription_name.read(cx).value();
@@ -260,6 +323,8 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
         state._subscription_url_changes = subscribe_subscription_url(&subscription_url, cx);
         state.subscription_url = subscription_url;
         state.subscription_name = subscription_name;
+        state._log_filter_changes = subscribe_search(&log_filter, cx);
+        state.log_filter = log_filter;
         state._probe_url_changes = subscribe_probe_url(&probe_url, cx);
         state.probe_url = probe_url;
         state._search_changes = subscribe_search(&search, cx);
@@ -284,11 +349,13 @@ pub fn open(
     let search = cx.new(|cx| InputState::new(window, cx));
     let rule_filter = cx.new(|cx| InputState::new(window, cx));
     let connection_filter = cx.new(|cx| InputState::new(window, cx));
+    let log_filter = cx.new(|cx| InputState::new(window, cx));
     let probe_url = cx.new(|cx| InputState::new(window, cx));
     let subscription_url = cx.new(|cx| InputState::new(window, cx));
     let subscription_name = cx.new(|cx| InputState::new(window, cx));
     cx.new(|cx| {
         let subscription_url_changes = subscribe_subscription_url(&subscription_url, cx);
+        let log_filter_changes = subscribe_search(&log_filter, cx);
         let probe_url_changes = subscribe_probe_url(&probe_url, cx);
         let search_changes = subscribe_search(&search, cx);
         let rule_filter_changes = subscribe_rule_filter(&rule_filter, cx);
@@ -341,6 +408,10 @@ pub fn open(
             rule_page: 0,
             connection_filter,
             _connection_filter_changes: connection_filter_changes,
+            log_filter,
+            _log_filter_changes: log_filter_changes,
+            #[cfg(any(target_os = "linux", windows))]
+            log_level: LogLevelFilter::All,
             probe_url,
             _probe_url_changes: probe_url_changes,
             #[cfg(any(target_os = "linux", windows))]
@@ -823,13 +894,15 @@ impl Paw {
         if let Some(history) = self.snapshot.logs.as_ref() {
             let entries = history.recent();
             let clear = history.clone();
+            let query = self.log_filter.read(cx).value();
+            let visible = filter_logs(&entries, &query, self.log_level);
             let panel = div().flex().flex_col().gap_3().child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
                     .child(chip(
-                        self.locale.retained_log_count(entries.len()),
+                        self.locale.visible_log_count(visible.len(), entries.len()),
                         BLUE,
                         SOFT_BLUE,
                     ))
@@ -841,13 +914,61 @@ impl Paw {
                             })),
                     ),
             );
+            let panel = panel
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(FAINT))
+                                .child(self.locale.message(Message::Filter)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(Input::new(&self.log_filter).cleanable(true)),
+                        ),
+                )
+                .child(
+                    div().flex().flex_wrap().gap_2().children(
+                        LogLevelFilter::ALL
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, level)| {
+                                let selected = self.log_level == level;
+                                div()
+                                    .id(("log-level-filter", index))
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .text_color(rgb(if selected { SURFACE } else { BLUE }))
+                                    .bg(rgb(if selected { BLUE } else { SOFT_BLUE }))
+                                    .child(self.locale.message(level.label()))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.log_level = level;
+                                        cx.notify();
+                                    }))
+                            }),
+                    ),
+                );
             if entries.is_empty() {
                 return panel.child(empty_state(
                     self.locale.message(Message::WaitingForLogs),
                     self.locale.message(Message::WaitingForLogsDetail),
                 ));
             }
-            return panel.child(card().children(entries.into_iter().map(|entry| {
+            if visible.is_empty() {
+                return panel.child(empty_state(
+                    self.locale.message(Message::NoMatchingLogs),
+                    self.locale.message(Message::LogFilterDetail),
+                ));
+            }
+            return panel.child(card().children(visible.into_iter().map(|entry| {
                 let color = match entry.level.as_str() {
                     "error" => 0xa83a33,
                     "warn" => STREAM_UP,
@@ -866,15 +987,20 @@ impl Paw {
                             .flex_shrink_0()
                             .text_sm()
                             .text_color(rgb(FAINT))
-                            .child(entry.time),
+                            .child(entry.time.clone()),
                     )
+                    .child(div().w(px(56.)).flex_shrink_0().child(chip(
+                        entry.level.clone(),
+                        color,
+                        BG,
+                    )))
                     .child(
                         div()
-                            .w(px(56.))
-                            .flex_shrink_0()
-                            .child(chip(entry.level, color, BG)),
+                            .min_w_0()
+                            .flex_1()
+                            .text_sm()
+                            .child(entry.message.clone()),
                     )
-                    .child(div().min_w_0().flex_1().text_sm().child(entry.message))
             })));
         }
         let _ = cx;
@@ -4156,5 +4282,54 @@ mod tests {
         }
         assert!(Page::from_name("首页").is_none());
         assert!(Page::from_name("not-a-page").is_none());
+    }
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn log_filters_are_local_combined_and_preserve_order() {
+        use super::{LogLevelFilter as Level, filter_logs};
+        use meow_paw::engine::controller::LogEntry;
+        let entries = vec![
+            LogEntry {
+                time: "12:03".into(),
+                level: "INFO".into(),
+                message: "Connected Alpha".into(),
+            },
+            LogEntry {
+                time: "12:02".into(),
+                level: "warning".into(),
+                message: "Alpha retry".into(),
+            },
+            LogEntry {
+                time: "12:01".into(),
+                level: "error".into(),
+                message: "Beta failed".into(),
+            },
+        ];
+        let original = entries.clone();
+        assert_eq!(
+            filter_logs(&entries, "", Level::All),
+            entries.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(filter_logs(&entries, "  ALPHA  ", Level::All).len(), 2);
+        assert_eq!(
+            filter_logs(&entries, "12:02", Level::All)[0].message,
+            "Alpha retry"
+        );
+        assert_eq!(
+            filter_logs(&entries, "info", Level::All)[0].message,
+            "Connected Alpha"
+        );
+        assert_eq!(filter_logs(&entries, "alpha", Level::Warn)[0].time, "12:02");
+        assert_eq!(
+            filter_logs(&entries, "", Level::Error)[0].message,
+            "Beta failed"
+        );
+        assert!(filter_logs(&entries, "", Level::Debug).is_empty());
+        assert!(filter_logs(&entries, "beta", Level::Info).is_empty());
+        assert!(Level::Error.matches("ERR"));
+        assert!(Level::Warn.matches("warn"));
+        assert!(!Level::Info.matches("information"));
+        assert!(filter_logs(&[], "", Level::All).is_empty());
+        assert_eq!(entries, original);
     }
 }
