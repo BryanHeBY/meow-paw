@@ -134,13 +134,17 @@ impl Preferences {
         &self.selected.profiles
     }
 
+    /// Whether selections can be written to a persistent preferences file.
+    pub fn has_persistent_file(&self) -> bool {
+        self.file.is_some()
+    }
+
     /// Return the saved choice, independent of any temporary launch override.
     pub fn language(&self) -> LanguagePreference {
         self.selected.language
     }
 
     /// Save the choice for the next launch; the running UI keeps its locale.
-    #[allow(dead_code)] // Used by the forthcoming Settings UI.
     pub fn set_language(&mut self, language: LanguagePreference) -> io::Result<()> {
         let mut next = self.selected.clone();
         next.language = language;
@@ -289,6 +293,26 @@ mod tests {
             assert!(Preferences::open(file.clone()).is_err());
             assert_eq!(fs::read(&file).unwrap(), bytes);
         }
+    }
+
+    #[test]
+    fn saved_language_changes_next_launch_not_the_current_locale() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut prefs = Preferences::open(dir.path().join("preferences.json")).unwrap();
+        assert!(prefs.has_persistent_file());
+        let launch_locale = crate::select_locale(&prefs, Some("en"), Some("zh-CN"));
+        prefs.set_language(LanguagePreference::ZhCn).unwrap();
+        assert_eq!(prefs.language(), LanguagePreference::ZhCn);
+        assert_eq!(launch_locale, meow_paw::i18n::Locale::En);
+        assert_eq!(
+            crate::select_locale(&prefs, None, Some("en")),
+            meow_paw::i18n::Locale::ZhCn
+        );
+        assert_eq!(
+            crate::select_locale(&prefs, Some("en"), Some("zh-CN")),
+            meow_paw::i18n::Locale::En
+        );
+        assert!(!Preferences::default().has_persistent_file());
     }
 
     #[test]

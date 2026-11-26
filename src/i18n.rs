@@ -71,6 +71,13 @@ pub enum Message {
     HideFullPath,
     ShowFullPath,
     CopyPath,
+    Language,
+    SavedLanguage,
+    CurrentLanguage,
+    LanguageSystem,
+    LanguageRestart,
+    LanguageUnavailable,
+    LanguageSaveFailed,
     TrayBehavior,
     TrayDescription,
     ApplicationVersion,
@@ -251,6 +258,19 @@ fn english(key: Message) -> &'static str {
         Message::HideFullPath => "Hide full path",
         Message::ShowFullPath => "Show full path",
         Message::CopyPath => "Copy path",
+        Message::Language => "Language",
+        Message::SavedLanguage => "Saved choice",
+        Message::CurrentLanguage => "Current launch language",
+        Message::LanguageSystem => "System",
+        Message::LanguageRestart => {
+            "Restart Paw to apply a saved change. A launch override takes precedence."
+        }
+        Message::LanguageUnavailable => {
+            "Language selection is unavailable because preferences are not persistent."
+        }
+        Message::LanguageSaveFailed => {
+            "Could not save the language choice. The saved choice has not changed."
+        }
         Message::TrayBehavior => "Tray behavior",
         Message::TrayDescription => {
             "Closing the window keeps Paw running when a desktop tray is available."
@@ -396,6 +416,13 @@ fn chinese(key: Message) -> &'static str {
         Message::HideFullPath => "隐藏完整路径",
         Message::ShowFullPath => "显示完整路径",
         Message::CopyPath => "复制路径",
+        Message::Language => "语言",
+        Message::SavedLanguage => "已保存的选择",
+        Message::CurrentLanguage => "本次启动使用的语言",
+        Message::LanguageSystem => "跟随系统",
+        Message::LanguageRestart => "重启 Paw 后应用已保存的更改。启动时指定的语言优先。",
+        Message::LanguageUnavailable => "首选项无法持久保存，因此无法选择语言。",
+        Message::LanguageSaveFailed => "无法保存语言选择。已保存的选择未更改。",
         Message::TrayBehavior => "托盘行为",
         Message::TrayDescription => "桌面托盘可用时，关闭窗口后 Paw 继续运行。",
         Message::ApplicationVersion => "应用版本",
@@ -549,6 +576,13 @@ mod tests {
             Message::ModeRule,
             Message::ModeGlobal,
             Message::ModeDirect,
+            Message::Language,
+            Message::SavedLanguage,
+            Message::CurrentLanguage,
+            Message::LanguageSystem,
+            Message::LanguageRestart,
+            Message::LanguageUnavailable,
+            Message::LanguageSaveFailed,
         ];
         for key in keys {
             assert!(!Locale::En.message(key).is_empty(), "English: {key:?}");

@@ -1,4 +1,6 @@
-use crate::preferences::Preferences;
+use crate::preferences::{LanguagePreference, Preferences};
+use gpui_kit::base::{Disableable, Selectable};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -127,6 +129,7 @@ pub struct Paw {
     subscription_busy: bool,
     subscription_notice: Option<Message>,
     preference_warning: Option<String>,
+    language_save_failed: bool,
     search: Entity<InputState>,
     _search_changes: Subscription,
     connection_filter: Entity<InputState>,
@@ -226,6 +229,7 @@ pub fn open(
             subscription_busy: false,
             subscription_notice,
             preference_warning: warning.map(str::to_owned),
+            language_save_failed: false,
             search,
             _search_changes: search_changes,
             connection_filter,
@@ -2123,6 +2127,84 @@ impl Paw {
     }
 
     fn settings(&self, wide: bool, cx: &mut Context<Self>) -> Div {
+        let saved_language = self.preferences.language();
+        let can_save_language = self.preferences.has_persistent_file();
+        let language_name = |language| match language {
+            LanguagePreference::System => self.locale.message(Message::LanguageSystem),
+            LanguagePreference::En => "English",
+            LanguagePreference::ZhCn => "简体中文",
+        };
+        let language = form_card(self.locale.message(Message::Language)).child(
+            div()
+                .mx_4()
+                .py_3()
+                .border_t_1()
+                .border_color(rgb(LINE))
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(format!(
+                    "{}: {}",
+                    self.locale.message(Message::SavedLanguage),
+                    language_name(saved_language)
+                ))
+                .child(format!(
+                    "{}: {}",
+                    self.locale.message(Message::CurrentLanguage),
+                    match self.locale {
+                        Locale::En => "English",
+                        Locale::ZhCn => "简体中文",
+                    }
+                ))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(FAINT))
+                        .child(self.locale.message(Message::LanguageRestart)),
+                )
+                .when(!can_save_language, |el| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(FAINT))
+                            .child(self.locale.message(Message::LanguageUnavailable)),
+                    )
+                })
+                .when(self.language_save_failed, |el| {
+                    el.child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xb42318))
+                            .child(self.locale.message(Message::LanguageSaveFailed)),
+                    )
+                })
+                .children(
+                    [
+                        LanguagePreference::System,
+                        LanguagePreference::En,
+                        LanguagePreference::ZhCn,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, choice)| {
+                        let selected = choice == saved_language;
+                        Button::new(("language-choice", index))
+                            .label(language_name(choice))
+                            .selected(selected)
+                            .toggled(selected)
+                            .disabled(!can_save_language)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.preferences.has_persistent_file()
+                                    && this.preferences.language() != choice
+                                {
+                                    this.language_save_failed =
+                                        this.preferences.set_language(choice).is_err();
+                                }
+                                cx.notify();
+                            }))
+                    }),
+                ),
+        );
         let binary = self.binary.as_ref().map_or_else(
             || "No executable selected".into(),
             |p| p.display().to_string(),
@@ -2248,6 +2330,10 @@ impl Paw {
                     .min_w_0()
                     .w_full()
                     .when(wide, |el| el.flex_1())
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(language)
                     .child(app),
             )
     }

@@ -37,13 +37,18 @@ not change saved preferences. Page identifiers for `--page` remain English:
 `home` (also `overview`), `proxies`, `profiles`, `connections`, `rules`,
 `logs`, `unlock`, and `settings`.
 
-Without an override, Linux uses the first nonempty `LC_ALL`, `LC_MESSAGES`, or
-`LANG` value, in that order. Windows uses the user's regional locale. Locale
+Settings offers System, English, and 简体中文 as the saved language choice.
+Changes take effect after restarting Paw, including the tray; the current launch
+language is shown separately. A `--locale` override takes precedence over the
+saved choice for that launch. When preferences are unavailable or disabled
+(including `--no-preferences` and visual captures), language selection is disabled.
+
+With System selected and no override, Linux uses the first nonempty `LC_ALL`,
+`LC_MESSAGES`, or `LANG` value, in that order. Windows uses the user's regional locale. Locale
 names such as `zh_CN.UTF-8` and `zh-Hans-CN` are recognized; missing or
 unsupported values fall back to English. A present but unsupported override
 also falls back to English. The shell relies on native font fallback for CJK
 glyphs, so a suitable system font must be installed. Navigation, shell controls,
-and fixed labels and descriptions on Home, Proxies, and Settings are localized.
-Live statuses, engine-provided content, and other page content remain in English
-or their original language. Persistent language selection in Settings is a
-separate future step.
+and fixed labels and descriptions on Home, Proxies, Settings, Rules, and Logs are
+localized. Live statuses, engine-provided content, and other page content remain
+in English or their original language.
