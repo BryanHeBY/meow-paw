@@ -118,6 +118,18 @@ pub enum Message {
     RouteColumn,
     RuleColumn,
     CloseConnection,
+    RefreshRules,
+    RuleTypeColumn,
+    RuleMatchColumn,
+    RulePolicyColumn,
+    NoRuleSnapshot,
+    RefreshRulesDetail,
+    NoRunningSession,
+    StartToViewRules,
+    ClearLogs,
+    WaitingForLogs,
+    WaitingForLogsDetail,
+    StartToViewLogs,
 }
 
 impl Locale {
@@ -145,6 +157,20 @@ impl Locale {
         match self {
             Self::En => format!("{matched} of {total} active"),
             Self::ZhCn => format!("{total} 个活动连接中匹配 {matched} 个"),
+        }
+    }
+
+    pub fn rule_count(self, count: usize) -> String {
+        match self {
+            Self::En => format!("{count} RULES"),
+            Self::ZhCn => format!("{count} 条规则"),
+        }
+    }
+
+    pub fn retained_log_count(self, count: usize) -> String {
+        match self {
+            Self::En => format!("{count} retained entries"),
+            Self::ZhCn => format!("保留 {count} 条日志"),
         }
     }
 
@@ -286,6 +312,22 @@ fn english(key: Message) -> &'static str {
         Message::RouteColumn => "ROUTE",
         Message::RuleColumn => "RULE",
         Message::CloseConnection => "Close",
+        Message::RefreshRules => "Refresh rules",
+        Message::RuleTypeColumn => "TYPE",
+        Message::RuleMatchColumn => "MATCH",
+        Message::RulePolicyColumn => "POLICY",
+        Message::NoRuleSnapshot => "No rule snapshot",
+        Message::RefreshRulesDetail => "Refresh to read the live rules from Meow.",
+        Message::NoRunningSession => "No running session",
+        Message::StartToViewRules => {
+            "Start a profile to inspect its rule order and routing policies."
+        }
+        Message::ClearLogs => "Clear",
+        Message::WaitingForLogs => "Waiting for log entries",
+        Message::WaitingForLogsDetail => "New messages from this Meow session appear here.",
+        Message::StartToViewLogs => {
+            "Start a profile to view live Meow logs. Entries are kept only for the current session."
+        }
     }
 }
 
@@ -401,6 +443,18 @@ fn chinese(key: Message) -> &'static str {
         Message::RouteColumn => "路线",
         Message::RuleColumn => "规则",
         Message::CloseConnection => "关闭",
+        Message::RefreshRules => "刷新规则",
+        Message::RuleTypeColumn => "类型",
+        Message::RuleMatchColumn => "匹配内容",
+        Message::RulePolicyColumn => "策略",
+        Message::NoRuleSnapshot => "暂无规则快照",
+        Message::RefreshRulesDetail => "刷新以读取 Meow 的实时规则。",
+        Message::NoRunningSession => "没有运行中的会话",
+        Message::StartToViewRules => "启动配置后即可查看规则顺序和路由策略。",
+        Message::ClearLogs => "清空",
+        Message::WaitingForLogs => "等待日志",
+        Message::WaitingForLogsDetail => "此 Meow 会话的新消息会显示在这里。",
+        Message::StartToViewLogs => "启动配置后即可查看 Meow 的实时日志。日志仅在当前会话中保留。",
     }
 }
 
@@ -510,6 +564,65 @@ mod tests {
             Locale::ZhCn.connection_match_count(0, 7),
             "7 个活动连接中匹配 0 个"
         );
+    }
+
+    #[test]
+    fn rules_and_logs_catalog() {
+        let cases = [
+            (Message::RefreshRules, "Refresh rules", "刷新规则"),
+            (Message::RuleTypeColumn, "TYPE", "类型"),
+            (Message::RuleMatchColumn, "MATCH", "匹配内容"),
+            (Message::RulePolicyColumn, "POLICY", "策略"),
+            (Message::NoRuleSnapshot, "No rule snapshot", "暂无规则快照"),
+            (
+                Message::RefreshRulesDetail,
+                "Refresh to read the live rules from Meow.",
+                "刷新以读取 Meow 的实时规则。",
+            ),
+            (
+                Message::NoRunningSession,
+                "No running session",
+                "没有运行中的会话",
+            ),
+            (
+                Message::StartToViewRules,
+                "Start a profile to inspect its rule order and routing policies.",
+                "启动配置后即可查看规则顺序和路由策略。",
+            ),
+            (Message::ClearLogs, "Clear", "清空"),
+            (
+                Message::WaitingForLogs,
+                "Waiting for log entries",
+                "等待日志",
+            ),
+            (
+                Message::WaitingForLogsDetail,
+                "New messages from this Meow session appear here.",
+                "此 Meow 会话的新消息会显示在这里。",
+            ),
+            (
+                Message::StartToViewLogs,
+                "Start a profile to view live Meow logs. Entries are kept only for the current session.",
+                "启动配置后即可查看 Meow 的实时日志。日志仅在当前会话中保留。",
+            ),
+        ];
+        for (key, en, zh) in cases {
+            assert_eq!(Locale::En.message(key), en, "English: {key:?}");
+            assert_eq!(Locale::ZhCn.message(key), zh, "Chinese: {key:?}");
+            assert_eq!(Locale::select(Some("unsupported"), None).message(key), en);
+        }
+        for count in [0, 1, 42] {
+            assert_eq!(Locale::En.rule_count(count), format!("{count} RULES"));
+            assert_eq!(Locale::ZhCn.rule_count(count), format!("{count} 条规则"));
+            assert_eq!(
+                Locale::En.retained_log_count(count),
+                format!("{count} retained entries")
+            );
+            assert_eq!(
+                Locale::ZhCn.retained_log_count(count),
+                format!("保留 {count} 条日志")
+            );
+        }
     }
 
     #[test]

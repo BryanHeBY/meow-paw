@@ -563,12 +563,12 @@ impl Paw {
     fn rules(&self, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
         if self.state().2.is_some() {
-            let button = secondary_button("refresh-rules", "Refresh rules").on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.read_rules();
-                    cx.notify();
-                },
-            ));
+            let button =
+                secondary_button("refresh-rules", self.locale.message(Message::RefreshRules))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.read_rules();
+                        cx.notify();
+                    }));
             let page = div()
                 .flex()
                 .flex_col()
@@ -577,12 +577,12 @@ impl Paw {
             return match &self.snapshot.rules {
                 Some(rules) => page.child(
                     card()
-                        .child(section_label(format!("{} RULES", rules.len())))
+                        .child(section_label(self.locale.rule_count(rules.len())))
                         .child(
                             connection_row(
-                                section_label("TYPE"),
-                                section_label("MATCH"),
-                                section_label("POLICY"),
+                                section_label(self.locale.message(Message::RuleTypeColumn)),
+                                section_label(self.locale.message(Message::RuleMatchColumn)),
+                                section_label(self.locale.message(Message::RulePolicyColumn)),
                             )
                             .mt_2()
                             .bg(rgb(SOFT_BLUE))
@@ -607,15 +607,15 @@ impl Paw {
                         })),
                 ),
                 None => page.child(empty_state(
-                    "No rule snapshot",
-                    "Refresh to read the live rules from Meow.",
+                    self.locale.message(Message::NoRuleSnapshot),
+                    self.locale.message(Message::RefreshRulesDetail),
                 )),
             };
         }
         let _ = cx;
         empty_state(
-            "No running session",
-            "Start a profile to inspect its rule order and routing policies.",
+            self.locale.message(Message::NoRunningSession),
+            self.locale.message(Message::StartToViewRules),
         )
     }
 
@@ -630,23 +630,22 @@ impl Paw {
                     .items_center()
                     .justify_between()
                     .child(chip(
-                        format!("{} retained entries", entries.len()),
+                        self.locale.retained_log_count(entries.len()),
                         BLUE,
                         SOFT_BLUE,
                     ))
                     .child(
-                        secondary_button("clear-logs", "Clear").on_click(cx.listener(
-                            move |_, _, _, cx| {
+                        secondary_button("clear-logs", self.locale.message(Message::ClearLogs))
+                            .on_click(cx.listener(move |_, _, _, cx| {
                                 clear.clear();
                                 cx.notify();
-                            },
-                        )),
+                            })),
                     ),
             );
             if entries.is_empty() {
                 return panel.child(empty_state(
-                    "Waiting for log entries",
-                    "New messages from this Meow session appear here.",
+                    self.locale.message(Message::WaitingForLogs),
+                    self.locale.message(Message::WaitingForLogsDetail),
                 ));
             }
             return panel.child(card().children(entries.into_iter().map(|entry| {
@@ -681,8 +680,8 @@ impl Paw {
         }
         let _ = cx;
         empty_state(
-            "No running session",
-            "Start a profile to view live Meow logs. Entries are kept only for the current session.",
+            self.locale.message(Message::NoRunningSession),
+            self.locale.message(Message::StartToViewLogs),
         )
     }
 
