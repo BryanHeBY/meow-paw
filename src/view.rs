@@ -215,6 +215,85 @@ impl LogLevelFilter {
 }
 
 #[cfg(any(target_os = "linux", windows))]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+enum LogOrder {
+    #[default]
+    NewestFirst,
+    OldestFirst,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl LogOrder {
+    fn toggle(&mut self) {
+        *self = match self {
+            Self::NewestFirst => Self::OldestFirst,
+            Self::OldestFirst => Self::NewestFirst,
+        };
+    }
+
+    fn label(self) -> Message {
+        match self {
+            Self::NewestFirst => Message::LogNewestFirst,
+            Self::OldestFirst => Message::LogOldestFirst,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[derive(Default)]
+struct LogReview {
+    paused: Option<Vec<meow_paw::engine::controller::LogEntry>>,
+    order: LogOrder,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl LogReview {
+    fn toggle_pause(&mut self, live: impl FnOnce() -> Vec<meow_paw::engine::controller::LogEntry>) {
+        if self.paused.is_some() {
+            self.paused = None;
+        } else {
+            self.paused = Some(live());
+        }
+    }
+
+    fn entries(
+        &self,
+        live: impl FnOnce() -> Vec<meow_paw::engine::controller::LogEntry>,
+    ) -> Vec<meow_paw::engine::controller::LogEntry> {
+        self.paused.clone().unwrap_or_else(live)
+    }
+
+    fn reset_pause(&mut self) {
+        self.paused = None;
+    }
+
+    fn visible<'a>(
+        &self,
+        entries: &'a [meow_paw::engine::controller::LogEntry],
+        query: &str,
+        level: LogLevelFilter,
+    ) -> Vec<&'a meow_paw::engine::controller::LogEntry> {
+        let mut visible = filter_logs(entries, query, level);
+        if self.order == LogOrder::OldestFirst {
+            visible.reverse();
+        }
+        visible
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn log_review_context_changed(
+    old: &meow_paw::app::Snapshot,
+    new: &meow_paw::app::Snapshot,
+) -> bool {
+    old.probe_epoch != new.probe_epoch
+        || old.profile != new.profile
+        || new.applying_profile.is_some()
+        || !matches!(new.engine, meow_paw::app::EngineStatus::Running { .. })
+        || new.logs.is_none()
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn filter_logs<'a>(
     entries: &'a [meow_paw::engine::controller::LogEntry],
     query: &str,
@@ -292,6 +371,10 @@ pub struct Paw {
     _log_filter_changes: Subscription,
     #[cfg(any(target_os = "linux", windows))]
     log_level: LogLevelFilter,
+    #[cfg(any(target_os = "linux", windows))]
+    log_review: LogReview,
+    log_pause_focus: FocusHandle,
+    log_order_focus: FocusHandle,
     probe_url: Entity<InputState>,
     _probe_url_changes: Subscription,
     #[cfg(any(target_os = "linux", windows))]
@@ -468,6 +551,10 @@ pub fn open(
             _log_filter_changes: log_filter_changes,
             #[cfg(any(target_os = "linux", windows))]
             log_level: LogLevelFilter::All,
+            #[cfg(any(target_os = "linux", windows))]
+            log_review: LogReview::default(),
+            log_pause_focus: cx.focus_handle(),
+            log_order_focus: cx.focus_handle(),
             probe_url,
             _probe_url_changes: probe_url_changes,
             #[cfg(any(target_os = "linux", windows))]
@@ -548,6 +635,9 @@ impl Paw {
                 {
                     self.connection_detail = None;
                     self.connection_detail_return = None;
+                }
+                if log_review_context_changed(&self.snapshot, &snap) {
+                    self.log_review.reset_pause();
                 }
                 self.snapshot = snap;
                 return true;
@@ -1120,28 +1210,91 @@ impl Paw {
     fn logs(&self, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
         if let Some(history) = self.snapshot.logs.as_ref() {
-            let entries = history.recent();
-            let clear = history.clone();
+            let entries = self.log_review.entries(|| history.recent());
             let query = self.log_filter.read(cx).value();
-            let visible = filter_logs(&entries, &query, self.log_level);
-            let panel = div().flex().flex_col().gap_3().child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(chip(
-                        self.locale.visible_log_count(visible.len(), entries.len()),
-                        BLUE,
-                        SOFT_BLUE,
-                    ))
-                    .child(
-                        secondary_button("clear-logs", self.locale.message(Message::ClearLogs))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                clear.clear();
-                                cx.notify();
-                            })),
-                    ),
-            );
+            let visible = self.log_review.visible(&entries, &query, self.log_level);
+            let paused = self.log_review.paused.is_some();
+            let pause_context = self.snapshot.clone();
+            let pause = subscription_button(
+                "log-pause",
+                self.locale.message(if paused {
+                    Message::ResumeLogs
+                } else {
+                    Message::PauseLogs
+                }),
+                paused,
+                cx,
+            )
+            .track_focus(&self.log_pause_focus)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.log_pause_focus.focus(window, cx);
+                this.refresh();
+                if !log_review_context_changed(&pause_context, &this.snapshot)
+                    && let Some(history) = this.snapshot.logs.as_ref()
+                {
+                    this.log_review.toggle_pause(|| history.recent());
+                }
+                cx.notify();
+            }));
+            let order = subscription_button(
+                "log-order",
+                self.locale.message(self.log_review.order.label()),
+                false,
+                cx,
+            )
+            .track_focus(&self.log_order_focus)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.log_order_focus.focus(window, cx);
+                this.log_review.order.toggle();
+                cx.notify();
+            }));
+            let clear_context = self.snapshot.clone();
+            let clear = subscription_button(
+                "clear-logs",
+                self.locale.message(if paused {
+                    Message::ClearLiveLogs
+                } else {
+                    Message::ClearLogs
+                }),
+                false,
+                cx,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.refresh();
+                if !log_review_context_changed(&clear_context, &this.snapshot)
+                    && let Some(history) = this.snapshot.logs.as_ref()
+                {
+                    history.clear();
+                }
+                cx.notify();
+            }));
+            let panel = div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(chip(
+                            self.locale.visible_log_count(visible.len(), entries.len()),
+                            BLUE,
+                            SOFT_BLUE,
+                        ))
+                        .child(pause)
+                        .child(order)
+                        .child(clear),
+                )
+                .when(paused, |panel| {
+                    panel.child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(FAINT))
+                            .child(self.locale.message(Message::LogsPausedCaption)),
+                    )
+                });
             let panel = panel
                 .child(
                     div()
@@ -1157,6 +1310,7 @@ impl Paw {
                         .child(
                             div()
                                 .flex_1()
+                                .min_w_0()
                                 .child(Input::new(&self.log_filter).cleanable(true)),
                         ),
                 )
@@ -1187,8 +1341,16 @@ impl Paw {
                 );
             if entries.is_empty() {
                 return panel.child(empty_state(
-                    self.locale.message(Message::WaitingForLogs),
-                    self.locale.message(Message::WaitingForLogsDetail),
+                    self.locale.message(if paused {
+                        Message::PausedLogsEmpty
+                    } else {
+                        Message::WaitingForLogs
+                    }),
+                    self.locale.message(if paused {
+                        Message::PausedLogsEmptyDetail
+                    } else {
+                        Message::WaitingForLogsDetail
+                    }),
                 ));
             }
             if visible.is_empty() {
@@ -2058,6 +2220,11 @@ impl Paw {
                                                             == Some(&forget_path)
                                                         {
                                                             paw.profile = None;
+                                                            #[cfg(any(
+                                                                target_os = "linux",
+                                                                windows
+                                                            ))]
+                                                            paw.log_review.reset_pause();
                                                         }
                                                         paw.error = None;
                                                     }
@@ -2368,6 +2535,10 @@ impl Paw {
         }
         let path = std::path::absolute(&path).unwrap_or(path);
         self.remember_selection(false, &path);
+        #[cfg(any(target_os = "linux", windows))]
+        if self.profile.as_ref() != Some(&path) {
+            self.log_review.reset_pause();
+        }
         self.profile = Some(path);
         self.error = None;
     }
@@ -3332,6 +3503,7 @@ impl Paw {
                     self.binary = Some(path);
                     self.show_engine_path = false;
                     self.snapshot = Default::default();
+                    self.log_review.reset_pause();
                     self.error = None;
                 }
                 Err(error) => {
@@ -5050,5 +5222,85 @@ mod tests {
         assert!(!Level::Info.matches("information"));
         assert!(filter_logs(&[], "", Level::All).is_empty());
         assert_eq!(entries, original);
+    }
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn log_review_freezes_filters_orders_and_catches_up() {
+        use super::{LogLevelFilter as Level, LogOrder, LogReview};
+        use meow_paw::engine::controller::LogEntry;
+
+        let entry = |message: &str, level: &str| LogEntry {
+            time: "same time".into(),
+            level: level.into(),
+            message: message.into(),
+        };
+        let mut live = vec![entry("new alpha", "info"), entry("old alpha", "warn")];
+        let mut review = LogReview::default();
+        assert_eq!(review.order, LogOrder::NewestFirst);
+        review.toggle_pause(|| live.clone());
+        live.clear();
+        assert_eq!(review.entries(|| live.clone()).len(), 2);
+        live = vec![entry("newest alpha", "warn"), entry("new alpha", "info")];
+        let frozen = review.entries(|| panic!("paused view must not read live history"));
+        assert_eq!(frozen[0].message, "new alpha");
+        assert_eq!(
+            review.visible(&frozen, "alpha", Level::Warn)[0].message,
+            "old alpha"
+        );
+        review.order.toggle();
+        let ordered = review.visible(&frozen, "alpha", Level::All);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>(),
+            ["old alpha", "new alpha"]
+        );
+        assert_eq!(frozen[0].message, "new alpha");
+        review.toggle_pause(|| panic!("resume must not capture"));
+        assert_eq!(review.entries(|| live.clone()), live);
+        assert_eq!(
+            review.visible(&live, "alpha", Level::All)[0].message,
+            "new alpha"
+        );
+        review.order.toggle();
+        assert_eq!(review.order, LogOrder::NewestFirst);
+
+        review.toggle_pause(Vec::new);
+        assert!(review.paused.is_some());
+        assert!(review.entries(|| live.clone()).is_empty());
+        review.reset_pause();
+        assert_eq!(review.entries(|| live.clone()), live);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn log_review_resets_on_session_and_profile_transitions() {
+        use super::log_review_context_changed;
+        use meow_paw::app::{EngineStatus, LogHistory, Snapshot};
+        use std::path::PathBuf;
+
+        let mut current = Snapshot::default();
+        current.engine = EngineStatus::Running { mixed_port: 7890 };
+        current.profile = Some(PathBuf::from("profile-a"));
+        current.probe_epoch = 7;
+        current.logs = Some(LogHistory::default());
+        let mut next = current.clone();
+        next.revision += 1;
+        assert!(!log_review_context_changed(&current, &next));
+        next.probe_epoch += 1;
+        assert!(log_review_context_changed(&current, &next));
+        next = current.clone();
+        next.profile = Some(PathBuf::from("profile-b"));
+        assert!(log_review_context_changed(&current, &next));
+        next = current.clone();
+        next.applying_profile = Some(PathBuf::from("profile-a"));
+        assert!(log_review_context_changed(&current, &next));
+        next = current.clone();
+        next.engine = EngineStatus::Starting;
+        assert!(log_review_context_changed(&current, &next));
+        next = current.clone();
+        next.logs = None;
+        assert!(log_review_context_changed(&current, &next));
     }
 }

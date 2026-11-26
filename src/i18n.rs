@@ -204,6 +204,14 @@ pub enum Message {
     NoMatchingLogs,
     LogFilterDetail,
     ClearLogs,
+    ClearLiveLogs,
+    PauseLogs,
+    ResumeLogs,
+    LogNewestFirst,
+    LogOldestFirst,
+    LogsPausedCaption,
+    PausedLogsEmpty,
+    PausedLogsEmptyDetail,
     WaitingForLogs,
     WaitingForLogsDetail,
     StartToViewLogs,
@@ -558,6 +566,14 @@ fn english(key: Message) -> &'static str {
         Message::NoMatchingLogs => "No matching log entries",
         Message::LogFilterDetail => "Try a different search or level.",
         Message::ClearLogs => "Clear",
+        Message::ClearLiveLogs => "Clear live logs",
+        Message::PauseLogs => "Pause view",
+        Message::ResumeLogs => "Resume",
+        Message::LogNewestFirst => "Order: Newest first",
+        Message::LogOldestFirst => "Order: Oldest first",
+        Message::LogsPausedCaption => "View paused · Live logs continue; resume to catch up.",
+        Message::PausedLogsEmpty => "No entries when paused",
+        Message::PausedLogsEmptyDetail => "Resume to see current log entries.",
         Message::WaitingForLogs => "Waiting for log entries",
         Message::WaitingForLogsDetail => "New messages from this Meow session appear here.",
         Message::StartToViewLogs => {
@@ -767,6 +783,14 @@ fn chinese(key: Message) -> &'static str {
         Message::NoMatchingLogs => "没有匹配的日志",
         Message::LogFilterDetail => "请尝试其他搜索词或级别。",
         Message::ClearLogs => "清空",
+        Message::ClearLiveLogs => "清空实时日志",
+        Message::PauseLogs => "暂停视图",
+        Message::ResumeLogs => "恢复",
+        Message::LogNewestFirst => "排序：最新在前",
+        Message::LogOldestFirst => "排序：最早在前",
+        Message::LogsPausedCaption => "视图已暂停 · 实时日志仍在记录；恢复后显示最新日志。",
+        Message::PausedLogsEmpty => "暂停时没有日志",
+        Message::PausedLogsEmptyDetail => "恢复后可查看当前日志。",
         Message::WaitingForLogs => "等待日志",
         Message::WaitingForLogsDetail => "此 Meow 会话的新消息会显示在这里。",
         Message::StartToViewLogs => "启动配置后即可查看 Meow 的实时日志。日志仅在当前会话中保留。",
@@ -993,6 +1017,43 @@ mod tests {
             Locale::ZhCn.connection_match_count(0, 7),
             "7 个活动连接中匹配 0 个"
         );
+    }
+
+    #[test]
+    fn log_review_controls_are_localized() {
+        for (message, english, chinese) in [
+            (Message::PauseLogs, "Pause view", "暂停视图"),
+            (Message::ResumeLogs, "Resume", "恢复"),
+            (
+                Message::LogNewestFirst,
+                "Order: Newest first",
+                "排序：最新在前",
+            ),
+            (
+                Message::LogOldestFirst,
+                "Order: Oldest first",
+                "排序：最早在前",
+            ),
+            (Message::ClearLiveLogs, "Clear live logs", "清空实时日志"),
+            (
+                Message::LogsPausedCaption,
+                "View paused · Live logs continue; resume to catch up.",
+                "视图已暂停 · 实时日志仍在记录；恢复后显示最新日志。",
+            ),
+            (
+                Message::PausedLogsEmpty,
+                "No entries when paused",
+                "暂停时没有日志",
+            ),
+            (
+                Message::PausedLogsEmptyDetail,
+                "Resume to see current log entries.",
+                "恢复后可查看当前日志。",
+            ),
+        ] {
+            assert_eq!(Locale::En.message(message), english);
+            assert_eq!(Locale::ZhCn.message(message), chinese);
+        }
     }
 
     #[test]
