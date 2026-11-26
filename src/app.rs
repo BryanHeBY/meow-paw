@@ -97,6 +97,7 @@ pub struct Snapshot {
     pub last_update: Option<Instant>,
     pub action_error: Option<String>,
     pub refreshing_provider: Option<String>,
+    pub provider_error: Option<String>,
 }
 
 const LOG_CAPACITY: usize = 256;
@@ -431,7 +432,10 @@ fn run(
             Ok(Command::ApplyProfile(input)) => {
                 // A pending provider response belongs to the previous profile.
                 generation = generation.wrapping_add(1);
-                change(snapshot, |s| s.refreshing_provider = None);
+                change(snapshot, |s| {
+                    s.refreshing_provider = None;
+                    s.provider_error = None;
+                });
                 let path = input.key();
                 let Some(active) = &session else {
                     change(snapshot, |s| {
@@ -512,7 +516,7 @@ fn run(
                         .is_some();
                     if already_busy || refresh_inflight {
                         change(snapshot, |s| {
-                            s.action_error =
+                            s.provider_error =
                                 Some("A previous provider refresh is still finishing".into());
                         });
                         continue;
@@ -526,7 +530,7 @@ fn run(
                         .is_some_and(|p| p.vehicle_type.eq_ignore_ascii_case("http"));
                     if !available {
                         change(snapshot, |s| {
-                            s.action_error = Some("Provider is no longer refreshable".into())
+                            s.provider_error = Some("Provider is no longer refreshable".into())
                         });
                         continue;
                     }
@@ -535,7 +539,7 @@ fn run(
                     let epoch = generation;
                     change(snapshot, |s| {
                         s.refreshing_provider = Some(name.clone());
-                        s.action_error = None;
+                        s.provider_error = None;
                     });
                     refresh_inflight = true;
                     if thread::Builder::new()
@@ -549,7 +553,7 @@ fn run(
                         refresh_inflight = false;
                         change(snapshot, |s| {
                             s.refreshing_provider = None;
-                            s.action_error = Some("Could not start provider refresh".into());
+                            s.provider_error = Some("Could not start provider refresh".into());
                         });
                     }
                 }
@@ -636,7 +640,7 @@ fn finish_provider_refresh(
     result: Result<(), crate::engine::controller::ControllerError>,
 ) {
     snapshot.refreshing_provider = None;
-    snapshot.action_error = result.err().map(|error| match error {
+    snapshot.provider_error = result.err().map(|error| match error {
         crate::engine::controller::ControllerError::Unreachable =>
             "Provider refresh timed out or disconnected; result is unknown. Check its status before retrying.".into(),
         error => format!("Provider refresh failed: {error}"),
@@ -647,6 +651,7 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>) {
     change(snapshot, |s| {
         s.inventory = None;
         s.refreshing_provider = None;
+        s.provider_error = None;
         s.mode = None;
         s.rules = None;
         s.logs = None;
@@ -696,20 +701,22 @@ mod tests {
         retain_inventory(&mut snapshot, None);
         assert!(Arc::ptr_eq(&before, snapshot.inventory.as_ref().unwrap()));
         assert!(snapshot.refreshing_provider.is_none());
-        assert!(snapshot.action_error.as_deref().unwrap().contains("503"));
+        assert!(snapshot.provider_error.as_deref().unwrap().contains("503"));
         finish_provider_refresh(
             &mut snapshot,
             Err(crate::engine::controller::ControllerError::Unreachable),
         );
         assert!(
             snapshot
-                .action_error
+                .provider_error
                 .as_deref()
                 .unwrap()
                 .contains("unknown")
         );
+        snapshot.action_error = Some("unrelated error".into());
         finish_provider_refresh(&mut snapshot, Ok(()));
-        assert!(snapshot.action_error.is_none());
+        assert!(snapshot.provider_error.is_none());
+        assert_eq!(snapshot.action_error.as_deref(), Some("unrelated error"));
     }
 
     #[test]

@@ -274,6 +274,9 @@ impl Paw {
             if let meow_paw::app::EngineStatus::Error(error) = &self.snapshot.engine {
                 return Some(error.clone());
             }
+            if self.snapshot.provider_error.is_some() {
+                return self.snapshot.provider_error.clone();
+            }
             if self.snapshot.action_error.is_some() {
                 return self.snapshot.action_error.clone();
             }
@@ -1384,32 +1387,82 @@ impl Paw {
                         .child(Input::new(&self.search).cleanable(true)),
                 )
                 .child(chip(format!("{count} groups"), BLUE, SOFT_BLUE));
-            let providers = inventory.providers.iter().map(|(name, status)| {
-                let label = name.clone();
-                let pending = self.snapshot.refreshing_provider.as_deref() == Some(name.as_str());
-                let busy = self.snapshot.refreshing_provider.is_some();
-                let count = inventory.nodes.iter().filter(|node|
-                    matches!(&node.origin, meow_paw::engine::controller::Origin::Provider(origin) if origin == name)
-                ).count();
-                let usage = status.subscription_info.as_ref().map(|usage| {
-                    format!("↑ {}  ↓ {}  / {}", bytes(usage.upload), bytes(usage.download), bytes(usage.total))
-                }).unwrap_or_else(|| "No usage information".into());
-                let updated = status.updated_at.clone().unwrap_or_else(|| "Awaiting first update".into());
-                card().flex().items_center().justify_between().gap_3()
-                    .child(div().min_w_0().child(div().font_weight(FontWeight::BOLD).child(name.clone()))
-                        .child(div().text_sm().text_color(rgb(FAINT))
-                            .child(format!("{} · {} nodes · {}", status.vehicle_type, count, updated)))
-                        .child(div().text_sm().text_color(rgb(FAINT)).child(usage)))
-                    .when(status.vehicle_type.eq_ignore_ascii_case("http"), |row| {
-                        row.child(secondary_button(SharedString::from(format!("provider-refresh:{label}")),
-                            if pending { "Refreshing…" } else if busy { "Refresh busy" } else { "Refresh" })
-                            .when(!busy, |button| button.on_click(cx.listener(move |paw, _, _, cx| {
-                                paw.error = paw.desktop.as_ref().and_then(|desktop|
-                                    desktop.refresh_provider(label.clone()).err().map(|e| e.to_string()));
-                                cx.notify();
-                            }))))
-                    })
-            }).collect::<Vec<_>>();
+            let mut node_counts = std::collections::HashMap::new();
+            for node in &inventory.nodes {
+                if let meow_paw::engine::controller::Origin::Provider(origin) = &node.origin {
+                    *node_counts.entry(origin.as_str()).or_insert(0_usize) += 1;
+                }
+            }
+            let providers = inventory
+                .providers
+                .iter()
+                .map(|(name, status)| {
+                    let label = name.clone();
+                    let pending =
+                        self.snapshot.refreshing_provider.as_deref() == Some(name.as_str());
+                    let busy = self.snapshot.refreshing_provider.is_some();
+                    let count = node_counts.get(name.as_str()).copied().unwrap_or(0);
+                    let usage = status
+                        .subscription_info
+                        .as_ref()
+                        .map(|usage| {
+                            format!(
+                                "↑ {}  ↓ {}  / {}",
+                                bytes(usage.upload),
+                                bytes(usage.download),
+                                bytes(usage.total)
+                            )
+                        })
+                        .unwrap_or_else(|| "No usage information".into());
+                    let updated = status
+                        .updated_at
+                        .clone()
+                        .unwrap_or_else(|| "Awaiting first update".into());
+                    card()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .child(div().font_weight(FontWeight::BOLD).child(name.clone()))
+                                .child(div().text_sm().text_color(rgb(FAINT)).child(format!(
+                                    "{} · {} {} · {}",
+                                    status.vehicle_type,
+                                    count,
+                                    if count == 1 { "node" } else { "nodes" },
+                                    updated
+                                )))
+                                .child(div().text_sm().text_color(rgb(FAINT)).child(usage)),
+                        )
+                        .when(status.vehicle_type.eq_ignore_ascii_case("http"), |row| {
+                            row.child(
+                                secondary_button(
+                                    SharedString::from(format!("provider-refresh:{label}")),
+                                    if pending {
+                                        "Refreshing…"
+                                    } else if busy {
+                                        "Refresh busy"
+                                    } else {
+                                        "Refresh"
+                                    },
+                                )
+                                .when(!busy, |button| {
+                                    button.on_click(cx.listener(move |paw, _, _, cx| {
+                                        paw.error = paw.desktop.as_ref().and_then(|desktop| {
+                                            desktop
+                                                .refresh_provider(label.clone())
+                                                .err()
+                                                .map(|e| e.to_string())
+                                        });
+                                        cx.notify();
+                                    }))
+                                }),
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
             let page = div().flex().flex_col().gap_3().child(toolbar).when(
                 !providers.is_empty(),
                 |page| {
