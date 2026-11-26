@@ -30,28 +30,7 @@ pub fn start() -> Arc<Signals> {
 }
 
 #[cfg(any(target_os = "linux", windows))]
-fn paw_pixel(x: i32, y: i32, size: i32) -> [u8; 4] {
-    let (u, v) = (
-        (x as f32 + 0.5) / size as f32,
-        (y as f32 + 0.5) / size as f32,
-    );
-    let paw = [
-        (0.24, 0.43, 0.067, 0.080),
-        (0.40, 0.31, 0.074, 0.095),
-        (0.60, 0.31, 0.074, 0.095),
-        (0.76, 0.43, 0.067, 0.080),
-        (0.50, 0.63, 0.192, 0.143),
-    ]
-    .iter()
-    .any(|(cx, cy, rx, ry)| ((u - cx) / rx).powi(2) + ((v - cy) / ry).powi(2) <= 1.0);
-    if paw {
-        [255, 16, 36, 61]
-    } else if (u - 0.5).powi(2) + (v - 0.5).powi(2) < 0.219 {
-        [255, 255, 221, 120]
-    } else {
-        [0; 4]
-    }
-}
+use crate::brand::tray_pixel as paw_pixel;
 
 #[cfg(windows)]
 mod windows;

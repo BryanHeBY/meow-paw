@@ -5,11 +5,6 @@ use gpui_kit::*;
 use std::path::PathBuf;
 use std::time::Duration;
 
-gpui_kit::assets::icon_assets!(pub PawAssets, [
-    House, Wifi, Server, Globe, GitBranch, List, LockOpen, Settings,
-    ChevronDown, ChevronRight, CircleCheck, ArrowUpRight, ArrowDownLeft,
-]);
-
 const BG: u32 = 0xeff2f6;
 const CHROME: u32 = 0xf8faff;
 const SURFACE: u32 = 0xffffff;
@@ -18,7 +13,6 @@ const FAINT: u32 = 0x535f73;
 const LINE: u32 = 0xdbe2ec;
 const BLUE: u32 = 0x155cd7;
 const SOFT_BLUE: u32 = 0xe8f1ff;
-const YELLOW: u32 = 0xffc92e;
 const STREAM_DOWN: u32 = 0x146cce;
 const STREAM_UP: u32 = 0xa06100;
 #[cfg(any(target_os = "linux", windows))]
@@ -1632,43 +1626,11 @@ fn bytes(value: u64) -> String {
     unreachable!()
 }
 
-fn gradient(a: u32, b: u32) -> Background {
-    linear_gradient(
-        155.,
-        linear_color_stop(rgb(a), 0.),
-        linear_color_stop(rgb(b), 1.),
-    )
-}
-
-// A layered native mark keeps the pads crisp at both sidebar and dashboard sizes.
 fn paw_badge(size: f32) -> Div {
-    let pad = |x: f32, y: f32, w: f32, h: f32| {
-        div()
-            .absolute()
-            .left(px(x * size))
-            .top(px(y * size))
-            .w(px(w * size))
-            .h(px(h * size))
-            .rounded_full()
-            .bg(gradient(0xfff1a3, YELLOW))
-            .shadow_sm()
-            .border_b_1()
-            .border_color(rgb(0xdf8904))
-    };
     div()
-        .relative()
-        .flex_shrink_0()
         .size(px(size))
-        .rounded_xl()
-        .bg(gradient(0x27c3ff, 0x1454da))
-        .border_1()
-        .border_color(rgb(0x267ce4))
-        .shadow_md()
-        .child(pad(0.18, 0.35, 0.14, 0.17))
-        .child(pad(0.33, 0.22, 0.14, 0.19))
-        .child(pad(0.53, 0.22, 0.14, 0.19))
-        .child(pad(0.68, 0.35, 0.14, 0.17))
-        .child(pad(0.30, 0.49, 0.40, 0.30))
+        .flex_shrink_0()
+        .child(img(crate::brand::MARK).size_full())
 }
 
 #[cfg(test)]
@@ -1740,7 +1702,7 @@ mod tests {
     fn every_nav_and_workspace_icon_is_embedded() {
         use gpui_kit::AssetSource;
 
-        let assets = super::PawAssets;
+        let assets = crate::brand::PawAssets;
         let paths = Page::ALL.into_iter().map(Page::icon).chain([
             "icons/arrow-up-right.svg",
             "icons/arrow-down-left.svg",

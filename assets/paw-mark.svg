@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <clipPath id="tile"><rect x="3" y="3" width="250" height="250" rx="59"/></clipPath>
+    <linearGradient id="ocean" x1="0.16" y1="0" x2="0.75" y2="1">
+      <stop stop-color="#4fe2ff"/><stop offset=".29" stop-color="#13aff2"/><stop offset=".73" stop-color="#086bdb"/><stop offset="1" stop-color="#1147b8"/>
+    </linearGradient>
+    <linearGradient id="ceramic" x1=".2" y1="0" x2=".67" y2="1">
+      <stop stop-color="#fffdfa"/><stop offset=".25" stop-color="#f8fbff"/><stop offset=".67" stop-color="#eef1f9"/><stop offset="1" stop-color="#bdc9df"/>
+    </linearGradient>
+    <linearGradient id="paw" x1=".2" y1=".02" x2=".79" y2=".94">
+      <stop stop-color="#fff7a0"/><stop offset=".22" stop-color="#ffe45e"/><stop offset=".47" stop-color="#ffc327"/><stop offset=".76" stop-color="#ff9a0a"/><stop offset=".94" stop-color="#ea7200"/><stop offset="1" stop-color="#cb4b00"/>
+    </linearGradient>
+    <radialGradient id="shine" cx=".4" cy=".3" r=".62">
+      <stop stop-color="#fffacb" stop-opacity=".96"/><stop offset=".62" stop-color="#ffe36b" stop-opacity=".28"/><stop offset="1" stop-color="#ffbc29" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="seam" x1=".4" y1="0" x2=".4" y2="1">
+      <stop stop-color="#8f3109" stop-opacity="0"/><stop offset=".64" stop-color="#b94e09" stop-opacity=".81"/><stop offset="1" stop-color="#e67100" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="shade" cx=".5" cy=".5" r=".5">
+      <stop stop-color="#413334" stop-opacity=".53"/><stop offset=".65" stop-color="#5e483b" stop-opacity=".24"/><stop offset="1" stop-color="#5e483b" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1=".21" y1="0" x2=".73" y2="1">
+      <stop stop-color="#efffff" stop-opacity=".88"/><stop offset=".42" stop-color="#fff" stop-opacity=".22"/><stop offset=".68" stop-color="#1847a1" stop-opacity=".15"/><stop offset="1" stop-color="#233d68" stop-opacity=".31"/>
+    </linearGradient>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect x="3" y="3" width="250" height="250" fill="url(#ocean)"/>
+    <path d="M3 159 Q132 157 253 160 L253 256H3Z" fill="url(#ceramic)"/>
+    <path d="M3 160 Q130 157 253 160" fill="none" stroke="#fff" stroke-opacity=".8" stroke-width="3"/>
+    <ellipse cx="132" cy="194" rx="88" ry="29" fill="url(#shade)" transform="rotate(-7 132 194)"/>
+    <path d="M77 121 C71 93 83 72 106 60 C130 49 158 55 171 73
+             C183 89 179 102 187 114 C198 128 207 142 206 154
+             C205 166 198 174 185 178 C178 187 166 191 154 189
+             C146 198 131 201 118 197 C101 203 82 198 71 191
+             C51 180 49 163 54 149 C58 137 66 128 77 121Z"
+          fill="url(#paw)" stroke="#ffa92a" stroke-width="1.8"/>
+    <path d="M78 122 C75 101 89 77 108 68 C127 58 154 60 164 75 C172 84 168 96 178 113
+             C159 114 143 111 127 119 C111 126 91 132 73 146 C68 149 66 151 64 154 C66 139 73 129 78 122Z" fill="url(#shine)"/>
+    <path d="M185 178 C190 170 190 159 184 153 M154 189 C163 181 166 169 161 163 M118 197 C127 190 129 180 125 173"
+          fill="none" stroke="url(#seam)" stroke-width="4" stroke-linecap="round"/>
+    <path d="M77 120 C70 95 84 73 106 63 C128 53 150 55 162 67"
+          fill="none" stroke="#fff5af" stroke-opacity=".75" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M53 162 C58 146 71 138 86 133" fill="none" stroke="#ffed97" stroke-opacity=".64" stroke-width="2.3" stroke-linecap="round"/>
+    <rect x="5" y="5" width="246" height="246" rx="57" fill="none" stroke="url(#rim)" stroke-width="4"/>
+    <rect x="10" y="10" width="236" height="236" rx="51" fill="none" stroke="url(#rim)" stroke-opacity=".45" stroke-width="2"/>
+  </g>
+</svg>

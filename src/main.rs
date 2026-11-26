@@ -4,6 +4,7 @@ use gpui_kit::{
 use std::path::PathBuf;
 use std::{cell::Cell, rc::Rc, time::Duration};
 
+mod brand;
 mod preferences;
 mod tray;
 mod view;
@@ -47,7 +48,7 @@ fn main() {
     let (prefs, warning) = preferences::Preferences::discover(remember);
     let (binary, profile) = prefs.resolve(binary, profile);
     let binary = binary.or_else(bundled_engine);
-    let app: Application = gpui_kit::application().with_assets(view::PawAssets);
+    let app: Application = gpui_kit::application().with_assets(brand::PawAssets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         let (_handle, paw) = gpui_kit::open_window(window_options(cx), cx, move |window, cx| {
