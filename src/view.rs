@@ -110,6 +110,7 @@ fn page_filter_rendered(
     use meow_paw::app::EngineStatus;
     let running = matches!(snapshot.engine, EngineStatus::Running { .. });
     match page {
+        Page::Profiles => true,
         Page::Proxies => snapshot.inventory.is_some(),
         Page::Rules => running && !rule_sets_open && snapshot.rules.is_some(),
         Page::Connections => running && (closed_connections_open || snapshot.connections.is_some()),
@@ -223,6 +224,39 @@ fn subscription_display_name(
                 &id.to_string()[..8]
             )
         })
+}
+
+// Only the card title is searchable; callers supply no paths or metadata fields.
+fn profile_name_matches(name: &str, query: &str) -> bool {
+    name.to_lowercase().contains(&query.trim().to_lowercase())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ProfileListState {
+    Empty,
+    NoMatches,
+    Matches,
+}
+
+fn profile_list_state(total: usize, matches: usize) -> ProfileListState {
+    if total == 0 {
+        ProfileListState::Empty
+    } else if matches == 0 {
+        ProfileListState::NoMatches
+    } else {
+        ProfileListState::Matches
+    }
+}
+
+fn profile_card_visible(matches: bool, editing: bool) -> bool {
+    matches || editing
+}
+
+fn local_profile_display_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -405,6 +439,8 @@ pub struct Paw {
     engine_copy_focus: FocusHandle,
     search: Entity<InputState>,
     _search_changes: Subscription,
+    profile_filter: Entity<InputState>,
+    _profile_filter_changes: Subscription,
     rule_filter: Entity<InputState>,
     _rule_filter_changes: Subscription,
     rule_page: usize,
@@ -517,6 +553,8 @@ fn register_page_filter_shortcut(
 pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let query = paw.read(cx).search.read(cx).value();
     let search = cx.new(|cx| InputState::new(window, cx).default_value(query));
+    let query = paw.read(cx).profile_filter.read(cx).value();
+    let profile_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).rule_filter.read(cx).value();
     let rule_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).connection_filter.read(cx).value();
@@ -550,6 +588,8 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
         state.probe_url = probe_url;
         state._search_changes = subscribe_search(&search, cx);
         state.search = search;
+        state._profile_filter_changes = subscribe_search(&profile_filter, cx);
+        state.profile_filter = profile_filter;
         state._rule_filter_changes = subscribe_rule_filter(&rule_filter, cx);
         state.rule_filter = rule_filter;
         state._connection_filter_changes = subscribe_search(&connection_filter, cx);
@@ -568,6 +608,7 @@ pub fn open(
     cx: &mut App,
 ) -> Entity<Paw> {
     let search = cx.new(|cx| InputState::new(window, cx));
+    let profile_filter = cx.new(|cx| InputState::new(window, cx));
     let rule_filter = cx.new(|cx| InputState::new(window, cx));
     let connection_filter = cx.new(|cx| InputState::new(window, cx));
     let log_filter = cx.new(|cx| InputState::new(window, cx));
@@ -579,6 +620,7 @@ pub fn open(
         let log_filter_changes = subscribe_search(&log_filter, cx);
         let probe_url_changes = subscribe_probe_url(&probe_url, cx);
         let search_changes = subscribe_search(&search, cx);
+        let profile_filter_changes = subscribe_search(&profile_filter, cx);
         let rule_filter_changes = subscribe_rule_filter(&rule_filter, cx);
         let connection_filter_changes = subscribe_search(&connection_filter, cx);
         let (subscription_paths, subscription_notice) = preferences
@@ -632,6 +674,8 @@ pub fn open(
             engine_copy_focus: cx.focus_handle(),
             search,
             _search_changes: search_changes,
+            profile_filter,
+            _profile_filter_changes: profile_filter_changes,
             rule_filter,
             _rule_filter_changes: rule_filter_changes,
             rule_page: 0,
@@ -1842,10 +1886,7 @@ impl Paw {
                     .and_then(Option::as_ref),
             );
         }
-        path.file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy()
-            .into_owned()
+        local_profile_display_name(path)
     }
 
     fn overview_route(&self, cx: &mut Context<Self>) -> Div {
@@ -2053,13 +2094,53 @@ impl Paw {
                     .child(self.locale.message(Message::LiveApplyWarning)),
             );
         }
-        if profiles.is_empty() {
+        page = page.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child(self.locale.message(Message::ProfileNameFilter)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.profile_filter).cleanable(true)),
+                ),
+        );
+        if profile_list_state(profiles.len(), 0) == ProfileListState::Empty {
             page = page.child(empty_state(
                 self.locale.message(Message::NoLocalProfiles),
                 self.locale.message(Message::ImportYamlDetail),
             ));
         } else {
-            let cards = profiles.into_iter().map(|profile| {
+            let query = self.profile_filter.read(cx).value();
+            let total = profiles.len();
+            let mut matching = 0;
+            let profiles = profiles
+                .into_iter()
+                .filter_map(|profile| {
+                    let name = self.display_profile_name(profile);
+                    let matches = profile_name_matches(&name, &query);
+                    matching += usize::from(matches);
+                    profile_card_visible(
+                        matches,
+                        self.subscription_rename.as_ref() == Some(profile),
+                    )
+                    .then_some((profile, name))
+                })
+                .collect::<Vec<_>>();
+            if profile_list_state(total, matching) == ProfileListState::NoMatches {
+                page = page.child(empty_state(
+                    self.locale.message(Message::NoMatchingProfiles),
+                    self.locale.message(Message::ProfileFilterDetail),
+                ));
+            }
+            let cards = profiles.into_iter().map(|(profile, name)| {
                 let next = selected == Some(profile);
                 #[cfg(any(target_os = "linux", windows))]
                 let active =
@@ -2082,7 +2163,6 @@ impl Paw {
                         .subscription_metadata
                         .get(profile)
                         .is_some_and(Option::is_none);
-                let name = self.display_profile_name(profile);
                 let action_id = |action: &str| SharedString::from(format!("{action}:{profile:?}"));
                 let details = if subscription.is_some() {
                     self.locale.message(Message::SubscriptionDetail).to_owned()
@@ -4144,6 +4224,7 @@ impl Paw {
                 .is_some_and(|input| input.focus_handle(cx).is_focused(window))
             || [
                 &self.search,
+                &self.profile_filter,
                 &self.rule_filter,
                 &self.connection_filter,
                 &self.log_filter,
@@ -4157,6 +4238,7 @@ impl Paw {
         }
         let input = match self.page {
             Page::Proxies => &self.search,
+            Page::Profiles => &self.profile_filter,
             Page::Rules => &self.rule_filter,
             Page::Connections => &self.connection_filter,
             Page::Logs => &self.log_filter,
@@ -4937,7 +5019,10 @@ mod tests {
             page_filter_rendered(page, snapshot, sets, closed)
         };
         for page in Page::ALL {
-            assert!(!visible(page, &snapshot, false, false));
+            assert_eq!(
+                visible(page, &snapshot, false, false),
+                page == Page::Profiles
+            );
         }
         snapshot.inventory = Some(Arc::new(Inventory::default()));
         snapshot.logs = Some(LogHistory::default());
@@ -4956,9 +5041,64 @@ mod tests {
         snapshot.connections = None;
         assert!(!visible(Page::Connections, &snapshot, false, false));
         assert!(visible(Page::Connections, &snapshot, false, true));
-        for page in [Page::Overview, Page::Profiles, Page::Unlock, Page::Settings] {
+        assert!(visible(Page::Profiles, &snapshot, false, false));
+        for page in [Page::Overview, Page::Unlock, Page::Settings] {
             assert!(!visible(page, &snapshot, false, false));
         }
+    }
+
+    #[test]
+    fn profile_filter_uses_only_displayed_names_and_preserves_editors() {
+        use super::{
+            Locale, ProfileListState, SubscriptionMetadata, local_profile_display_name,
+            profile_card_visible, profile_list_state, profile_name_matches,
+            subscription_display_name,
+        };
+        use std::path::Path;
+
+        let id = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let metadata = SubscriptionMetadata {
+            name: Some("办公 Work".into()),
+            interval: None,
+        };
+        let names = [
+            local_profile_display_name(Path::new("/private/secret/Home.yaml")),
+            local_profile_display_name(Path::new("/other/Home.yaml")),
+            subscription_display_name(Locale::En, id, Some(&metadata)),
+            subscription_display_name(Locale::En, id, None),
+        ];
+        let count = |query| {
+            names
+                .iter()
+                .filter(|name| profile_name_matches(name, query))
+                .count()
+        };
+        assert_eq!(count(""), 4);
+        assert_eq!(count("  "), 4);
+        assert_eq!(count(" HOME "), 2);
+        assert_eq!(count("办公"), 1);
+        assert_eq!(count("work"), 1);
+        assert_eq!(count("01234567"), 1);
+        for hidden in [
+            "private",
+            "secret",
+            "/other/",
+            "https://example.test/token",
+            "contents",
+        ] {
+            assert_eq!(count(hidden), 0);
+        }
+        assert_eq!(profile_list_state(0, 0), ProfileListState::Empty);
+        assert_eq!(
+            profile_list_state(names.len(), 0),
+            ProfileListState::NoMatches
+        );
+        assert_eq!(
+            profile_list_state(names.len(), count("home")),
+            ProfileListState::Matches
+        );
+        assert!(profile_card_visible(false, true));
+        assert!(!profile_card_visible(false, false));
     }
 
     #[test]

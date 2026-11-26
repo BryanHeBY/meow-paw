@@ -125,6 +125,9 @@ pub enum Message {
     LiveApplyWarning,
     ProfileSelectionDetail,
     NoLocalProfiles,
+    ProfileNameFilter,
+    NoMatchingProfiles,
+    ProfileFilterDetail,
     ImportYamlDetail,
     SubscriptionDetail,
     SubscriptionManualOnly,
@@ -479,6 +482,9 @@ fn english(key: Message) -> &'static str {
             "Apply live and Reload keep Meow running, but can disconnect active connections."
         }
         Message::NoLocalProfiles => "No local profiles",
+        Message::ProfileNameFilter => "Filter profile names",
+        Message::NoMatchingProfiles => "No matching profiles",
+        Message::ProfileFilterDetail => "Try another profile name.",
         Message::ImportYamlDetail => {
             "Import a YAML file. Paw prepares a separate session copy and leaves your file unchanged."
         }
@@ -719,6 +725,9 @@ fn chinese(key: Message) -> &'static str {
         }
         Message::LiveApplyWarning => "实时应用和重新加载会保持 Meow 运行，但可能断开活动连接。",
         Message::NoLocalProfiles => "暂无本地配置",
+        Message::ProfileNameFilter => "筛选配置名称",
+        Message::NoMatchingProfiles => "没有匹配的配置",
+        Message::ProfileFilterDetail => "请尝试其他配置名称。",
         Message::ImportYamlDetail => "导入 YAML 文件。Paw 会为会话准备单独的副本，不会更改原文件。",
         Message::SubscriptionManualOnly => "仅手动刷新",
         Message::SubscriptionLocalInterval => "本地覆盖",
@@ -1335,6 +1344,21 @@ mod tests {
                 Message::NoLocalProfiles,
                 "No local profiles",
                 "暂无本地配置",
+            ),
+            (
+                Message::ProfileNameFilter,
+                "Filter profile names",
+                "筛选配置名称",
+            ),
+            (
+                Message::NoMatchingProfiles,
+                "No matching profiles",
+                "没有匹配的配置",
+            ),
+            (
+                Message::ProfileFilterDetail,
+                "Try another profile name.",
+                "请尝试其他配置名称。",
             ),
             (
                 Message::ImportYamlDetail,
