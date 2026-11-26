@@ -48,7 +48,37 @@ With System selected and no override, Linux uses the first nonempty `LC_ALL`,
 names such as `zh_CN.UTF-8` and `zh-Hans-CN` are recognized; missing or
 unsupported values fall back to English. A present but unsupported override
 also falls back to English. The shell relies on native font fallback for CJK
-glyphs, so a suitable system font must be installed. Navigation, shell controls,
-and fixed labels and descriptions on Home, Proxies, Settings, Rules, and Logs are
-localized. Live statuses, engine-provided content, and other page content remain
-in English or their original language.
+glyphs, so a suitable system font must be installed. Navigation, shell controls, and fixed labels on the desktop pages are
+localized, including the traffic chart legend, profile states, and the Linux
+tray menu. Engine messages, log contents, profile names, and proxy names
+retain their original language. Some detailed status text remains in English.
+
+## Linux tray verification
+
+Paw stays running after the last window closes only while a compatible
+StatusNotifier host is available. A normal tray activation reopens the window;
+a compatible host can render the localized Show and Quit menu. Quit shuts
+down the managed Meow process. The Linux tray does not change system proxy
+settings.
+
+For a disposable smoke test, use a fresh Xvfb display and new D-Bus session
+inside a network namespace. With a built, trusted Meow binary at
+`$PWD/target/release/meow`, the test exercises both the stopped and running cases:
+
+```sh
+cargo build --locked --features desktop --bin meow-paw
+cargo build --locked --features visual-test --example tray_test_watcher
+test_home=$(mktemp -d)
+env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME="$test_home" \
+  MEOW_BIN="$PWD/target/release/meow" \
+  DBUS_SYSTEM_BUS_ADDRESS=unix:path=/nonexistent/paw-no-system-bus \
+  timeout 100s unshare -Urn sh -c \
+  'ip link set lo up && dbus-run-session -- xvfb-run -a python3 tools/tray-smoke.py'
+```
+
+This requires user/network namespaces, Xvfb, xdotool, libX11, D-Bus,
+busctl, and the iproute2 tools. The smoke test checks registration, window
+reopen, watcher-loss recovery, menu dispatch, and managed engine shutdown.
+It does not establish that a real Waybar or Quickshell panel displays the
+menu, that the window receives keyboard focus on Wayland, or that Fcitx5
+composition works. Check those interactions separately on the target desktop.
