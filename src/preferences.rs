@@ -146,45 +146,60 @@ impl Preferences {
 
     /// Save the choice for the next launch; the running UI keeps its locale.
     pub fn set_language(&mut self, language: LanguagePreference) -> io::Result<()> {
-        let mut next = self.selected.clone();
-        next.language = language;
-        self.persist(next)
+        self.persist(|next| {
+            next.language = language;
+            Ok(())
+        })
     }
 
     pub fn remember(&mut self, engine: bool, path: &Path) -> io::Result<()> {
         let path = std::path::absolute(path)?;
-        let mut next = self.selected.clone();
-        if engine {
-            next.engine = Some(path);
-        } else {
-            if !next.profiles.contains(&path) {
-                if next.profiles.len() >= PROFILE_LIMIT {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Profile list is full",
-                    ));
+        self.persist(|next| {
+            if engine {
+                next.engine = Some(path);
+            } else {
+                if !next.profiles.contains(&path) {
+                    if next.profiles.len() >= PROFILE_LIMIT {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Profile list is full",
+                        ));
+                    }
+                    next.profiles.push(path.clone());
                 }
-                next.profiles.push(path.clone());
+                next.profile = Some(path);
             }
-            next.profile = Some(path);
-        }
-        self.persist(next)
+            Ok(())
+        })
     }
 
     pub fn forget_profile(&mut self, path: &Path) -> io::Result<()> {
-        let mut next = self.selected.clone();
-        next.profiles.retain(|candidate| candidate != path);
-        if next.profile.as_deref() == Some(path) {
-            next.profile = None;
-        }
-        self.persist(next)
+        self.persist(|next| {
+            next.profiles.retain(|candidate| candidate != path);
+            if next.profile.as_deref() == Some(path) {
+                next.profile = None;
+            }
+            Ok(())
+        })
     }
 
-    fn persist(&mut self, next: Selections) -> io::Result<()> {
+    fn persist(
+        &mut self,
+        mutate: impl FnOnce(&mut Selections) -> io::Result<()>,
+    ) -> io::Result<()> {
         let Some(file) = self.file.as_ref() else {
+            let mut next = self.selected.clone();
+            mutate(&mut next)?;
             self.selected = next;
             return Ok(());
         };
+        let dir = file
+            .parent()
+            .ok_or_else(|| io::Error::other("Preferences parent is missing"))?;
+        fs::create_dir_all(dir)?;
+        let _guard = write_guard(file)?;
+        let mut next = Self::open(file.clone())?.selected;
+        mutate(&mut next)?;
         let raw = serde_json::to_vec_pretty(&next)?;
         if raw.len() as u64 > LIMIT {
             return Err(io::Error::new(
@@ -192,10 +207,6 @@ impl Preferences {
                 "Preferences exceed size limit",
             ));
         }
-        let dir = file
-            .parent()
-            .ok_or_else(|| io::Error::other("Preferences parent is missing"))?;
-        fs::create_dir_all(dir)?;
         let mut temp = tempfile::NamedTempFile::new_in(dir)?;
         temp.write_all(&raw)?;
         temp.write_all(b"\n")?;
@@ -206,6 +217,64 @@ impl Preferences {
         self.selected = next;
         Ok(())
     }
+}
+
+// The sidecar is stable across replacements and is never removed. Cooperating
+// writers require a local filesystem with working locks and atomic replacement;
+// older versions and external editors do not participate in this protocol.
+fn write_guard(file: &Path) -> io::Result<File> {
+    let mut name = file
+        .file_name()
+        .ok_or_else(|| io::Error::other("Preferences filename is missing"))?
+        .to_os_string();
+    name.push(".lock");
+    let path = file.with_file_name(name);
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // Match the subscription guard's protections against symlinks and FIFOs.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let guard = match options.create_new(true).open(&path) {
+        Ok(guard) => guard,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if !fs::symlink_metadata(&path)?.file_type().is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid preferences write guard",
+                ));
+            }
+            options.create_new(false).open(&path)?
+        }
+        Err(error) => return Err(error),
+    };
+    if !guard.metadata()?.file_type().is_file()
+        || !fs::symlink_metadata(&path)?.file_type().is_file()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid preferences write guard",
+        ));
+    }
+    guard.try_lock()?;
+    Ok(guard)
 }
 
 fn default_file() -> Option<PathBuf> {
@@ -372,9 +441,18 @@ mod tests {
         assert_eq!(prefs.language(), LanguagePreference::System);
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("profile.yaml");
+        let engine = root.path().join("engine");
         prefs.set_language(LanguagePreference::ZhCn).unwrap();
+        prefs.remember(true, &engine).unwrap();
         prefs.remember(false, &path).unwrap();
         assert_eq!(prefs.language(), LanguagePreference::ZhCn);
+        assert_eq!(
+            prefs.resolve(None, None),
+            (Some(engine.clone()), Some(path.clone()))
+        );
+        prefs.forget_profile(&path).unwrap();
+        assert_eq!(prefs.resolve(None, None), (Some(engine), None));
+        assert!(prefs.profiles().is_empty());
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
         assert_eq!(
             Preferences::discover(false).0.language(),
@@ -393,5 +471,126 @@ mod tests {
         assert!(prefs.set_language(LanguagePreference::En).is_err());
         assert_eq!(prefs.language(), LanguagePreference::System);
         assert_eq!(fs::read(file).unwrap(), b"{}\n");
+    }
+
+    #[test]
+    fn stale_handles_merge_fields_and_profile_list_mutations() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let engine = root.path().join("engine");
+        let first = root.path().join("first.yaml");
+        let second = root.path().join("second.yaml");
+        let third = root.path().join("third.yaml");
+        let mut a = Preferences::open(file.clone()).unwrap();
+        let mut b = Preferences::open(file.clone()).unwrap();
+
+        a.set_language(LanguagePreference::ZhCn).unwrap();
+        b.remember(true, &engine).unwrap();
+        a.remember(false, &first).unwrap();
+        b.remember(false, &second).unwrap();
+        a.remember(false, &third).unwrap();
+        // b's last observed selection is second, but removing it must not
+        // clear the newer third selection.
+        b.forget_profile(&second).unwrap();
+        assert_eq!(b.language(), LanguagePreference::ZhCn);
+        assert_eq!(
+            b.resolve(None, None),
+            (Some(engine.clone()), Some(third.clone()))
+        );
+        assert_eq!(b.profiles(), &[first.clone(), third.clone()]);
+
+        // Removing the actual last selection clears it, while keeping others.
+        a.forget_profile(&third).unwrap();
+        let saved = Preferences::open(file).unwrap();
+        assert_eq!(saved.language(), LanguagePreference::ZhCn);
+        assert_eq!(saved.resolve(None, None), (Some(engine), None));
+        assert_eq!(saved.profiles(), &[first]);
+        assert_eq!(a.profiles(), saved.profiles());
+        assert_eq!(a.resolve(None, None), saved.resolve(None, None));
+    }
+
+    #[test]
+    fn lock_contention_fails_without_changing_bytes_or_memory() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        prefs.set_language(LanguagePreference::En).unwrap();
+        let before = fs::read(&file).unwrap();
+        let guard = write_guard(&file).unwrap();
+        assert_eq!(
+            prefs
+                .set_language(LanguagePreference::ZhCn)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(fs::read(&file).unwrap(), before);
+        assert_eq!(prefs.language(), LanguagePreference::En);
+        drop(guard);
+        prefs.set_language(LanguagePreference::ZhCn).unwrap();
+        assert_eq!(
+            Preferences::open(file).unwrap().language(),
+            LanguagePreference::ZhCn
+        );
+    }
+
+    #[test]
+    fn invalid_latest_file_is_never_overwritten_or_loaded_into_memory() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        prefs.set_language(LanguagePreference::En).unwrap();
+        for raw in [
+            b"garbage".to_vec(),
+            br#"{"engine":"relative"}"#.to_vec(),
+            br#"{"language":"fr"}"#.to_vec(),
+            br#"{"unknown":true}"#.to_vec(),
+            vec![b' '; LIMIT as usize + 1],
+        ] {
+            fs::write(&file, &raw).unwrap();
+            assert!(prefs.set_language(LanguagePreference::ZhCn).is_err());
+            assert_eq!(fs::read(&file).unwrap(), raw);
+            assert_eq!(prefs.language(), LanguagePreference::En);
+        }
+    }
+
+    #[test]
+    fn profile_limit_is_checked_against_latest_list() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let mut stale = Preferences::open(file.clone()).unwrap();
+        let mut writer = Preferences::open(file.clone()).unwrap();
+        for index in 0..PROFILE_LIMIT {
+            writer
+                .remember(false, &root.path().join(format!("{index}.yaml")))
+                .unwrap();
+        }
+        let before = fs::read(&file).unwrap();
+        assert!(
+            stale
+                .remember(false, &root.path().join("extra.yaml"))
+                .is_err()
+        );
+        assert_eq!(fs::read(&file).unwrap(), before);
+        assert!(stale.profiles().is_empty());
+        assert_eq!(stale.resolve(None, None), (None, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guard_symlink_is_rejected_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let target = root.path().join("target");
+        fs::write(&file, b"{}\n").unwrap();
+        fs::write(&target, b"untouched").unwrap();
+        symlink(&target, root.path().join("preferences.json.lock")).unwrap();
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        assert!(prefs.set_language(LanguagePreference::En).is_err());
+        assert_eq!(prefs.language(), LanguagePreference::System);
+        assert_eq!(fs::read(file).unwrap(), b"{}\n");
+        assert_eq!(fs::read(target).unwrap(), b"untouched");
     }
 }
