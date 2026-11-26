@@ -1,6 +1,6 @@
 use crate::preferences::{LanguagePreference, Preferences};
 use gpui_kit::base::{Disableable, Selectable};
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -2076,24 +2076,17 @@ impl Paw {
                     .flex()
                     .gap_2()
                     .children(group_anchors.into_iter().map(|(name, anchor)| {
-                        let full_name = name.clone();
-                        div()
-                            .id(SharedString::from(format!("jump-group:{name}")))
-                            .flex_shrink_0()
+                        Button::new(SharedString::from(format!("jump-group:{name}")))
+                            .label(name.clone())
+                            .tooltip(name)
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(rgb(BLUE).into())
+                                    .foreground(rgb(BLUE).into())
+                                    .hover(rgb(0xd8e8ff).into())
+                                    .active(rgb(0xc8deff).into()),
+                            )
                             .max_w(px(180.))
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .bg(rgb(SOFT_BLUE))
-                            .text_color(rgb(BLUE))
-                            .text_sm()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(0xd8e8ff)))
-                            .child(div().truncate().child(name))
-                            .tooltip(move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(full_name.clone())
-                                    .build(window, cx)
-                            })
                             .on_click(move |_, window, cx| anchor.scroll_to(window, cx))
                     }));
                 page.child(
