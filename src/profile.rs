@@ -1,7 +1,9 @@
 //! Local profiles and the small set of fields owned by a managed Paw session.
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::{error::Error, fmt, net::SocketAddrV4};
+use url::Url;
 
 pub const MAX_PROFILE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -117,6 +119,25 @@ impl Profile {
         {
             return Err(ProfileError::InvalidSettings);
         }
+        self.managed_with_https(controller, mixed_port, secret, false)
+    }
+
+    /// The caller must launch an engine with enforced HTTPS provider downloads.
+    pub(crate) fn managed_with_https(
+        &self,
+        controller: SocketAddrV4,
+        mixed_port: u16,
+        secret: &str,
+        allow_https: bool,
+    ) -> Result<String, ProfileError> {
+        if !controller.ip().is_loopback()
+            || controller.port() == 0
+            || mixed_port == 0
+            || mixed_port == controller.port()
+            || secret.is_empty()
+        {
+            return Err(ProfileError::InvalidSettings);
+        }
         let mut root = self.root.clone();
         // M0 does not opt into script execution, native subscription writers,
         // alternate listeners, or provider-controlled local file access.
@@ -136,11 +157,13 @@ impl Profile {
             }
             root.remove(key);
         }
-        // Inline providers are part of the active profile, not external files
-        // or downloads. Keep those two other vehicle types disabled until Paw
-        // owns their cache, origins and fetch policy.
-        allow_inline_providers(&mut root, "proxy-providers", true)?;
-        allow_inline_providers(&mut root, "rule-providers", false)?;
+        // Inline and guarded HTTPS providers are allowed. File providers stay
+        // disabled and remote cache paths are always owned by Paw.
+        // Identical full profiles retain cache identity on Apply. Any source
+        // change gets a different private cache namespace within this session.
+        let identity = Sha256::digest(serde_json::to_vec(&root).map_err(|_| ProfileError::Encode)?);
+        allow_providers(&mut root, "proxy-providers", true, allow_https, &identity)?;
+        allow_providers(&mut root, "rule-providers", false, allow_https, &identity)?;
         for key in [
             "port",
             "socks-port",
@@ -170,10 +193,12 @@ impl Profile {
     }
 }
 
-fn allow_inline_providers(
+fn allow_providers(
     root: &mut Map<String, Value>,
     key: &str,
     proxies: bool,
+    allow_https: bool,
+    profile_identity: &[u8],
 ) -> Result<(), ProfileError> {
     let Some(value) = root.get_mut(key) else {
         return Ok(());
@@ -185,25 +210,60 @@ fn allow_inline_providers(
     let providers = value
         .as_object_mut()
         .ok_or_else(|| ProfileError::UnsupportedField(key.into()))?;
-    for (index, entry) in providers.values_mut().enumerate() {
+    for (index, (name, entry)) in providers.iter_mut().enumerate() {
         // Use only an index in diagnostics, never log provider-supplied names.
         let path = || ProfileError::UnsupportedField(format!("{key}[{index}]"));
         let provider = entry.as_object_mut().ok_or_else(path)?;
-        if provider.get("type").and_then(Value::as_str) != Some("inline")
-            || ["url", "path", "header"]
+        let kind = provider.get("type").and_then(Value::as_str);
+        if kind == Some("inline") {
+            if ["url", "path", "header"]
                 .iter()
                 .any(|field| provider.contains_key(*field))
-            || !provider
-                .get("payload")
-                .and_then(Value::as_array)
-                .is_some_and(|items| {
-                    if proxies {
-                        items.iter().all(Value::is_object)
-                    } else {
-                        items.iter().all(Value::is_string)
-                    }
-                })
-        {
+                || !provider
+                    .get("payload")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| {
+                        if proxies {
+                            items.iter().all(Value::is_object)
+                        } else {
+                            items.iter().all(Value::is_string)
+                        }
+                    })
+            {
+                return Err(path());
+            }
+        } else if allow_https && kind == Some("http") {
+            // Never honour profile-supplied paths, including absolute paths
+            // and symbolic-link traversals. Only Paw chooses the cache name.
+            if provider.contains_key("payload") {
+                return Err(path());
+            }
+            let url = provider
+                .get("url")
+                .and_then(Value::as_str)
+                .and_then(|u| Url::parse(u).ok())
+                .ok_or_else(path)?;
+            if url.scheme() != "https"
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+            {
+                return Err(path());
+            }
+            let mut digest = Sha256::new();
+            digest.update(profile_identity);
+            digest.update(key.as_bytes());
+            digest.update([0]);
+            digest.update(name.as_bytes());
+            digest.update([0]);
+            digest.update(url.as_str().as_bytes());
+            let cache = digest.finalize().iter().fold(String::new(), |mut text, b| {
+                use std::fmt::Write as _;
+                let _ = write!(text, "{b:02x}");
+                text
+            });
+            provider.insert("path".into(), json!(format!("paw-provider-{cache}.yaml")));
+        } else {
             return Err(path());
         }
         if proxies {
@@ -223,6 +283,59 @@ mod tests {
             .managed("127.0.0.1:19200".parse().unwrap(), 19201, "local-test")
             .unwrap();
         Value::Object(Profile::parse(&yaml).unwrap().root)
+    }
+
+    #[test]
+    fn managed_https_providers_use_private_stable_scoped_caches() {
+        let source = "proxy-providers: {same: {type: http, url: 'https://example.test/feed?secret=private'}}\nrule-providers: {same: {type: http, url: 'https://example.test/feed?secret=private', behavior: domain}}\n";
+        let build = |input: &str| {
+            let profile = Profile::parse(input).unwrap();
+            let rendered = profile
+                .managed_with_https("127.0.0.1:19200".parse().unwrap(), 19201, "test", true)
+                .unwrap();
+            Profile::parse(&rendered).unwrap().root
+        };
+        let first = build(source);
+        let second = build(source);
+        let p = first["proxy-providers"]["same"]["path"].as_str().unwrap();
+        let r = first["rule-providers"]["same"]["path"].as_str().unwrap();
+        assert_eq!(p, second["proxy-providers"]["same"]["path"]);
+        assert_ne!(p, r);
+        assert!(p.starts_with("paw-provider-"));
+        assert!(!p.contains("private"));
+        assert_ne!(
+            p,
+            build(&source.replace("secret=private", "secret=changed"))["proxy-providers"]["same"]["path"]
+        );
+        for bad in [
+            "proxy-providers: {p: {type: http, url: 'http://example.test/feed'}}",
+            "proxy-providers: {p: {type: http, url: 'https://user:pass@example.test/feed'}}",
+            "proxy-providers: {p: {type: file, path: /tmp/no}}",
+        ] {
+            assert!(
+                Profile::parse(bad)
+                    .unwrap()
+                    .managed_with_https("127.0.0.1:19200".parse().unwrap(), 19201, "test", true)
+                    .is_err()
+            );
+        }
+        // Common subscription-provided paths are ignored, never followed.
+        let supplied = build(
+            "proxy-providers: {same: {type: http, url: 'https://example.test/feed', path: '/tmp/no'}}",
+        );
+        let safe = supplied["proxy-providers"]["same"]["path"]
+            .as_str()
+            .unwrap();
+        assert!(safe.starts_with("paw-provider-"));
+        assert!(!safe.contains("/tmp"));
+
+        // The public non-managed API must not silently enable downloads.
+        assert!(
+            Profile::parse(source)
+                .unwrap()
+                .managed("127.0.0.1:19200".parse().unwrap(), 19201, "test")
+                .is_err()
+        );
     }
 
     #[test]

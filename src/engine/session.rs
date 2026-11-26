@@ -58,11 +58,14 @@ impl Session {
                 hex
             });
         let candidate = profile
-            .managed(controller_addr, mixed_port, &secret)
+            .managed_with_https(controller_addr, mixed_port, &secret, true)
             .map_err(Error::other)?;
         fs::write(&config, candidate)?;
         let args = [
             OsStr::new("--no-external-plugins"),
+            // Old engines must fail closed at preflight rather than silently
+            // downloading provider credentials over an unguarded transport.
+            OsStr::new("--providers-require-https"),
             OsStr::new("-d"),
             directory.path().as_os_str(),
             OsStr::new("-f"),
@@ -140,7 +143,7 @@ impl Session {
 
     pub(crate) fn apply_profile(&self, profile: &Profile) -> Result<(), ApplyError> {
         let prepared = profile
-            .managed(self.controller_addr, self.mixed_port, &self.secret)
+            .managed_with_https(self.controller_addr, self.mixed_port, &self.secret, true)
             .map_err(Error::other)
             .map_err(ApplyError::Prepare)?;
         let mut staging = tempfile::Builder::new()
