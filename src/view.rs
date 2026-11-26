@@ -244,6 +244,8 @@ pub struct Paw {
     rule_filter: Entity<InputState>,
     _rule_filter_changes: Subscription,
     rule_page: usize,
+    rule_previous_focus: FocusHandle,
+    rule_next_focus: FocusHandle,
     connection_filter: Entity<InputState>,
     _connection_filter_changes: Subscription,
     log_filter: Entity<InputState>,
@@ -406,6 +408,8 @@ pub fn open(
             rule_filter,
             _rule_filter_changes: rule_filter_changes,
             rule_page: 0,
+            rule_previous_focus: cx.focus_handle(),
+            rule_next_focus: cx.focus_handle(),
             connection_filter,
             _connection_filter_changes: connection_filter_changes,
             log_filter,
@@ -805,6 +809,7 @@ impl Paw {
                             self.locale.message(Message::RuleFilterDetail),
                         )
                     } else {
+                        let next_is_last = results.len() - end <= PAGE_SIZE;
                         let navigation = div()
                             .flex()
                             .items_center()
@@ -816,12 +821,20 @@ impl Paw {
                             )))
                             .when(current > 0, |nav| {
                                 nav.child(
-                                    secondary_button(
+                                    subscription_button(
                                         "rules-previous-page",
                                         self.locale.message(Message::PreviousRulesPage),
+                                        false,
+                                        cx,
                                     )
+                                    .track_focus(&self.rule_previous_focus)
                                     .on_click(cx.listener(
-                                        move |this, _, _, cx| {
+                                        move |this, _, window, cx| {
+                                            if current == 1
+                                                && this.rule_previous_focus.is_focused(window)
+                                            {
+                                                this.rule_next_focus.focus(window, cx);
+                                            }
                                             this.rule_page = current - 1;
                                             cx.notify();
                                         },
@@ -830,12 +843,20 @@ impl Paw {
                             })
                             .when(end < results.len(), |nav| {
                                 nav.child(
-                                    secondary_button(
+                                    subscription_button(
                                         "rules-next-page",
                                         self.locale.message(Message::NextRulesPage),
+                                        false,
+                                        cx,
                                     )
+                                    .track_focus(&self.rule_next_focus)
                                     .on_click(cx.listener(
-                                        move |this, _, _, cx| {
+                                        move |this, _, window, cx| {
+                                            if next_is_last
+                                                && this.rule_next_focus.is_focused(window)
+                                            {
+                                                this.rule_previous_focus.focus(window, cx);
+                                            }
                                             this.rule_page = current + 1;
                                             cx.notify();
                                         },
@@ -939,20 +960,21 @@ impl Paw {
                             .enumerate()
                             .map(|(index, level)| {
                                 let selected = self.log_level == level;
-                                div()
-                                    .id(("log-level-filter", index))
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .text_sm()
-                                    .cursor_pointer()
-                                    .text_color(rgb(if selected { SURFACE } else { BLUE }))
-                                    .bg(rgb(if selected { BLUE } else { SOFT_BLUE }))
-                                    .child(self.locale.message(level.label()))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                subscription_button(
+                                    ("log-level-filter", index),
+                                    self.locale.message(level.label()),
+                                    selected,
+                                    cx,
+                                )
+                                .toggled(selected)
+                                .px_3()
+                                .py_1()
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         this.log_level = level;
                                         cx.notify();
-                                    }))
+                                    },
+                                ))
                             }),
                     ),
                 );
