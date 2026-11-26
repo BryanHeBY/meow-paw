@@ -15,6 +15,7 @@ use tempfile::NamedTempFile;
 // JSON escaping can expand one byte to six. Leave room for URL and metadata.
 const MAX_RECORD_BYTES: u64 = (6 * MAX_PROFILE_BYTES + 16 * 1024) as u64;
 const MAX_URL_BYTES: usize = 8192;
+const MAX_NAME_CHARS: usize = 80;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct SubscriptionId([u8; 16]);
@@ -58,8 +59,9 @@ pub enum DisplayInterval {
     Provider(u32),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionMetadata {
+    pub name: Option<String>,
     pub interval: Option<DisplayInterval>,
 }
 
@@ -68,6 +70,8 @@ pub struct SubscriptionMetadata {
 pub struct SavedSubscription {
     // No Debug implementation: the URL and YAML can both contain credentials.
     url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     yaml: String,
     policy: RefreshPolicy,
     provider_interval_minutes: Option<u32>,
@@ -90,6 +94,7 @@ impl SavedSubscription {
 
     pub fn metadata(&self) -> SubscriptionMetadata {
         SubscriptionMetadata {
+            name: self.name.as_deref().and_then(sanitize_name),
             interval: self
                 .policy
                 .interval_override_minutes
@@ -131,6 +136,7 @@ impl SubscriptionStore {
         let id = SubscriptionId(bytes);
         let record = SavedSubscription {
             url: url.into(),
+            name: None,
             yaml: download.yaml,
             policy,
             provider_interval_minutes: download.suggested_interval_minutes,
@@ -152,7 +158,7 @@ impl SubscriptionStore {
         if bytes.len() as u64 > MAX_RECORD_BYTES {
             return Err(invalid("Subscription record exceeds the size limit"));
         }
-        let record: SavedSubscription =
+        let mut record: SavedSubscription =
             serde_json::from_slice(&bytes).map_err(|_| invalid("Invalid subscription record"))?;
         if record.url.len() > MAX_URL_BYTES
             || record.yaml.len() > MAX_PROFILE_BYTES
@@ -162,6 +168,7 @@ impl SubscriptionStore {
         {
             return Err(invalid("Invalid subscription record"));
         }
+        record.name = record.name.as_deref().and_then(sanitize_name);
         Ok(record)
     }
 
@@ -188,6 +195,26 @@ impl SubscriptionStore {
         record.yaml = download.yaml;
         record.provider_interval_minutes = download.suggested_interval_minutes;
         self.write(id, &record, commit)
+    }
+
+    /// Update only the local display name, retaining the rest of the record.
+    /// Callers must serialize mutations of a subscription store.
+    pub fn rename(&mut self, id: SubscriptionId, name: &str) -> io::Result<SubscriptionMetadata> {
+        self.rename_with(id, name, |staged, path| {
+            staged.persist(path).map(|_| ()).map_err(|e| e.error)
+        })
+    }
+
+    fn rename_with(
+        &mut self,
+        id: SubscriptionId,
+        name: &str,
+        commit: impl FnOnce(NamedTempFile, &Path) -> io::Result<()>,
+    ) -> io::Result<SubscriptionMetadata> {
+        let mut record = self.read(id)?;
+        record.name = sanitize_name(name);
+        self.write(id, &record, commit)?;
+        Ok(record.metadata())
     }
 
     pub fn ids(&self) -> io::Result<Vec<SubscriptionId>> {
@@ -232,11 +259,25 @@ impl SubscriptionStore {
         serde_json::to_writer(&mut staged, record)
             .map_err(|_| io::Error::other("Cannot write the subscription record"))?;
         staged.flush()?;
+        if staged.as_file().metadata()?.len() > MAX_RECORD_BYTES {
+            return Err(invalid("Subscription record exceeds the size limit"));
+        }
         staged.as_file().sync_all()?;
         // The YAML and metadata become visible together. Avoid a second fallible
         // write after replacing the last-good record.
         commit(staged, &self.record_path(id))
     }
+}
+
+// Keep display text single-line and bounded, including when reading edited records.
+fn sanitize_name(input: &str) -> Option<String> {
+    let clean: String = input
+        .chars()
+        .filter(|ch| !ch.is_control() && !matches!(*ch, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        .take(MAX_NAME_CHARS)
+        .collect();
+    let clean = clean.trim();
+    (!clean.is_empty()).then(|| clean.to_owned())
 }
 
 fn invalid(message: &'static str) -> io::Error {
@@ -266,6 +307,99 @@ mod tests {
             yaml: yaml.to_owned(),
             suggested_interval_minutes: Some(minutes),
         }
+    }
+
+    #[test]
+    fn old_records_without_names_load_and_names_are_bounded_and_sanitized() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SubscriptionStore::new(dir.path().into());
+        let id = store
+            .import(
+                "https://example.test/sub",
+                download(OLD, 60),
+                Default::default(),
+            )
+            .unwrap();
+        // Imports omit absent names, matching records written before this field existed.
+        assert!(
+            !fs::read_to_string(store.record_path(id))
+                .unwrap()
+                .contains("\"name\":")
+        );
+        assert_eq!(store.metadata(id).unwrap().name, None);
+        store.rename(id, "  家\n庭\u{2028}\u{202e}  ").unwrap();
+        assert_eq!(store.metadata(id).unwrap().name.as_deref(), Some("家庭"));
+        store.rename(id, &"猫".repeat(100)).unwrap();
+        assert_eq!(
+            store.metadata(id).unwrap().name.unwrap(),
+            "猫".repeat(MAX_NAME_CHARS)
+        );
+        // Display also sanitizes a syntactically valid record edited outside Paw.
+        let mut record = store.read(id).unwrap();
+        record.name = Some(format!("\u{202e}{}", "a".repeat(100)));
+        store
+            .write(id, &record, |staged, path| {
+                staged.persist(path).map(|_| ()).map_err(|e| e.error)
+            })
+            .unwrap();
+        assert_eq!(
+            store.metadata(id).unwrap().name.unwrap(),
+            "a".repeat(MAX_NAME_CHARS)
+        );
+    }
+
+    #[test]
+    fn rename_preserves_record_and_survives_refresh_then_clear_restores_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SubscriptionStore::new(dir.path().into());
+        let policy = RefreshPolicy {
+            automatic: true,
+            interval_override_minutes: Some(45),
+        };
+        let id = store
+            .import("https://example.test/sub", download(OLD, 60), policy)
+            .unwrap();
+        store.rename(id, "Personal").unwrap();
+        let renamed = store.read(id).unwrap();
+        assert_eq!(renamed.url, "https://example.test/sub");
+        assert_eq!(renamed.yaml(), OLD);
+        assert!(renamed.policy() == policy);
+        assert_eq!(renamed.provider_interval_minutes, Some(60));
+        store.refresh(id, download(NEW, 120)).unwrap();
+        let refreshed = SubscriptionStore::new(dir.path().into()).read(id).unwrap();
+        assert_eq!(refreshed.metadata().name.as_deref(), Some("Personal"));
+        assert_eq!(refreshed.yaml(), NEW);
+        assert_eq!(refreshed.url, "https://example.test/sub");
+        assert!(refreshed.policy() == policy);
+        assert_eq!(refreshed.provider_interval_minutes, Some(120));
+        store.rename(id, " \n ").unwrap();
+        assert_eq!(store.metadata(id).unwrap().name, None);
+        assert_eq!(store.read(id).unwrap().yaml(), NEW);
+    }
+
+    #[test]
+    fn failed_rename_commit_keeps_last_good_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SubscriptionStore::new(dir.path().into());
+        let id = store
+            .import(
+                "https://example.test/sub",
+                download(OLD, 60),
+                Default::default(),
+            )
+            .unwrap();
+        store.rename(id, "Before").unwrap();
+        let failed = store.rename_with(id, "After", |temp, path| {
+            assert!(temp.as_file().metadata().unwrap().len() > 0);
+            assert!(path.exists());
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        let record = store.read(id).unwrap();
+        assert_eq!(record.metadata().name.as_deref(), Some("Before"));
+        assert_eq!(record.yaml(), OLD);
+        assert_eq!(record.interval_minutes(), Some(60));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

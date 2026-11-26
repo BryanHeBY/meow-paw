@@ -114,6 +114,11 @@ pub enum Message {
     SubscriptionUrl,
     ImportSubscription,
     CancelSubscription,
+    RenameSubscription,
+    SubscriptionName,
+    SaveSubscriptionName,
+    SavingSubscriptionName,
+    SubscriptionNameSaveFailed,
     DownloadingSubscription,
     LiveApplyWarning,
     ProfileSelectionDetail,
@@ -369,6 +374,11 @@ fn english(key: Message) -> &'static str {
         Message::SubscriptionUrl => "HTTPS subscription URL",
         Message::ImportSubscription => "Import subscription",
         Message::CancelSubscription => "Cancel",
+        Message::RenameSubscription => "Rename",
+        Message::SubscriptionName => "Local name, up to 80 characters (blank uses the ID)",
+        Message::SaveSubscriptionName => "Save",
+        Message::SavingSubscriptionName => "Saving name…",
+        Message::SubscriptionNameSaveFailed => "Could not save the subscription name",
         Message::DownloadingSubscription => "Downloading subscription…",
         Message::ProfileSelectionDetail => {
             "Use selects the next session; Apply live changes the running profile."
@@ -550,6 +560,11 @@ fn chinese(key: Message) -> &'static str {
         Message::SubscriptionUrl => "HTTPS 订阅地址",
         Message::ImportSubscription => "导入订阅",
         Message::CancelSubscription => "取消",
+        Message::RenameSubscription => "重命名",
+        Message::SubscriptionName => "本地名称，最多 80 个字符（留空则使用 ID）",
+        Message::SaveSubscriptionName => "保存",
+        Message::SavingSubscriptionName => "正在保存名称…",
+        Message::SubscriptionNameSaveFailed => "无法保存订阅名称",
         Message::DownloadingSubscription => "正在下载订阅…",
         Message::ProfileSelectionDetail => {
             "使用会选择下次会话的配置；实时应用会更改正在运行的配置。"
@@ -885,6 +900,32 @@ mod tests {
                 Locale::ZhCn.retained_log_count(count),
                 format!("保留 {count} 条日志")
             );
+        }
+    }
+
+    #[test]
+    fn subscription_name_controls_are_localized() {
+        for (message, en, zh) in [
+            (Message::RenameSubscription, "Rename", "重命名"),
+            (
+                Message::SubscriptionName,
+                "Local name, up to 80 characters (blank uses the ID)",
+                "本地名称，最多 80 个字符（留空则使用 ID）",
+            ),
+            (Message::SaveSubscriptionName, "Save", "保存"),
+            (
+                Message::SavingSubscriptionName,
+                "Saving name…",
+                "正在保存名称…",
+            ),
+            (
+                Message::SubscriptionNameSaveFailed,
+                "Could not save the subscription name",
+                "无法保存订阅名称",
+            ),
+        ] {
+            assert_eq!(Locale::En.message(message), en);
+            assert_eq!(Locale::ZhCn.message(message), zh);
         }
     }
 

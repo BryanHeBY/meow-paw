@@ -142,6 +142,22 @@ fn merge_subscription_metadata(
     }
 }
 
+fn subscription_display_name(
+    locale: Locale,
+    id: SubscriptionId,
+    metadata: Option<&SubscriptionMetadata>,
+) -> String {
+    metadata
+        .and_then(|metadata| metadata.name.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "{} {}",
+                locale.message(Message::Subscription),
+                &id.to_string()[..8]
+            )
+        })
+}
+
 pub struct Paw {
     page: Page,
     locale: Locale,
@@ -156,6 +172,9 @@ pub struct Paw {
     subscription_metadata: HashMap<PathBuf, Option<SubscriptionMetadata>>,
     subscription_metadata_started: bool,
     subscription_busy: bool,
+    subscription_busy_message: Message,
+    subscription_rename: Option<PathBuf>,
+    subscription_name: Entity<InputState>,
     subscription_notice: Option<Message>,
     subscription_entry_open: bool,
     subscription_url: Entity<InputState>,
@@ -219,11 +238,14 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let connection_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).probe_url.read(cx).value();
     let probe_url = cx.new(|cx| InputState::new(window, cx).default_value(query));
+    let query = paw.read(cx).subscription_name.read(cx).value();
+    let subscription_name = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).subscription_url.read(cx).value();
     let subscription_url = cx.new(|cx| InputState::new(window, cx).default_value(query));
     paw.update(cx, |state, cx| {
         state._subscription_url_changes = subscribe_subscription_url(&subscription_url, cx);
         state.subscription_url = subscription_url;
+        state.subscription_name = subscription_name;
         state._probe_url_changes = subscribe_probe_url(&probe_url, cx);
         state.probe_url = probe_url;
         state._search_changes = subscribe_search(&search, cx);
@@ -247,6 +269,7 @@ pub fn open(
     let connection_filter = cx.new(|cx| InputState::new(window, cx));
     let probe_url = cx.new(|cx| InputState::new(window, cx));
     let subscription_url = cx.new(|cx| InputState::new(window, cx));
+    let subscription_name = cx.new(|cx| InputState::new(window, cx));
     cx.new(|cx| {
         let subscription_url_changes = subscribe_subscription_url(&subscription_url, cx);
         let probe_url_changes = subscribe_probe_url(&probe_url, cx);
@@ -283,6 +306,9 @@ pub fn open(
             subscription_metadata: HashMap::new(),
             subscription_metadata_started: false,
             subscription_busy: false,
+            subscription_busy_message: Message::DownloadingSubscription,
+            subscription_rename: None,
+            subscription_name,
             subscription_notice,
             subscription_entry_open: false,
             subscription_url,
@@ -299,9 +325,7 @@ pub fn open(
             #[cfg(any(target_os = "linux", windows))]
             snapshot: Default::default(),
         };
-        if page == Page::Profiles {
-            paw.load_subscription_metadata(cx);
-        }
+        paw.load_subscription_metadata(cx);
         if start {
             paw.start();
         }
@@ -494,8 +518,14 @@ impl Paw {
                     .bg(rgb(if on { SOFT_BLUE } else { CHROME }))
                     .text_color(rgb(if on { BLUE } else { INK }))
                     .hover(|s| s.bg(rgb(SOFT_BLUE)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.page = page;
+                        if page != Page::Profiles
+                            && !this.subscription_busy
+                            && this.subscription_rename.is_some()
+                        {
+                            this.cancel_rename(window, cx);
+                        }
                         if page == Page::Profiles {
                             this.load_subscription_metadata(cx);
                         }
@@ -861,30 +891,33 @@ impl Paw {
                                 .text_color(rgb(FAINT))
                                 .child(self.locale.message(Message::SubscriptionDetail)),
                         )
-                        .when(!self.subscription_busy, |el| {
-                            el.child(
-                                secondary_button(
-                                    "home-refresh-subscription",
-                                    self.locale.message(Message::OverviewRefreshSubscription),
+                        .when(
+                            !self.subscription_busy && self.subscription_rename.is_none(),
+                            |el| {
+                                el.child(
+                                    secondary_button(
+                                        "home-refresh-subscription",
+                                        self.locale.message(Message::OverviewRefreshSubscription),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |paw, _, _, cx| {
+                                            #[cfg(any(target_os = "linux", windows))]
+                                            if overview_current_profile(
+                                                paw.state().2.is_some(),
+                                                paw.snapshot.applying_profile.is_some(),
+                                                paw.snapshot.profile.as_deref(),
+                                            ) == Some(path.as_path())
+                                                && paw.subscription_paths.contains(&path)
+                                            {
+                                                paw.refresh_subscription(id, cx);
+                                            }
+                                            #[cfg(not(any(target_os = "linux", windows)))]
+                                            let _ = (paw, id, &path, cx);
+                                        },
+                                    )),
                                 )
-                                .on_click(cx.listener(
-                                    move |paw, _, _, cx| {
-                                        #[cfg(any(target_os = "linux", windows))]
-                                        if overview_current_profile(
-                                            paw.state().2.is_some(),
-                                            paw.snapshot.applying_profile.is_some(),
-                                            paw.snapshot.profile.as_deref(),
-                                        ) == Some(path.as_path())
-                                            && paw.subscription_paths.contains(&path)
-                                        {
-                                            paw.refresh_subscription(id, cx);
-                                        }
-                                        #[cfg(not(any(target_os = "linux", windows)))]
-                                        let _ = (paw, id, &path, cx);
-                                    },
-                                )),
-                            )
-                        }),
+                            },
+                        ),
                 )
             })
             .when(
@@ -892,7 +925,7 @@ impl Paw {
                 |card| {
                     card.child(div().px_4().pb_4().text_sm().text_color(rgb(FAINT)).child(
                         if self.subscription_busy {
-                            self.locale.message(Message::DownloadingSubscription)
+                            self.locale.message(self.subscription_busy_message)
                         } else {
                             self.subscription_notice
                                 .map(|notice| self.locale.message(notice))
@@ -1082,10 +1115,12 @@ impl Paw {
 
     fn display_profile_name(&self, path: &std::path::Path) -> String {
         if let Some((_, id)) = self.subscription_for(path) {
-            return format!(
-                "{} {}",
-                self.locale.message(Message::Subscription),
-                &id.to_string()[..8]
+            return subscription_display_name(
+                self.locale,
+                id,
+                self.subscription_metadata
+                    .get(path)
+                    .and_then(Option::as_ref),
             );
         }
         path.file_name()
@@ -1247,7 +1282,7 @@ impl Paw {
                                     ),
                             ),
                     );
-            } else {
+            } else if self.subscription_rename.is_none() {
                 page = page.child(
                     subscription_button(
                         "import-subscription",
@@ -1268,7 +1303,7 @@ impl Paw {
         if self.subscription_busy || self.subscription_notice.is_some() {
             page = page.child(div().text_sm().text_color(rgb(FAINT)).child(
                 if self.subscription_busy {
-                    self.locale.message(Message::DownloadingSubscription)
+                    self.locale.message(self.subscription_busy_message)
                 } else {
                     self.subscription_notice
                         .map(|message| self.locale.message(message))
@@ -1320,7 +1355,7 @@ impl Paw {
                 let interval = self
                     .subscription_metadata
                     .get(profile)
-                    .and_then(|metadata| *metadata)
+                    .and_then(Option::as_ref)
                     .and_then(|metadata| {
                         metadata.interval.map(|interval| {
                             let (label, minutes) = match interval {
@@ -1367,6 +1402,69 @@ impl Paw {
                             card.child(div().text_xs().text_color(rgb(FAINT)).child(interval))
                         })
                     })
+                    .when(
+                        self.subscription_rename.as_ref() == Some(profile)
+                            && !self.subscription_busy,
+                        |card| {
+                            card.child(
+                                div()
+                                    .id(action_id("rename-editor"))
+                                    .on_key_down(cx.listener(
+                                        |paw, event: &KeyDownEvent, window, cx| {
+                                            // Keep input keystrokes with its IME and editing handlers.
+                                            if event.keystroke.key == "escape"
+                                                && !event.keystroke.modifiers.modified()
+                                                && !paw
+                                                    .subscription_name
+                                                    .focus_handle(cx)
+                                                    .is_focused(window)
+                                            {
+                                                paw.cancel_rename(window, cx);
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    ))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(section_label(
+                                        self.locale.message(Message::SubscriptionName),
+                                    ))
+                                    .child(Input::new(&self.subscription_name).cleanable(true))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .child(
+                                                subscription_button(
+                                                    action_id("rename-save"),
+                                                    self.locale
+                                                        .message(Message::SaveSubscriptionName),
+                                                    true,
+                                                    cx,
+                                                )
+                                                .on_click(
+                                                    cx.listener(|paw, _, _, cx| {
+                                                        paw.save_rename(cx)
+                                                    }),
+                                                ),
+                                            )
+                                            .child(
+                                                subscription_button(
+                                                    action_id("rename-cancel"),
+                                                    self.locale
+                                                        .message(Message::CancelSubscription),
+                                                    false,
+                                                    cx,
+                                                )
+                                                .on_click(cx.listener(|paw, _, window, cx| {
+                                                    paw.cancel_rename(window, cx)
+                                                })),
+                                            ),
+                                    ),
+                            )
+                        },
+                    )
                     .child(
                         div()
                             .flex()
@@ -1413,7 +1511,9 @@ impl Paw {
                                 )
                             })
                             .when_some(
-                                subscription.filter(|_| !self.subscription_busy),
+                                subscription.filter(|_| {
+                                    !self.subscription_busy && self.subscription_rename.is_none()
+                                }),
                                 |el, id| {
                                     el.child(
                                         secondary_button(
@@ -1423,6 +1523,50 @@ impl Paw {
                                         .on_click(
                                             cx.listener(move |paw, _, _, cx| {
                                                 paw.refresh_subscription(id, cx);
+                                            }),
+                                        ),
+                                    )
+                                },
+                            )
+                            .when(
+                                subscription.is_some()
+                                    && !self.subscription_busy
+                                    && self.subscription_rename.is_none()
+                                    && !self.subscription_entry_open
+                                    && self
+                                        .subscription_metadata
+                                        .get(profile)
+                                        .is_some_and(Option::is_some),
+                                |el| {
+                                    let rename_path = profile.clone();
+                                    let name = self
+                                        .subscription_metadata
+                                        .get(profile)
+                                        .and_then(Option::as_ref)
+                                        .and_then(|metadata| metadata.name.clone())
+                                        .unwrap_or_default();
+                                    el.child(
+                                        secondary_button(
+                                            action_id("profile-rename"),
+                                            self.locale.message(Message::RenameSubscription),
+                                        )
+                                        .on_click(
+                                            cx.listener(move |paw, _, window, cx| {
+                                                if paw.subscription_busy
+                                                    || paw.subscription_rename.is_some()
+                                                {
+                                                    return;
+                                                }
+                                                paw.subscription_name.update(cx, |input, cx| {
+                                                    input.set_value(name.clone(), window, cx)
+                                                });
+                                                paw.subscription_rename = Some(rename_path.clone());
+                                                paw.subscription_notice = None;
+                                                paw.error = None;
+                                                paw.subscription_name
+                                                    .focus_handle(cx)
+                                                    .focus(window, cx);
+                                                cx.notify();
                                             }),
                                         ),
                                     )
@@ -1603,6 +1747,61 @@ impl Paw {
         cx.notify();
     }
 
+    fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.subscription_name
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.subscription_rename = None;
+        if self.page == Page::Profiles && !self.subscription_busy {
+            self.subscription_add_focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn save_rename(&mut self, cx: &mut Context<Self>) {
+        if self.subscription_busy {
+            return;
+        }
+        let Some(path) = self.subscription_rename.clone() else {
+            return;
+        };
+        let Some((mut store, id)) = self.subscription_for(&path) else {
+            return;
+        };
+        let name = self.subscription_name.read(cx).value().to_string();
+        self.subscription_busy = true;
+        self.subscription_busy_message = Message::SavingSubscriptionName;
+        self.subscription_notice = None;
+        self.error = None;
+        cx.notify();
+        cx.spawn(async move |weak, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { store.rename(id, &name) })
+                .await;
+            let _ = weak.update(cx, |paw, cx| {
+                paw.subscription_busy = false;
+                match result {
+                    Ok(metadata) => {
+                        paw.subscription_metadata.insert(path, Some(metadata));
+                        paw.subscription_rename = None;
+                    }
+                    Err(_) => {
+                        if paw.page != Page::Profiles {
+                            paw.subscription_rename = None;
+                        }
+                        paw.error = Some(
+                            paw.locale
+                                .message(Message::SubscriptionNameSaveFailed)
+                                .to_owned(),
+                        )
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn import_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.subscription_busy || self.preferences.subscription_dir().is_none() {
             return;
@@ -1628,6 +1827,9 @@ impl Paw {
     }
 
     fn refresh_subscription(&mut self, id: SubscriptionId, cx: &mut Context<Self>) {
+        if self.subscription_rename.is_some() {
+            return;
+        }
         let locale = self.locale;
         self.subscription_job(cx, move |store| {
             let prior = store
@@ -1661,6 +1863,7 @@ impl Paw {
             return;
         }
         self.subscription_busy = true;
+        self.subscription_busy_message = Message::DownloadingSubscription;
         self.subscription_notice = None;
         self.error = None;
         cx.notify();
@@ -3366,23 +3569,47 @@ mod tests {
         let failed = PathBuf::from("failed.json");
         let untouched = PathBuf::from("untouched.json");
         let old = Some(SubscriptionMetadata {
+            name: None,
             interval: Some(DisplayInterval::Provider(60)),
         });
         let new = Some(SubscriptionMetadata {
+            name: Some("New name".into()),
             interval: Some(DisplayInterval::Provider(120)),
         });
-        let mut current = HashMap::from([(refreshed.clone(), new), (failed.clone(), None)]);
+        let mut current = HashMap::from([(refreshed.clone(), new.clone()), (failed.clone(), None)]);
         merge_subscription_metadata(
             &mut current,
             vec![
-                (refreshed.clone(), old),
-                (failed.clone(), old),
-                (untouched.clone(), old),
+                (refreshed.clone(), old.clone()),
+                (failed.clone(), old.clone()),
+                (untouched.clone(), old.clone()),
             ],
         );
         assert_eq!(current[&refreshed], new);
         assert_eq!(current[&failed], None);
         assert_eq!(current[&untouched], old);
+    }
+
+    #[test]
+    fn subscription_name_falls_back_to_opaque_id_when_cleared() {
+        let id = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let mut metadata = super::SubscriptionMetadata {
+            name: Some("Home".into()),
+            interval: None,
+        };
+        assert_eq!(
+            super::subscription_display_name(super::Locale::En, id, Some(&metadata)),
+            "Home"
+        );
+        metadata.name = None;
+        assert_eq!(
+            super::subscription_display_name(super::Locale::En, id, Some(&metadata)),
+            "Subscription 01234567"
+        );
+        assert_eq!(
+            super::subscription_display_name(super::Locale::ZhCn, id, None),
+            "订阅 01234567"
+        );
     }
 
     #[test]
