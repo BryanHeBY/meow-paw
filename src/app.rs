@@ -1,5 +1,6 @@
 //! Window-independent application state for the first managed desktop workflow.
 
+use crate::subscription_store::{SubscriptionId, SubscriptionStore};
 use crate::{
     engine::{
         controller::{Connection, Inventory, LogEntry, RoutingMode, Rule, Traffic},
@@ -170,9 +171,36 @@ impl Drop for LogWorker {
     }
 }
 
+enum ProfileInput {
+    Local(PathBuf),
+    Subscription {
+        store: SubscriptionStore,
+        id: SubscriptionId,
+    },
+}
+
+impl ProfileInput {
+    fn key(&self) -> PathBuf {
+        match self {
+            Self::Local(path) => path.clone(),
+            Self::Subscription { store, id } => store.record_path(*id),
+        }
+    }
+
+    fn load(&self) -> io::Result<Profile> {
+        match self {
+            Self::Local(path) => load_profile(path),
+            Self::Subscription { store, id } => {
+                let record = store.read(*id)?;
+                Profile::parse(record.yaml()).map_err(Error::other)
+            }
+        }
+    }
+}
+
 enum Command {
-    Start(PathBuf),
-    ApplyProfile(PathBuf),
+    Start(ProfileInput),
+    ApplyProfile(ProfileInput),
     Select { group: String, member: String },
     SetMode(RoutingMode),
     ReadRules,
@@ -215,11 +243,30 @@ impl Desktop {
     }
 
     pub fn start(&self, path: PathBuf) -> io::Result<()> {
-        self.send(Command::Start(path))
+        self.send(Command::Start(ProfileInput::Local(path)))
     }
 
     pub fn apply_profile(&self, path: PathBuf) -> io::Result<()> {
-        self.send(Command::ApplyProfile(path))
+        self.send(Command::ApplyProfile(ProfileInput::Local(path)))
+    }
+
+    pub fn start_subscription(
+        &self,
+        store: SubscriptionStore,
+        id: SubscriptionId,
+    ) -> io::Result<()> {
+        self.send(Command::Start(ProfileInput::Subscription { store, id }))
+    }
+
+    pub fn apply_subscription(
+        &self,
+        store: SubscriptionStore,
+        id: SubscriptionId,
+    ) -> io::Result<()> {
+        self.send(Command::ApplyProfile(ProfileInput::Subscription {
+            store,
+            id,
+        }))
     }
 
     pub fn select(&self, group: String, member: String) -> io::Result<()> {
@@ -322,7 +369,8 @@ fn run(
 
         match receiver.recv_timeout(Duration::from_millis(75)) {
             Ok(_) if cancelled() => continue,
-            Ok(Command::Start(path)) => {
+            Ok(Command::Start(input)) => {
+                let path = input.key();
                 if session.is_some() {
                     change(snapshot, |s| {
                         s.action_error =
@@ -336,7 +384,7 @@ fn run(
                     s.diagnostics.clear();
                     s.action_error = None;
                 });
-                let result = load_profile(&path).and_then(|profile| {
+                let result = input.load().and_then(|profile| {
                     change(snapshot, |s| s.diagnostics = profile.diagnostics());
                     Session::launch(&binary, &profile, cancelled)
                 });
@@ -365,7 +413,8 @@ fn run(
                     }),
                 }
             }
-            Ok(Command::ApplyProfile(path)) => {
+            Ok(Command::ApplyProfile(input)) => {
+                let path = input.key();
                 let Some(active) = &session else {
                     change(snapshot, |s| {
                         s.action_error = Some("Start Meow before applying a live profile".into())
@@ -377,7 +426,8 @@ fn run(
                     s.action_error = None;
                     s.diagnostics.clear();
                 });
-                let result = load_profile(&path)
+                let result = input
+                    .load()
                     .map_err(ApplyError::Prepare)
                     .and_then(|profile| {
                         change(snapshot, |s| s.diagnostics = profile.diagnostics());
@@ -515,7 +565,7 @@ fn change(snapshot: &Mutex<Snapshot>, apply: impl FnOnce(&mut Snapshot)) {
     snapshot.revision = snapshot.revision.wrapping_add(1);
 }
 
-fn load_profile(path: &PathBuf) -> io::Result<Profile> {
+fn load_profile(path: &std::path::Path) -> io::Result<Profile> {
     let file = File::open(path)?;
     if !file.metadata()?.is_file() {
         return Err(Error::new(

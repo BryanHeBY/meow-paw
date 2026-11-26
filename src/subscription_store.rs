@@ -121,7 +121,7 @@ impl SubscriptionStore {
 
     pub fn read(&self, id: SubscriptionId) -> io::Result<SavedSubscription> {
         let mut bytes = Vec::new();
-        fs::File::open(self.path(id))?
+        fs::File::open(self.record_path(id))?
             .take(MAX_RECORD_BYTES + 1)
             .read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_RECORD_BYTES {
@@ -160,7 +160,7 @@ impl SubscriptionStore {
         self.write(id, &record, commit)
     }
 
-    fn path(&self, id: SubscriptionId) -> PathBuf {
+    pub fn record_path(&self, id: SubscriptionId) -> PathBuf {
         self.dir.join(format!("{id}.json"))
     }
 
@@ -178,7 +178,7 @@ impl SubscriptionStore {
         staged.as_file().sync_all()?;
         // The YAML and metadata become visible together. Avoid a second fallible
         // write after replacing the last-good record.
-        commit(staged, &self.path(id))
+        commit(staged, &self.record_path(id))
     }
 }
 

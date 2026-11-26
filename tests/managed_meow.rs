@@ -252,3 +252,83 @@ fn applies_local_profile_without_rebinding_and_preserves_it_on_rejection() {
     assert_eq!(fs::read_to_string(original).unwrap(), original_yaml);
     assert_eq!(fs::read_to_string(candidate).unwrap(), candidate_yaml);
 }
+
+#[test]
+#[ignore = "requires a local Meow binary: MEOW_BIN=/path/to/meow"]
+fn subscription_refresh_only_changes_disk_until_the_user_applies() {
+    use meow_paw::{
+        app::{Desktop, EngineStatus, Snapshot},
+        subscription::Download,
+        subscription_store::SubscriptionStore,
+    };
+    use std::time::Instant;
+
+    fn wait_for(desktop: &Desktop, mut done: impl FnMut(&Snapshot) -> bool) -> Snapshot {
+        let limit = Instant::now() + Duration::from_secs(15);
+        loop {
+            let snapshot = desktop.snapshot();
+            assert!(
+                !matches!(snapshot.engine, EngineStatus::Error(_)),
+                "{:?}",
+                snapshot.engine,
+            );
+            if done(&snapshot) {
+                return snapshot;
+            }
+            assert!(Instant::now() < limit, "Timed out: {snapshot:?}");
+            thread::sleep(Duration::from_millis(40));
+        }
+    }
+
+    let binary = PathBuf::from(std::env::var_os("MEOW_BIN").unwrap());
+    let desktop = Desktop::new(binary).unwrap();
+    let fixtures = tempfile::tempdir().unwrap();
+    let store_dir = fixtures.path().to_path_buf();
+    let mut store = SubscriptionStore::new(store_dir.clone());
+    let download = |group: &str| Download {
+        yaml: format!(
+            "mode: rule\nproxies: [{{name: Local, type: direct}}]\n\
+             proxy-groups: [{{name: {group}, type: select, proxies: [Local]}}]\n\
+             rules: ['MATCH,{group}']\n"
+        ),
+        suggested_interval_minutes: Some(120),
+    };
+    let id = store
+        .import(
+            "https://example.test/local",
+            download("Before"),
+            Default::default(),
+        )
+        .unwrap();
+    desktop
+        .start_subscription(SubscriptionStore::new(store_dir.clone()), id)
+        .unwrap();
+    let started = wait_for(&desktop, |s| {
+        matches!(s.engine, EngineStatus::Running { .. })
+    });
+    assert_eq!(
+        started.profile.as_deref(),
+        Some(store.record_path(id).as_path())
+    );
+    store.refresh(id, download("After")).unwrap();
+    desktop.read_rules().unwrap();
+    let before = wait_for(&desktop, |s| s.rules.is_some());
+    assert_eq!(before.rules.unwrap()[0].proxy, "Before");
+
+    desktop
+        .apply_subscription(SubscriptionStore::new(store_dir), id)
+        .unwrap();
+    desktop.read_rules().unwrap();
+    let after = wait_for(&desktop, |s| {
+        s.rules
+            .as_ref()
+            .is_some_and(|rules| rules[0].proxy == "After")
+    });
+    let EngineStatus::Running { mixed_port } = started.engine else {
+        unreachable!()
+    };
+    assert!(
+        matches!(after.engine, EngineStatus::Running { mixed_port: port } if port == mixed_port)
+    );
+    assert_eq!(after.profile, started.profile);
+}
