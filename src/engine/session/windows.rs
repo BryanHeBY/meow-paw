@@ -293,6 +293,205 @@ mod tests {
         );
     }
 
+    // This helper holds the Session (and its job and process handles) until the
+    // parent closes stdin. The parent instead kills it for the actual test.
+    #[test]
+    #[ignore = "supervisor helper; run the real-session owner-exit test instead"]
+    fn real_session_owner_fixture() {
+        use crate::{engine::session::Session, profile::Profile};
+        use std::io::Read;
+
+        assert_eq!(
+            std::env::var("PAW_REAL_SESSION_FIXTURE").as_deref(),
+            Ok("owner")
+        );
+        let dir = std::path::PathBuf::from(std::env::var_os("PAW_FIXTURE_DIR").unwrap());
+        let binary = std::path::PathBuf::from(std::env::var_os("MEOW_BIN").unwrap());
+        let profile = Profile::parse("mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
+        let session = match Session::launch(&binary, &profile, || false) {
+            Ok(session) => session,
+            Err(error) => {
+                std::fs::write(dir.join("launch-error"), error.to_string()).unwrap();
+                panic!("Session::launch failed: {error}");
+            }
+        };
+        // The handle value belongs to this process. The parent duplicates it
+        // using the retained supervisor process handle before terminating us.
+        let ready = format!(
+            "{} {} {}",
+            session.process.process.as_raw_handle() as usize,
+            session.mixed_port,
+            session.controller_addr.port()
+        );
+        std::fs::write(dir.join("ready.tmp"), ready).unwrap();
+        std::fs::rename(dir.join("ready.tmp"), dir.join("ready")).unwrap();
+        let mut byte = [0];
+        let _ = std::io::stdin().read(&mut byte);
+        session.stop().expect("orderly fixture shutdown failed");
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly supplied trusted MEOW_BIN on Windows"]
+    fn windows_real_session_dies_after_abrupt_owner_exit() {
+        use std::{
+            net::{Ipv4Addr, SocketAddr, TcpStream},
+            os::windows::process::CommandExt,
+            path::PathBuf,
+            process::{Child, Command, Stdio},
+            thread::sleep,
+            time::{Duration, Instant},
+        };
+        use windows_sys::Win32::{
+            Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle},
+            System::Threading::{GetCurrentProcess, TerminateProcess},
+        };
+
+        // On any failure, first request an orderly shutdown through stdin, then
+        // kill only our supervisor if it does not exit. If necessary, terminate
+        // only the core identified by the handle duplicated from that owner.
+        struct Fixture {
+            owner: Child,
+            core: Option<OwnedHandle>,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                drop(self.owner.stdin.take());
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    if matches!(self.owner.try_wait(), Ok(Some(_))) {
+                        break;
+                    }
+                    sleep(Duration::from_millis(20));
+                }
+                if !matches!(self.owner.try_wait(), Ok(Some(_))) {
+                    let _ = self.owner.kill();
+                    if unsafe { WaitForSingleObject(self.owner.as_raw_handle(), 3000) }
+                        == WAIT_OBJECT_0
+                    {
+                        let _ = self.owner.wait();
+                    }
+                }
+                if let Some(core) = &self.core
+                    && unsafe { WaitForSingleObject(core.as_raw_handle(), 3000) } == WAIT_TIMEOUT
+                {
+                    unsafe { TerminateProcess(core.as_raw_handle(), 1) };
+                    unsafe { WaitForSingleObject(core.as_raw_handle(), 3000) };
+                }
+            }
+        }
+
+        let binary = PathBuf::from(std::env::var_os("MEOW_BIN").expect("set trusted MEOW_BIN"))
+            .canonicalize()
+            .expect("MEOW_BIN must identify an existing binary");
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("temp");
+        std::fs::create_dir(&temp).unwrap();
+        let owner = Command::new(std::env::current_exe().unwrap())
+            .current_dir(dir.path())
+            .env("PAW_REAL_SESSION_FIXTURE", "owner")
+            .env("PAW_FIXTURE_DIR", dir.path())
+            .env("MEOW_BIN", binary)
+            .env("TMP", &temp)
+            .env("TEMP", &temp)
+            .args([
+                "--exact",
+                "engine::session::windows::tests::real_session_owner_fixture",
+                "--ignored",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut fixture = Fixture { owner, core: None };
+        // Launch includes capability detection, configuration preflight and
+        // listener startup, each with a production six-second deadline.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let ready = loop {
+            if let Ok(ready) = std::fs::read_to_string(dir.path().join("ready")) {
+                break ready;
+            }
+            if let Ok(error) = std::fs::read_to_string(dir.path().join("launch-error")) {
+                panic!("real Session::launch failed (including production preflight): {error}");
+            }
+            if let Some(status) = fixture.owner.try_wait().unwrap() {
+                panic!("real Session supervisor exited before ready: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "real Session supervisor did not become ready within 30 seconds"
+            );
+            sleep(Duration::from_millis(20));
+        };
+        let mut fields = ready.split_whitespace();
+        let source_handle: usize = fields.next().unwrap().parse().unwrap();
+        let mixed: u16 = fields.next().unwrap().parse().unwrap();
+        let controller: u16 = fields.next().unwrap().parse().unwrap();
+        assert!(
+            fields.next().is_none()
+                && source_handle != 0
+                && mixed != 0
+                && controller != 0
+                && mixed != controller
+        );
+        let mut duplicated = null_mut();
+        assert_ne!(
+            unsafe {
+                DuplicateHandle(
+                    fixture.owner.as_raw_handle(),
+                    source_handle as HANDLE,
+                    GetCurrentProcess(),
+                    &mut duplicated,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            },
+            0,
+            "duplicating the real core handle failed: {}",
+            Error::last_os_error()
+        );
+        fixture.core = Some(unsafe { OwnedHandle::from_raw_handle(duplicated) });
+        let core = fixture.core.as_ref().unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(core.as_raw_handle(), 0) },
+            WAIT_TIMEOUT,
+            "real core exited before owner termination"
+        );
+        let reachable = |port| {
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+        };
+        assert!(reachable(mixed), "mixed listener was not reachable");
+        assert!(
+            reachable(controller),
+            "controller listener was not reachable"
+        );
+
+        fixture.owner.kill().expect("kill test-owned supervisor");
+        assert_eq!(
+            unsafe { WaitForSingleObject(fixture.owner.as_raw_handle(), 5000) },
+            WAIT_OBJECT_0,
+            "supervisor did not exit"
+        );
+        fixture.owner.wait().unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(core.as_raw_handle(), 5000) },
+            WAIT_OBJECT_0,
+            "job did not terminate the owned real core"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while (reachable(mixed) || reachable(controller)) && Instant::now() < deadline {
+            sleep(Duration::from_millis(20));
+        }
+        assert!(!reachable(mixed), "mixed listener remained reachable");
+        assert!(
+            !reachable(controller),
+            "controller listener remained reachable"
+        );
+    }
+
     #[test]
     fn child_arguments_preserve_spaces_quotes_and_trailing_slashes() {
         for (arg, expected) in [
