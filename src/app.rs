@@ -341,6 +341,38 @@ pub struct Snapshot {
     pub provider_error: Option<String>,
     pub probe_epoch: u64,
     pub probes: ProxyProbeResults,
+    pub probe_busy: bool,
+    pub group_probe: Option<GroupComparison>,
+    group_run_id: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct GroupComparison {
+    pub group: String,
+    pub results: GroupProbeResults,
+    pub active: bool,
+    pub interrupted: bool,
+    mode: Option<RoutingMode>,
+}
+
+impl GroupComparison {
+    fn valid_target(&self, snapshot: &Snapshot, index: usize, target: &ProxyProbeTarget) -> bool {
+        self.active
+            && self.results.epoch == snapshot.probe_epoch
+            && self.results.run_id == snapshot.group_run_id
+            && parse_probe_url(self.results.url.as_str()).as_ref() == Some(&self.results.url)
+            && self.mode == snapshot.mode
+            && self
+                .results
+                .rows
+                .get(index)
+                .is_some_and(|(t, _)| t == target)
+            && snapshot
+                .inventory
+                .as_ref()
+                .and_then(|i| unique_proxy(i, &target.name))
+                == Some(target.origin.clone())
+    }
 }
 
 const LOG_CAPACITY: usize = 256;
@@ -502,6 +534,7 @@ impl Desktop {
     }
 
     pub fn apply_profile(&self, path: PathBuf) -> io::Result<()> {
+        self.invalidate_group_probe();
         self.send(Command::ApplyProfile(ProfileInput::Local(path)))
     }
 
@@ -518,6 +551,7 @@ impl Desktop {
         store: SubscriptionStore,
         id: SubscriptionId,
     ) -> io::Result<()> {
+        self.invalidate_group_probe();
         self.send(Command::ApplyProfile(ProfileInput::Subscription {
             store,
             id,
@@ -529,6 +563,7 @@ impl Desktop {
     }
 
     pub fn set_mode(&self, mode: RoutingMode) -> io::Result<()> {
+        self.invalidate_group_probe();
         self.send(Command::SetMode(mode))
     }
 
@@ -540,6 +575,55 @@ impl Desktop {
             )
         })?;
         self.send(Command::ProbeProxy { epoch, target, url })
+    }
+
+    /// Starts only an explicit comparison; the worker dispatches one request at a time.
+    pub fn compare_group(&self, epoch: u64, group: &str, value: &str) -> io::Result<()> {
+        let url = parse_probe_url(value)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Enter a valid HTTPS test URL"))?;
+        let mut s = self.snapshot.lock().expect("snapshot poisoned");
+        if self.stop.load(Ordering::Acquire)
+            || self.quit.load(Ordering::Acquire)
+            || s.probe_epoch != epoch
+            || !matches!(s.engine, EngineStatus::Running { .. })
+            || s.probe_busy
+            || s.group_probe.as_ref().is_some_and(|g| g.active)
+        {
+            return Err(Error::new(
+                ErrorKind::WouldBlock,
+                "Probe is busy or the session changed",
+            ));
+        }
+        let targets = group_probe_targets(
+            s.inventory
+                .as_deref()
+                .ok_or_else(|| Error::other("No proxy inventory"))?,
+            group,
+        )
+        .map_err(|e| Error::other(format!("Cannot prepare comparison: {e:?}")))?;
+        if targets.is_empty() {
+            return Err(Error::other("No unambiguous nodes to compare"));
+        }
+        s.group_run_id = s.group_run_id.wrapping_add(1);
+        let results = GroupProbeResults::new(epoch, s.group_run_id, url, targets)
+            .ok_or_else(|| Error::other("Cannot prepare comparison"))?;
+        s.group_probe = Some(GroupComparison {
+            group: group.to_owned(),
+            results,
+            active: true,
+            interrupted: false,
+            mode: s.mode,
+        });
+        s.revision = s.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn cancel_group_probe(&self) {
+        change(&self.snapshot, interrupt_group_probe);
+    }
+
+    pub fn invalidate_group_probe(&self) {
+        change(&self.snapshot, |s| s.group_probe = None);
     }
 
     pub fn refresh_provider(&self, name: String) -> io::Result<()> {
@@ -556,6 +640,7 @@ impl Desktop {
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
+        self.invalidate_group_probe();
     }
 
     fn send(&self, command: Command) -> io::Result<()> {
@@ -577,6 +662,18 @@ impl Drop for Desktop {
             let _ = worker.join();
         }
     }
+}
+
+enum ProbeCompletion {
+    Single(u64, ProxyProbeTarget, ProxyProbeStatus),
+    Group {
+        epoch: u64,
+        run_id: u64,
+        url: url::Url,
+        index: usize,
+        target: ProxyProbeTarget,
+        status: ProxyProbeStatus,
+    },
 }
 
 fn run(
@@ -661,6 +758,7 @@ fn run(
                     s.engine = EngineStatus::Starting;
                     s.probe_epoch = generation;
                     s.probes = ProxyProbeResults::default();
+                    s.group_probe = None;
                     s.profile = Some(path.clone());
                     s.diagnostics.clear();
                     s.action_error = None;
@@ -702,6 +800,7 @@ fn run(
                     s.provider_error = None;
                     s.probe_epoch = generation;
                     s.probes = ProxyProbeResults::default();
+                    s.group_probe = None;
                 });
                 let path = input.key();
                 let Some(active) = &session else {
@@ -758,6 +857,7 @@ fn run(
                 }
             }
             Ok(Command::SetMode(mode)) => {
+                change(snapshot, |s| s.group_probe = None);
                 if let Some(active) = &session {
                     let result = active.controller.set_mode(mode);
                     let actual = if result.is_ok() && !cancelled() {
@@ -830,19 +930,22 @@ fn run(
                     && epoch == generation
                     && !probe_inflight
                 {
-                    let resolved = snapshot
-                        .lock()
-                        .expect("snapshot poisoned")
+                    let mut s = snapshot.lock().expect("snapshot poisoned");
+                    let resolved = s
                         .inventory
                         .as_ref()
                         .and_then(|inventory| unique_proxy(inventory, &target.name));
-                    if resolved != Some(target.origin.clone()) {
+                    if s.group_probe.as_ref().is_some_and(|g| g.active)
+                        || cancelled()
+                        || resolved != Some(target.origin.clone())
+                    {
                         continue;
                     }
                     let controller = active.controller.clone();
                     let tx = probe_tx.clone();
                     let requested = target.clone();
-                    change(snapshot, |s| s.probes.begin(url.clone(), target.clone()));
+                    s.probes.begin(url.clone(), target.clone());
+                    s.probe_busy = true;
                     probe_inflight = true;
                     if thread::Builder::new()
                         .name("paw-proxy-probe".into())
@@ -852,15 +955,15 @@ fn run(
                                 .ok()
                                 .filter(|ms| *ms > 0)
                                 .map_or(ProxyProbeStatus::Unavailable, ProxyProbeStatus::Measured);
-                            let _ = tx.send((epoch, requested, status));
+                            let _ = tx.send(ProbeCompletion::Single(epoch, requested, status));
                         })
                         .is_err()
                     {
                         probe_inflight = false;
-                        change(snapshot, |s| {
-                            s.probes.finish(target, ProxyProbeStatus::Unavailable)
-                        });
+                        s.probe_busy = false;
+                        s.probes.finish(target, ProxyProbeStatus::Unavailable);
                     }
+                    s.revision = s.revision.wrapping_add(1);
                 }
             }
             Ok(Command::ReadRules) => {
@@ -897,10 +1000,102 @@ fn run(
             next_sample = Instant::now();
         }
 
-        while let Ok((epoch, target, status)) = probe_rx.try_recv() {
+        while let Ok(completion) = probe_rx.try_recv() {
             probe_inflight = false;
-            change(snapshot, |s| finish_proxy_probe(s, epoch, target, status));
+            change(snapshot, |s| {
+                s.probe_busy = false;
+                match completion {
+                    ProbeCompletion::Single(epoch, target, status) => {
+                        finish_proxy_probe(s, epoch, target, status)
+                    }
+                    ProbeCompletion::Group {
+                        epoch,
+                        run_id,
+                        url,
+                        index,
+                        target,
+                        status,
+                    } => {
+                        finish_group_probe(s, epoch, run_id, &url, index, &target, status);
+                    }
+                }
+            });
             next_sample = Instant::now();
+        }
+
+        // The lock is held through the dispatch decision and thread creation. URL,
+        // mode and session invalidation use the same lock and prevent later dispatches.
+        if let Some(active) = &session
+            && !probe_inflight
+            && !cancelled()
+        {
+            let mut s = snapshot.lock().expect("snapshot poisoned");
+            let next = s.group_probe.as_ref().filter(|g| g.active).and_then(|g| {
+                g.results
+                    .rows
+                    .iter()
+                    .position(|(_, status)| status.is_none())
+                    .map(|index| (index, g.results.rows[index].0.clone()))
+            });
+            if let Some((index, target)) = next {
+                let valid = !cancelled()
+                    && s.group_probe
+                        .as_ref()
+                        .is_some_and(|g| g.valid_target(&s, index, &target));
+                if !valid {
+                    if let Some(g) = &mut s.group_probe {
+                        g.active = false;
+                        g.interrupted = true;
+                    }
+                } else {
+                    let g = s.group_probe.as_mut().unwrap();
+                    let (epoch, run_id, url) =
+                        (g.results.epoch, g.results.run_id, g.results.url.clone());
+                    if g.results.begin(index) {
+                        let controller = active.controller.clone();
+                        let tx = probe_tx.clone();
+                        let requested = target.clone();
+                        let request_url = url.clone();
+                        if thread::Builder::new()
+                            .name("paw-group-probe".into())
+                            .spawn(move || {
+                                let status = controller
+                                    .delay(&requested.origin, &requested.name, &request_url)
+                                    .ok()
+                                    .filter(|ms| *ms > 0)
+                                    .map_or(
+                                        ProxyProbeStatus::Unavailable,
+                                        ProxyProbeStatus::Measured,
+                                    );
+                                let _ = tx.send(ProbeCompletion::Group {
+                                    epoch,
+                                    run_id,
+                                    url: request_url,
+                                    index,
+                                    target: requested,
+                                    status,
+                                });
+                            })
+                            .is_ok()
+                        {
+                            probe_inflight = true;
+                            s.probe_busy = true;
+                        } else {
+                            let g = s.group_probe.as_mut().unwrap();
+                            g.results.finish(
+                                epoch,
+                                run_id,
+                                index,
+                                &target,
+                                ProxyProbeStatus::Unavailable,
+                            );
+                            g.active = false;
+                            g.interrupted = true;
+                        }
+                    }
+                }
+                s.revision = s.revision.wrapping_add(1);
+            }
         }
 
         if let Some(active) = &session
@@ -958,6 +1153,46 @@ fn finish_provider_refresh(
     });
 }
 
+fn interrupt_group_probe(s: &mut Snapshot) {
+    if let Some(g) = &mut s.group_probe
+        && g.active
+    {
+        g.active = false;
+        g.interrupted = true;
+    }
+}
+
+fn finish_group_probe(
+    s: &mut Snapshot,
+    epoch: u64,
+    run_id: u64,
+    url: &url::Url,
+    index: usize,
+    target: &ProxyProbeTarget,
+    status: ProxyProbeStatus,
+) {
+    let valid = s.group_probe.as_ref().is_some_and(|g| {
+        g.results.epoch == epoch
+            && g.results.run_id == run_id
+            && &g.results.url == url
+            && g.valid_target(s, index, target)
+    });
+    if valid {
+        let g = s.group_probe.as_mut().unwrap();
+        if g.results.finish(epoch, run_id, index, target, status)
+            && g.results.rows.iter().all(|(_, status)| status.is_some())
+        {
+            g.active = false;
+        }
+    } else if let Some(g) = &mut s.group_probe
+        && g.results.run_id == run_id
+        && g.active
+    {
+        g.active = false;
+        g.interrupted = true;
+    }
+}
+
 fn finish_proxy_probe(
     snapshot: &mut Snapshot,
     epoch: u64,
@@ -973,6 +1208,7 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64) {
     change(snapshot, |s| {
         s.probe_epoch = generation;
         s.probes = ProxyProbeResults::default();
+        s.group_probe = None;
         s.inventory = None;
         s.refreshing_provider = None;
         s.provider_error = None;
@@ -1134,6 +1370,97 @@ mod tests {
         assert_eq!(results.url, url);
         assert_eq!(results.rows()[0].1, Some(ProxyProbeStatus::Measured(10)));
         assert_eq!(results.rows()[1].1, Some(ProxyProbeStatus::Unavailable));
+    }
+
+    #[test]
+    fn comparison_fixture_rejects_stale_context_and_completes_sequentially() {
+        use crate::engine::controller::{Node, Proxy};
+        let a = ProxyProbeTarget {
+            name: "a".into(),
+            origin: Origin::Provider("provider".into()),
+        };
+        let b = ProxyProbeTarget {
+            name: "b".into(),
+            origin: Origin::Local,
+        };
+        let url = parse_probe_url("https://example.invalid/check").unwrap();
+        let mut inventory = Inventory::default();
+        for target in [&a, &b] {
+            inventory.nodes.push(Node {
+                name: target.name.clone(),
+                origin: target.origin.clone(),
+                proxy: Proxy::default(),
+            });
+        }
+        let mut s = Snapshot {
+            probe_epoch: 7,
+            group_run_id: 42,
+            mode: Some(RoutingMode::Rule),
+            inventory: Some(Arc::new(inventory)),
+            ..Default::default()
+        };
+        let results =
+            GroupProbeResults::new(7, 42, url.clone(), vec![a.clone(), b.clone()]).unwrap();
+        s.group_probe = Some(GroupComparison {
+            group: "group".into(),
+            results,
+            active: true,
+            interrupted: false,
+            mode: s.mode,
+        });
+        assert!(s.group_probe.as_ref().unwrap().valid_target(&s, 0, &a));
+        assert!(s.group_probe.as_mut().unwrap().results.begin(0));
+        finish_group_probe(&mut s, 7, 41, &url, 0, &a, ProxyProbeStatus::Measured(1));
+        assert!(s.group_probe.as_ref().unwrap().active);
+        finish_group_probe(&mut s, 7, 42, &url, 0, &a, ProxyProbeStatus::Measured(15));
+        assert!(s.group_probe.as_mut().unwrap().results.begin(1));
+        finish_group_probe(&mut s, 7, 42, &url, 1, &b, ProxyProbeStatus::Unavailable);
+        let g = s.group_probe.as_ref().unwrap();
+        assert!(!g.active && !g.interrupted);
+        assert_eq!(g.results.rows()[0].1, Some(ProxyProbeStatus::Measured(15)));
+        assert_eq!(g.results.rows()[1].1, Some(ProxyProbeStatus::Unavailable));
+
+        for change in 0..5 {
+            let results = GroupProbeResults::new(7, 43, url.clone(), vec![a.clone()]).unwrap();
+            s.group_probe = Some(GroupComparison {
+                group: "group".into(),
+                results,
+                active: true,
+                interrupted: false,
+                mode: Some(RoutingMode::Rule),
+            });
+            s.probe_epoch = 7;
+            s.group_run_id = 43;
+            s.mode = Some(RoutingMode::Rule);
+            let mut inventory = Inventory::default();
+            inventory.nodes.push(Node {
+                name: a.name.clone(),
+                origin: a.origin.clone(),
+                proxy: Proxy::default(),
+            });
+            s.inventory = Some(Arc::new(inventory));
+            assert!(s.group_probe.as_mut().unwrap().results.begin(0));
+            let mut completion_url = url.clone();
+            match change {
+                0 => interrupt_group_probe(&mut s),
+                1 => s.probe_epoch += 1,
+                2 => s.mode = Some(RoutingMode::Direct),
+                3 => Arc::make_mut(s.inventory.as_mut().unwrap()).nodes[0].origin = Origin::Local,
+                _ => completion_url = parse_probe_url("https://example.invalid/other").unwrap(),
+            }
+            finish_group_probe(
+                &mut s,
+                7,
+                43,
+                &completion_url,
+                0,
+                &a,
+                ProxyProbeStatus::Measured(99),
+            );
+            let g = s.group_probe.as_ref().unwrap();
+            assert!(!g.active && g.interrupted);
+            assert_eq!(g.results.rows()[0].1, Some(ProxyProbeStatus::Running));
+        }
     }
 
     #[test]

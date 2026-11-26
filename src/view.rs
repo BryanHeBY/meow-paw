@@ -138,6 +138,18 @@ fn subscribe_search(search: &Entity<InputState>, cx: &mut Context<Paw>) -> Subsc
     })
 }
 
+fn subscribe_probe_url(input: &Entity<InputState>, cx: &mut Context<Paw>) -> Subscription {
+    cx.subscribe(input, |paw: &mut Paw, _, event, cx| {
+        if matches!(event, InputEvent::Change) {
+            #[cfg(any(target_os = "linux", windows))]
+            if let Some(desktop) = &paw.desktop {
+                desktop.invalidate_group_probe();
+            }
+            cx.notify();
+        }
+    })
+}
+
 pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let query = paw.read(cx).search.read(cx).value();
     let search = cx.new(|cx| InputState::new(window, cx).default_value(query));
@@ -146,7 +158,7 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let query = paw.read(cx).probe_url.read(cx).value();
     let probe_url = cx.new(|cx| InputState::new(window, cx).default_value(query));
     paw.update(cx, |state, cx| {
-        state._probe_url_changes = subscribe_search(&probe_url, cx);
+        state._probe_url_changes = subscribe_probe_url(&probe_url, cx);
         state.probe_url = probe_url;
         state._search_changes = subscribe_search(&search, cx);
         state.search = search;
@@ -169,7 +181,7 @@ pub fn open(
     let connection_filter = cx.new(|cx| InputState::new(window, cx));
     let probe_url = cx.new(|cx| InputState::new(window, cx));
     cx.new(|cx| {
-        let probe_url_changes = subscribe_search(&probe_url, cx);
+        let probe_url_changes = subscribe_probe_url(&probe_url, cx);
         let search_changes = subscribe_search(&search, cx);
         let connection_filter_changes = subscribe_search(&connection_filter, cx);
         let (subscription_paths, subscription_notice) = preferences
@@ -1281,7 +1293,8 @@ impl Paw {
                     .and_modify(|origin| *origin = None)
                     .or_insert(Some(&node.origin));
             }
-            let probe_busy = self.snapshot.probes.is_running();
+            let probe_busy = self.snapshot.probe_busy
+                || self.snapshot.group_probe.as_ref().is_some_and(|g| g.active);
             let epoch = self.snapshot.probe_epoch;
             let groups = mode_groups(inventory, self.snapshot.mode)
                 .into_iter()
@@ -1392,10 +1405,138 @@ impl Paw {
                                     );
                                 }
                                 let group_name = name.clone();
+                                let comparison = self.snapshot.group_probe.as_ref().filter(|g| {
+                                    g.group == *name && probe_url.as_ref() == Some(g.results.url())
+                                });
+                                let running = comparison.is_some_and(|g| g.active);
+                                let compare_name = name.clone();
+                                let labels = match self.locale {
+                                    Locale::En => (
+                                        "Compare nodes",
+                                        "Cancel comparison",
+                                        "Probe busy",
+                                        "Waiting",
+                                        "Testing…",
+                                        "Unavailable",
+                                        "Interrupted",
+                                        "Complete",
+                                    ),
+                                    Locale::ZhCn => (
+                                        "比较节点",
+                                        "取消比较",
+                                        "测试进行中",
+                                        "等待中",
+                                        "测试中…",
+                                        "不可用",
+                                        "已中断",
+                                        "已完成",
+                                    ),
+                                };
+                                let compare_button = secondary_button(
+                                    SharedString::from(format!("group-compare:{name}")),
+                                    if running {
+                                        labels.1
+                                    } else if probe_busy {
+                                        labels.2
+                                    } else {
+                                        labels.0
+                                    },
+                                )
+                                .when(
+                                    running || (probe_ready && !probe_busy),
+                                    |button| {
+                                        button.on_click(cx.listener(move |paw, _, _, cx| {
+                                            if let Some(desktop) = &paw.desktop {
+                                                if running {
+                                                    desktop.cancel_group_probe();
+                                                } else {
+                                                    let value = paw.probe_url.read(cx).value();
+                                                    paw.error = desktop
+                                                        .compare_group(epoch, &compare_name, &value)
+                                                        .err()
+                                                        .map(|e| e.to_string());
+                                                }
+                                            }
+                                            cx.notify();
+                                        }))
+                                    },
+                                );
+                                let comparison_panel = div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(compare_button)
+                                            .when_some(comparison, |row, g| {
+                                                let done = g
+                                                    .results
+                                                    .rows()
+                                                    .iter()
+                                                    .filter(|(_, status)| {
+                                                        matches!(
+                                                            status,
+                                                            Some(
+                                                                ProxyProbeStatus::Measured(_)
+                                                                    | ProxyProbeStatus::Unavailable
+                                                            )
+                                                        )
+                                                    })
+                                                    .count();
+                                                row.child(
+                                                    div().text_xs().text_color(rgb(FAINT)).child(
+                                                        format!(
+                                                            "{done}/{} · {}",
+                                                            g.results.rows().len(),
+                                                            if g.interrupted {
+                                                                labels.6
+                                                            } else if g.active {
+                                                                labels.4
+                                                            } else {
+                                                                labels.7
+                                                            }
+                                                        ),
+                                                    ),
+                                                )
+                                            }),
+                                    )
+                                    .when_some(comparison, |panel, g| {
+                                        panel.children(g.results.rows().iter().map(
+                                            |(target, status)| {
+                                                let text = match status {
+                                                    Some(ProxyProbeStatus::Measured(ms)) => {
+                                                        format!("{ms} ms")
+                                                    }
+                                                    Some(ProxyProbeStatus::Unavailable) => {
+                                                        labels.5.to_owned()
+                                                    }
+                                                    Some(ProxyProbeStatus::Running) if g.active => {
+                                                        labels.4.to_owned()
+                                                    }
+                                                    _ if g.interrupted => labels.6.to_owned(),
+                                                    _ => labels.3.to_owned(),
+                                                };
+                                                div()
+                                                    .flex()
+                                                    .flex_wrap()
+                                                    .justify_between()
+                                                    .gap_1()
+                                                    .text_xs()
+                                                    .text_color(rgb(FAINT))
+                                                    .child(target.name.clone())
+                                                    .child(text)
+                                            },
+                                        ))
+                                    });
                                 let candidates = div()
                                     .flex()
                                     .flex_col()
                                     .gap_2()
+                                    .child(comparison_panel)
                                     .child(
                                         div().flex().justify_end().child(
                                             secondary_button(
@@ -1727,7 +1868,11 @@ impl Paw {
                         .text_color(rgb(FAINT))
                         .child(self.locale.message(Message::LatencyTestDescription)),
                 )
-                .child(Input::new(&self.probe_url).cleanable(true));
+                .child(Input::new(&self.probe_url).cleanable(true))
+                .child(div().text_xs().text_color(rgb(FAINT)).child(match self.locale {
+                    Locale::En => "Comparison is opt-in and tests each eligible node once; unknown or ambiguous nodes are omitted. Node health probes may change an automatic route’s effective choice.",
+                    Locale::ZhCn => "比较需手动启动，每个符合条件的节点测试一次；未知或有歧义的节点会被跳过。节点健康检测可能改变自动路由的实际选择。",
+                }));
             let page = div()
                 .flex()
                 .flex_col()
