@@ -1,6 +1,7 @@
 use gpui_kit::{
     AnyWindowHandle, App, Application, Bounds, QuitMode, WindowBounds, WindowOptions, px, size,
 };
+use meow_paw::i18n::{Locale, Message, system_locale};
 use std::path::PathBuf;
 use std::{cell::Cell, rc::Rc, time::Duration};
 
@@ -16,6 +17,7 @@ fn main() {
     let mut start = false;
     let mut remember = true;
     let mut use_tray = true;
+    let mut locale_override = None;
     #[cfg(feature = "visual-test")]
     let mut screenshot = None;
     while let Some(arg) = args.next() {
@@ -26,6 +28,16 @@ fn main() {
                     page = view::Page::from_name(&name.to_string_lossy()).unwrap_or(page);
                 }
             }
+            Some("--locale") => {
+                let value = args.next().filter(|value| {
+                    !value.is_empty() && !value.to_string_lossy().starts_with("--")
+                });
+                let Some(value) = value else {
+                    eprintln!("--locale requires a locale value");
+                    std::process::exit(2);
+                };
+                locale_override = Some(value.to_string_lossy().into_owned());
+            }
             Some("--start") => start = true,
             Some("--no-tray") => use_tray = false,
             Some("--no-preferences") => remember = false,
@@ -33,12 +45,13 @@ fn main() {
             Some("--screenshot") => screenshot = args.next().map(PathBuf::from),
             _ => {
                 eprintln!(
-                    "Usage: meow-paw [--profile FILE] [--start] [--page PAGE] [--no-preferences] [--no-tray]"
+                    "Usage: meow-paw [--profile FILE] [--start] [--page PAGE] [--locale LOCALE] [--no-preferences] [--no-tray]"
                 );
                 std::process::exit(2);
             }
         }
     }
+    let locale = Locale::select(locale_override.as_deref(), system_locale().as_deref());
     let binary = std::env::var_os("MEOW_BIN").map(PathBuf::from);
     #[cfg(feature = "visual-test")]
     if screenshot.is_some() {
@@ -52,13 +65,21 @@ fn main() {
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         let (_handle, paw) = gpui_kit::open_window(window_options(cx), cx, move |window, cx| {
-            window.set_window_title("Meow Paw");
-            view::open(binary, profile, page, start, (prefs, warning), window, cx)
+            window.set_window_title(locale.message(Message::AppTitle));
+            view::open(
+                binary,
+                profile,
+                (page, locale),
+                start,
+                (prefs, warning),
+                window,
+                cx,
+            )
         })
         .expect("could not open Meow Paw");
         cx.activate(true);
         if use_tray {
-            retain_when_tray_is_ready(_handle, paw, cx);
+            retain_when_tray_is_ready(_handle, paw, locale, cx);
         }
         #[cfg(feature = "visual-test")]
         if let Some(path) = screenshot {
@@ -105,6 +126,7 @@ fn window_options(cx: &mut App) -> WindowOptions {
 fn retain_when_tray_is_ready(
     initial: AnyWindowHandle,
     paw: gpui_kit::Entity<view::Paw>,
+    locale: Locale,
     cx: &mut App,
 ) {
     let signals = tray::start();
@@ -137,7 +159,7 @@ fn retain_when_tray_is_ready(
                     });
                     if !activated {
                         let result = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
-                            window.set_window_title("Meow Paw");
+                            window.set_window_title(locale.message(Message::AppTitle));
                             view::rebind_window(&paw, window, cx);
                             paw.clone()
                         });

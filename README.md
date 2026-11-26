@@ -25,3 +25,21 @@ kernel executable and run:
 ```sh
 cargo test --locked --test managed_meow -- --ignored
 ```
+
+## Language
+
+The shell currently supports English and Simplified Chinese (`zh-CN`). Use
+`--locale zh-CN` or `--locale en` to override the launch locale, for example
+`meow-paw --locale zh-CN --page proxies`. The override is temporary and does
+not change saved preferences. Page identifiers for `--page` remain English:
+`home` (also `overview`), `proxies`, `profiles`, `connections`, `rules`,
+`logs`, `unlock`, and `settings`.
+
+Without an override, Linux uses the first nonempty `LC_ALL`, `LC_MESSAGES`, or
+`LANG` value, in that order. Windows uses the user's regional locale. Locale
+names such as `zh_CN.UTF-8` and `zh-Hans-CN` are recognized; missing or
+unsupported values fall back to English. A present but unsupported override
+also falls back to English. The shell relies on native font fallback for CJK
+glyphs, so a suitable system font must be installed. This first slice covers
+navigation and shell controls; page content is still being localized. Persistent
+language selection in Settings is a separate future step.

@@ -2,6 +2,7 @@ use crate::preferences::Preferences;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use meow_paw::i18n::{Locale, Message};
 use meow_paw::subscription;
 use meow_paw::subscription_store::{RefreshPolicy, SubscriptionId, SubscriptionStore};
 use std::path::PathBuf;
@@ -50,9 +51,9 @@ impl Page {
         }
         Self::ALL
             .into_iter()
-            .find(|p| p.title().eq_ignore_ascii_case(name))
+            .find(|p| p.cli_name().eq_ignore_ascii_case(name))
     }
-    fn title(self) -> &'static str {
+    fn cli_name(self) -> &'static str {
         match self {
             Self::Overview => "Home",
             Self::Proxies => "Proxies",
@@ -62,6 +63,18 @@ impl Page {
             Self::Logs => "Logs",
             Self::Unlock => "Unlock",
             Self::Settings => "Settings",
+        }
+    }
+    fn message(self) -> Message {
+        match self {
+            Self::Overview => Message::Home,
+            Self::Proxies => Message::Proxies,
+            Self::Profiles => Message::Profiles,
+            Self::Connections => Message::Connections,
+            Self::Rules => Message::Rules,
+            Self::Logs => Message::Logs,
+            Self::Unlock => Message::Unlock,
+            Self::Settings => Message::Settings,
         }
     }
     fn icon(self) -> &'static str {
@@ -89,6 +102,7 @@ fn subscription_paths(dir: PathBuf) -> std::io::Result<Vec<PathBuf>> {
 
 pub struct Paw {
     page: Page,
+    locale: Locale,
     profile: Option<PathBuf>,
     binary: Option<PathBuf>,
     error: Option<String>,
@@ -145,7 +159,7 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
 pub fn open(
     binary: Option<PathBuf>,
     profile: Option<PathBuf>,
-    page: Page,
+    (page, locale): (Page, Locale),
     start: bool,
     (preferences, warning): (Preferences, Option<&str>),
     window: &mut Window,
@@ -167,6 +181,7 @@ pub fn open(
             });
         let mut paw = Paw {
             page,
+            locale,
             profile,
             #[cfg(any(target_os = "linux", windows))]
             desktop: binary
@@ -325,7 +340,7 @@ impl Paw {
                             div()
                                 .text_xl()
                                 .font_weight(FontWeight::BOLD)
-                                .child("Meow Paw"),
+                                .child(self.locale.message(Message::AppTitle)),
                         )
                     }),
             )
@@ -335,7 +350,7 @@ impl Paw {
                     .min_h_0()
                     .flex_1()
                     .overflow_y_scroll()
-                    .children(Self::pages(self.page, compact, cx)),
+                    .children(Self::pages(self.page, self.locale, compact, cx)),
             )
             .when(!compact, |bar| {
                 bar.child(
@@ -347,13 +362,13 @@ impl Paw {
                         .text_xs()
                         .child(sidebar_rate(
                             "icons/arrow-up-right.svg",
-                            "Upload",
+                            self.locale.message(Message::Upload),
                             up,
                             STREAM_UP,
                         ))
                         .child(sidebar_rate(
                             "icons/arrow-down-left.svg",
-                            "Download",
+                            self.locale.message(Message::Download),
                             down,
                             STREAM_DOWN,
                         )),
@@ -361,12 +376,18 @@ impl Paw {
             })
     }
 
-    fn pages(active: Page, compact: bool, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+    fn pages(
+        active: Page,
+        locale: Locale,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<Stateful<Div>> {
         Page::ALL
             .into_iter()
             .enumerate()
             .map(|(index, page)| {
                 let on = active == page;
+                let label = locale.message(page.message());
                 div()
                     .id(("paw-nav", index))
                     .flex()
@@ -390,12 +411,17 @@ impl Paw {
                     }))
                     .child(line_icon(page.icon(), if on { BLUE } else { FAINT }, 18.))
                     .when(!compact, |row| {
-                        row.child(div().font_weight(FontWeight::SEMIBOLD).child(page.title()))
+                        row.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(label),
+                        )
                     })
                     .when(compact, |el| {
                         el.tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(page.title())
-                                .build(window, cx)
+                            gpui_kit::component::tooltip::Tooltip::new(label).build(window, cx)
                         })
                     })
             })
@@ -416,17 +442,17 @@ impl Paw {
             .bg(rgb(if enabled { BLUE } else { LINE }))
             .text_color(rgb(if enabled { 0xffffff } else { FAINT }))
             .font_weight(FontWeight::SEMIBOLD)
-            .child(if running {
-                "Stop session"
+            .child(self.locale.message(if running {
+                Message::StopSession
             } else if phase == "Stopping" {
-                "Stopping…"
+                Message::Stopping
             } else if supported && !ready {
-                "Choose engine"
+                Message::ChooseEngine
             } else if supported && self.profile.is_none() {
-                "Choose profile"
+                Message::ChooseProfile
             } else {
-                "Start session"
-            })
+                Message::StartSession
+            }))
             .when(enabled, |e| {
                 e.cursor_pointer()
                     .hover(|style| style.bg(rgb(0x1149ae)))
@@ -474,7 +500,11 @@ impl Paw {
                                     .when(index != 0, |el| {
                                         el.border_l_1().border_color(rgb(0x9eb9ee))
                                     })
-                                    .child(mode.label())
+                                    .child(self.locale.message(match mode {
+                                        RoutingMode::Rule => Message::ModeRule,
+                                        RoutingMode::Global => Message::ModeGlobal,
+                                        RoutingMode::Direct => Message::ModeDirect,
+                                    }))
                                     .when(!selected, |el| {
                                         el.cursor_pointer()
                                             .hover(|s| s.bg(rgb(SOFT_BLUE)))
@@ -680,12 +710,12 @@ impl Paw {
             .child(form_row(
                 "Proxy groups",
                 "Selected routes",
-                secondary_button("home-proxies", "Proxies").on_click(cx.listener(
-                    |this, _, _, cx| {
+                secondary_button("home-proxies", self.locale.message(Message::Proxies)).on_click(
+                    cx.listener(|this, _, _, cx| {
                         this.page = Page::Proxies;
                         cx.notify();
-                    },
-                )),
+                    }),
+                ),
             ));
         let network = form_card("Network")
             .child(form_row("Meow engine", "Managed session", session_state))
@@ -724,16 +754,32 @@ impl Paw {
                             .items_center()
                             .justify_between()
                             .gap_3()
-                            .child(div().font_weight(FontWeight::BOLD).child("Traffic"))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(self.locale.message(Message::Traffic)),
+                            )
                             .child(usage_toggle),
                     )
                     .child(
                         div()
                             .flex()
                             .gap_3()
-                            .child(traffic_metric("Download", down, STREAM_DOWN))
-                            .child(traffic_metric("Upload", up, STREAM_UP))
-                            .child(traffic_metric("Session total", total, INK)),
+                            .child(traffic_metric(
+                                self.locale.message(Message::Download),
+                                down,
+                                STREAM_DOWN,
+                            ))
+                            .child(traffic_metric(
+                                self.locale.message(Message::Upload),
+                                up,
+                                STREAM_UP,
+                            ))
+                            .child(traffic_metric(
+                                self.locale.message(Message::SessionTotal),
+                                total,
+                                INK,
+                            )),
                     )
                     .child(self.traffic_chart(28.)),
             )
@@ -750,14 +796,20 @@ impl Paw {
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Traffic activity"),
+                            .child(self.locale.message(Message::TrafficActivity)),
                     )
                     .child(
                         div()
                             .flex()
                             .gap_4()
-                            .child(traffic_legend("Download", STREAM_DOWN))
-                            .child(traffic_legend("Upload", STREAM_UP)),
+                            .child(traffic_legend(
+                                self.locale.message(Message::Download),
+                                STREAM_DOWN,
+                            ))
+                            .child(traffic_legend(
+                                self.locale.message(Message::Upload),
+                                STREAM_UP,
+                            )),
                     ),
             )
             .child(self.traffic_chart(60.))
@@ -1967,7 +2019,7 @@ impl Render for Paw {
             Page::Rules => self.rules(cx),
             Page::Logs => self.logs(cx),
             Page::Unlock => empty_state(
-                "Unlock",
+                self.locale.message(Message::Unlock),
                 "Service availability tests are not available in this build.",
             ),
             Page::Settings => self.settings(window.viewport_size().width >= px(960.), cx),
@@ -1999,9 +2051,11 @@ impl Render for Paw {
                             .gap_2()
                             .child(
                                 div()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_xl()
                                     .font_weight(FontWeight::BOLD)
-                                    .child(self.page.title()),
+                                    .child(self.locale.message(self.page.message())),
                             )
                             .child(if self.page == Page::Proxies {
                                 self.proxy_header(cx)
@@ -2636,8 +2690,9 @@ mod tests {
         assert_eq!(Page::ALL.len(), 8);
         assert!(Page::from_name("Overview") == Some(Page::Overview));
         for expected in Page::ALL {
-            assert!(Page::from_name(expected.title()) == Some(expected));
+            assert!(Page::from_name(expected.cli_name()) == Some(expected));
         }
+        assert!(Page::from_name("首页").is_none());
         assert!(Page::from_name("not-a-page").is_none());
     }
 }
