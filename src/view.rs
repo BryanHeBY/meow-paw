@@ -106,6 +106,18 @@ fn subscription_error(locale: Locale, error: subscription::DownloadError) -> Str
     locale.message(message).to_owned()
 }
 
+// Mirrors the subscription downloader's URL policy for feedback before starting a job.
+// The downloader validates again before making a request.
+fn valid_subscription_url(input: &str) -> bool {
+    url::Url::parse(input.trim()).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.has_host()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none()
+    })
+}
+
 fn subscription_paths(dir: PathBuf) -> std::io::Result<Vec<PathBuf>> {
     let store = SubscriptionStore::new(dir);
     Ok(store
@@ -128,6 +140,9 @@ pub struct Paw {
     subscription_paths: Vec<PathBuf>,
     subscription_busy: bool,
     subscription_notice: Option<Message>,
+    subscription_entry_open: bool,
+    subscription_url: Entity<InputState>,
+    _subscription_url_changes: Subscription,
     preference_warning: Option<String>,
     language_save_failed: bool,
     search: Entity<InputState>,
@@ -154,6 +169,17 @@ fn subscribe_search(search: &Entity<InputState>, cx: &mut Context<Paw>) -> Subsc
     })
 }
 
+fn subscribe_subscription_url(input: &Entity<InputState>, cx: &mut Context<Paw>) -> Subscription {
+    cx.subscribe(input, |paw: &mut Paw, _, event, cx| {
+        if matches!(event, InputEvent::Change) {
+            if paw.subscription_notice == Some(Message::InvalidSubscriptionUrl) {
+                paw.subscription_notice = None;
+            }
+            cx.notify();
+        }
+    })
+}
+
 fn subscribe_probe_url(input: &Entity<InputState>, cx: &mut Context<Paw>) -> Subscription {
     cx.subscribe(input, |paw: &mut Paw, _, event, cx| {
         if matches!(event, InputEvent::Change) {
@@ -173,7 +199,11 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let connection_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).probe_url.read(cx).value();
     let probe_url = cx.new(|cx| InputState::new(window, cx).default_value(query));
+    let query = paw.read(cx).subscription_url.read(cx).value();
+    let subscription_url = cx.new(|cx| InputState::new(window, cx).default_value(query));
     paw.update(cx, |state, cx| {
+        state._subscription_url_changes = subscribe_subscription_url(&subscription_url, cx);
+        state.subscription_url = subscription_url;
         state._probe_url_changes = subscribe_probe_url(&probe_url, cx);
         state.probe_url = probe_url;
         state._search_changes = subscribe_search(&search, cx);
@@ -196,7 +226,9 @@ pub fn open(
     let search = cx.new(|cx| InputState::new(window, cx));
     let connection_filter = cx.new(|cx| InputState::new(window, cx));
     let probe_url = cx.new(|cx| InputState::new(window, cx));
+    let subscription_url = cx.new(|cx| InputState::new(window, cx));
     cx.new(|cx| {
+        let subscription_url_changes = subscribe_subscription_url(&subscription_url, cx);
         let probe_url_changes = subscribe_probe_url(&probe_url, cx);
         let search_changes = subscribe_search(&search, cx);
         let connection_filter_changes = subscribe_search(&connection_filter, cx);
@@ -228,6 +260,9 @@ pub fn open(
             subscription_paths,
             subscription_busy: false,
             subscription_notice,
+            subscription_entry_open: false,
+            subscription_url,
+            _subscription_url_changes: subscription_url_changes,
             preference_warning: warning.map(str::to_owned),
             language_save_failed: false,
             search,
@@ -995,13 +1030,52 @@ impl Paw {
         }
         let mut page = div().flex().flex_col().gap_3().child(import);
         if self.preferences.subscription_dir().is_some() && !self.subscription_busy {
-            page = page.child(
-                secondary_button(
-                    "import-subscription",
-                    self.locale.message(Message::ImportSubscription),
-                )
-                .on_click(cx.listener(|paw, _, _, cx| paw.import_subscription(cx))),
-            );
+            if self.subscription_entry_open {
+                page = page.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(section_label(self.locale.message(Message::SubscriptionUrl)))
+                        .child(Input::new(&self.subscription_url).cleanable(true))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(
+                                    secondary_button(
+                                        "confirm-subscription",
+                                        self.locale.message(Message::ImportSubscription),
+                                    )
+                                    .on_click(cx.listener(
+                                        |paw, _, window, cx| paw.import_subscription(window, cx),
+                                    )),
+                                )
+                                .child(
+                                    secondary_button(
+                                        "cancel-subscription",
+                                        self.locale.message(Message::CancelSubscription),
+                                    )
+                                    .on_click(cx.listener(
+                                        |paw, _, window, cx| paw.cancel_subscription(window, cx),
+                                    )),
+                                ),
+                        ),
+                );
+            } else {
+                page = page.child(
+                    secondary_button(
+                        "import-subscription",
+                        self.locale.message(Message::AddSubscription),
+                    )
+                    .on_click(cx.listener(|paw, _, _, cx| {
+                        paw.subscription_entry_open = true;
+                        paw.subscription_notice = None;
+                        cx.notify();
+                    })),
+                );
+            }
         }
         if self.subscription_busy || self.subscription_notice.is_some() {
             page = page.child(div().text_sm().text_color(rgb(FAINT)).child(
@@ -1253,15 +1327,27 @@ impl Paw {
         Some((store, id))
     }
 
-    fn import_subscription(&mut self, cx: &mut Context<Self>) {
-        if self.subscription_busy {
+    fn cancel_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.subscription_url
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.subscription_entry_open = false;
+        self.subscription_notice = None;
+        cx.notify();
+    }
+
+    fn import_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.subscription_busy || self.preferences.subscription_dir().is_none() {
             return;
         }
-        let Some(url) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            self.subscription_notice = Some(Message::ClipboardSubscriptionRequired);
+        let url = self.subscription_url.read(cx).value().to_string();
+        if !valid_subscription_url(&url) {
+            self.subscription_notice = Some(Message::InvalidSubscriptionUrl);
             cx.notify();
             return;
-        };
+        }
+        self.subscription_url
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.subscription_entry_open = false;
         let locale = self.locale;
         self.subscription_job(cx, move |store| {
             let candidate =
@@ -2844,6 +2930,23 @@ fn paw_badge(size: f32) -> Div {
 #[cfg(test)]
 mod tests {
     use super::Page;
+
+    #[test]
+    fn subscription_url_preflight_matches_downloader_policy() {
+        use super::valid_subscription_url;
+        for url in [
+            "",
+            "http://example.invalid/?token=secret",
+            "https://user:secret@example.invalid/",
+            "https://example.invalid/#secret",
+            "not a url",
+        ] {
+            assert!(!valid_subscription_url(url));
+        }
+        assert!(valid_subscription_url(
+            " https://example.invalid/feed?token=secret "
+        ));
+    }
 
     #[test]
     #[cfg(any(target_os = "linux", windows))]

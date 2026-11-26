@@ -93,7 +93,10 @@ pub enum Message {
     NoProfileSelected,
     Subscription,
     ImportLocalYaml,
+    AddSubscription,
+    SubscriptionUrl,
     ImportSubscription,
+    CancelSubscription,
     DownloadingSubscription,
     LiveApplyWarning,
     ProfileSelectionDetail,
@@ -109,7 +112,6 @@ pub enum Message {
     Forget,
     LastStartDiagnostics,
     ChooseYaml,
-    ClipboardSubscriptionRequired,
     ListSubscriptionsFailed,
     SubscriptionSaved,
     SubscriptionRefreshed,
@@ -297,7 +299,10 @@ fn english(key: Message) -> &'static str {
         Message::NoProfileSelected => "No profile selected",
         Message::Subscription => "Subscription",
         Message::ImportLocalYaml => "Import local YAML",
-        Message::ImportSubscription => "Import HTTPS subscription from clipboard",
+        Message::AddSubscription => "Add HTTPS subscription",
+        Message::SubscriptionUrl => "HTTPS subscription URL",
+        Message::ImportSubscription => "Import subscription",
+        Message::CancelSubscription => "Cancel",
         Message::DownloadingSubscription => "Downloading subscription…",
         Message::ProfileSelectionDetail => {
             "Use selects the next session; Apply live changes the running profile."
@@ -321,16 +326,15 @@ fn english(key: Message) -> &'static str {
         Message::Forget => "Forget",
         Message::LastStartDiagnostics => "Diagnostics from the last start attempt",
         Message::ChooseYaml => "Choose Meow YAML",
-        Message::ClipboardSubscriptionRequired => {
-            "Copy an HTTPS subscription URL to the clipboard first."
-        }
         Message::ListSubscriptionsFailed => "Could not list saved subscriptions.",
         Message::SubscriptionSaved => "Subscription saved. Select Use or Apply live when ready.",
         Message::SubscriptionRefreshed => {
             "Subscription refreshed. The running profile is unchanged."
         }
         Message::ChooseExistingYaml => "Choose an existing local YAML file.",
-        Message::InvalidSubscriptionUrl => "Enter an HTTPS subscription URL without user info",
+        Message::InvalidSubscriptionUrl => {
+            "Enter an HTTPS subscription URL without user info or a fragment."
+        }
         Message::SubscriptionDownloadFailed => "Could not download the subscription",
         Message::SubscriptionTooLarge => "Subscription profile exceeds the size limit",
         Message::SubscriptionInvalidText => "Subscription did not return UTF-8 text",
@@ -456,7 +460,10 @@ fn chinese(key: Message) -> &'static str {
         Message::NoProfileSelected => "未选择配置",
         Message::Subscription => "订阅",
         Message::ImportLocalYaml => "导入本地 YAML",
-        Message::ImportSubscription => "从剪贴板导入 HTTPS 订阅",
+        Message::AddSubscription => "添加 HTTPS 订阅",
+        Message::SubscriptionUrl => "HTTPS 订阅地址",
+        Message::ImportSubscription => "导入订阅",
+        Message::CancelSubscription => "取消",
         Message::DownloadingSubscription => "正在下载订阅…",
         Message::ProfileSelectionDetail => {
             "使用会选择下次会话的配置；实时应用会更改正在运行的配置。"
@@ -474,12 +481,11 @@ fn chinese(key: Message) -> &'static str {
         Message::Forget => "移除",
         Message::LastStartDiagnostics => "上次启动尝试的诊断信息",
         Message::ChooseYaml => "选择 Meow YAML",
-        Message::ClipboardSubscriptionRequired => "请先将 HTTPS 订阅地址复制到剪贴板。",
         Message::ListSubscriptionsFailed => "无法列出已保存的订阅。",
         Message::SubscriptionSaved => "订阅已保存。准备就绪后请选择使用或实时应用。",
         Message::SubscriptionRefreshed => "订阅已刷新。正在运行的配置未更改。",
         Message::ChooseExistingYaml => "请选择存在的本地 YAML 文件。",
-        Message::InvalidSubscriptionUrl => "请输入不含用户信息的 HTTPS 订阅地址",
+        Message::InvalidSubscriptionUrl => "请输入不含用户信息或片段的 HTTPS 订阅地址。",
         Message::SubscriptionDownloadFailed => "无法下载订阅",
         Message::SubscriptionTooLarge => "订阅配置超过大小限制",
         Message::SubscriptionInvalidText => "订阅返回的内容不是 UTF-8 文本",
@@ -725,10 +731,21 @@ mod tests {
                 "导入本地 YAML",
             ),
             (
-                Message::ImportSubscription,
-                "Import HTTPS subscription from clipboard",
-                "从剪贴板导入 HTTPS 订阅",
+                Message::AddSubscription,
+                "Add HTTPS subscription",
+                "添加 HTTPS 订阅",
             ),
+            (
+                Message::SubscriptionUrl,
+                "HTTPS subscription URL",
+                "HTTPS 订阅地址",
+            ),
+            (
+                Message::ImportSubscription,
+                "Import subscription",
+                "导入订阅",
+            ),
+            (Message::CancelSubscription, "Cancel", "取消"),
             (
                 Message::DownloadingSubscription,
                 "Downloading subscription…",
@@ -773,11 +790,6 @@ mod tests {
             ),
             (Message::ChooseYaml, "Choose Meow YAML", "选择 Meow YAML"),
             (
-                Message::ClipboardSubscriptionRequired,
-                "Copy an HTTPS subscription URL to the clipboard first.",
-                "请先将 HTTPS 订阅地址复制到剪贴板。",
-            ),
-            (
                 Message::ListSubscriptionsFailed,
                 "Could not list saved subscriptions.",
                 "无法列出已保存的订阅。",
@@ -799,8 +811,8 @@ mod tests {
             ),
             (
                 Message::InvalidSubscriptionUrl,
-                "Enter an HTTPS subscription URL without user info",
-                "请输入不含用户信息的 HTTPS 订阅地址",
+                "Enter an HTTPS subscription URL without user info or a fragment.",
+                "请输入不含用户信息或片段的 HTTPS 订阅地址。",
             ),
             (
                 Message::SubscriptionDownloadFailed,
