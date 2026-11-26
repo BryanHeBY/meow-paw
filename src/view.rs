@@ -1384,7 +1384,45 @@ impl Paw {
                         .child(Input::new(&self.search).cleanable(true)),
                 )
                 .child(chip(format!("{count} groups"), BLUE, SOFT_BLUE));
-            let page = div().flex().flex_col().gap_3().child(toolbar);
+            let providers = inventory.providers.iter().map(|(name, status)| {
+                let label = name.clone();
+                let pending = self.snapshot.refreshing_provider.as_deref() == Some(name.as_str());
+                let busy = self.snapshot.refreshing_provider.is_some();
+                let count = inventory.nodes.iter().filter(|node|
+                    matches!(&node.origin, meow_paw::engine::controller::Origin::Provider(origin) if origin == name)
+                ).count();
+                let usage = status.subscription_info.as_ref().map(|usage| {
+                    format!("↑ {}  ↓ {}  / {}", bytes(usage.upload), bytes(usage.download), bytes(usage.total))
+                }).unwrap_or_else(|| "No usage information".into());
+                let updated = status.updated_at.clone().unwrap_or_else(|| "Awaiting first update".into());
+                card().flex().items_center().justify_between().gap_3()
+                    .child(div().min_w_0().child(div().font_weight(FontWeight::BOLD).child(name.clone()))
+                        .child(div().text_sm().text_color(rgb(FAINT))
+                            .child(format!("{} · {} nodes · {}", status.vehicle_type, count, updated)))
+                        .child(div().text_sm().text_color(rgb(FAINT)).child(usage)))
+                    .when(status.vehicle_type.eq_ignore_ascii_case("http"), |row| {
+                        row.child(secondary_button(SharedString::from(format!("provider-refresh:{label}")),
+                            if pending { "Refreshing…" } else if busy { "Refresh busy" } else { "Refresh" })
+                            .when(!busy, |button| button.on_click(cx.listener(move |paw, _, _, cx| {
+                                paw.error = paw.desktop.as_ref().and_then(|desktop|
+                                    desktop.refresh_provider(label.clone()).err().map(|e| e.to_string()));
+                                cx.notify();
+                            }))))
+                    })
+            }).collect::<Vec<_>>();
+            let page = div().flex().flex_col().gap_3().child(toolbar).when(
+                !providers.is_empty(),
+                |page| {
+                    page.child(
+                        div()
+                            .mt_2()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Providers"),
+                    )
+                    .children(providers)
+                },
+            );
             return if groups.is_empty() {
                 page.child(empty_state(
                     "No matching groups",

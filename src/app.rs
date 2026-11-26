@@ -96,6 +96,7 @@ pub struct Snapshot {
     pub connections: Option<Arc<Vec<Connection>>>,
     pub last_update: Option<Instant>,
     pub action_error: Option<String>,
+    pub refreshing_provider: Option<String>,
 }
 
 const LOG_CAPACITY: usize = 256;
@@ -205,6 +206,7 @@ enum Command {
     Select { group: String, member: String },
     SetMode(RoutingMode),
     ReadRules,
+    RefreshProvider(String),
     CloseConnection(String),
 }
 
@@ -278,6 +280,10 @@ impl Desktop {
         self.send(Command::SetMode(mode))
     }
 
+    pub fn refresh_provider(&self, name: String) -> io::Result<()> {
+        self.send(Command::RefreshProvider(name))
+    }
+
     pub fn read_rules(&self) -> io::Result<()> {
         self.send(Command::ReadRules)
     }
@@ -321,12 +327,17 @@ fn run(
     let mut logs = None;
     let mut session: Option<Session> = None;
     let mut next_sample = Instant::now();
+    // Do not block Stop/Quit on a slow remote provider fetch.
+    let (refresh_tx, refresh_rx) = mpsc::channel();
+    let mut generation = 0_u64;
+    let mut refresh_inflight = false;
     let cancelled = || stop.load(Ordering::Acquire) || quit.load(Ordering::Acquire);
     loop {
         if quit.load(Ordering::Acquire) {
             break;
         }
         if stop.swap(false, Ordering::AcqRel) {
+            generation = generation.wrapping_add(1);
             // Retire already queued actions from the old session.
             while receiver.try_recv().is_ok() {}
             if let Some(active) = session.take() {
@@ -350,6 +361,7 @@ fn run(
             match active.status() {
                 Ok(None) => {}
                 Ok(Some(code)) => {
+                    generation = generation.wrapping_add(1);
                     session.take();
                     logs.take();
                     change(snapshot, |s| {
@@ -358,6 +370,7 @@ fn run(
                     clear_telemetry(snapshot);
                 }
                 Err(error) => {
+                    generation = generation.wrapping_add(1);
                     session.take();
                     logs.take();
                     change(snapshot, |s| {
@@ -379,6 +392,7 @@ fn run(
                     });
                     continue;
                 }
+                generation = generation.wrapping_add(1);
                 change(snapshot, |s| {
                     s.engine = EngineStatus::Starting;
                     s.profile = Some(path.clone());
@@ -415,6 +429,9 @@ fn run(
                 }
             }
             Ok(Command::ApplyProfile(input)) => {
+                // A pending provider response belongs to the previous profile.
+                generation = generation.wrapping_add(1);
+                change(snapshot, |s| s.refreshing_provider = None);
                 let path = input.key();
                 let Some(active) = &session else {
                     change(snapshot, |s| {
@@ -486,6 +503,57 @@ fn run(
                     next_sample = Instant::now();
                 }
             }
+            Ok(Command::RefreshProvider(name)) => {
+                if let Some(active) = &session {
+                    let already_busy = snapshot
+                        .lock()
+                        .expect("snapshot poisoned")
+                        .refreshing_provider
+                        .is_some();
+                    if already_busy || refresh_inflight {
+                        change(snapshot, |s| {
+                            s.action_error =
+                                Some("A previous provider refresh is still finishing".into());
+                        });
+                        continue;
+                    }
+                    let available = snapshot
+                        .lock()
+                        .expect("snapshot poisoned")
+                        .inventory
+                        .as_ref()
+                        .and_then(|inv| inv.providers.get(&name))
+                        .is_some_and(|p| p.vehicle_type.eq_ignore_ascii_case("http"));
+                    if !available {
+                        change(snapshot, |s| {
+                            s.action_error = Some("Provider is no longer refreshable".into())
+                        });
+                        continue;
+                    }
+                    let controller = active.controller.clone();
+                    let tx = refresh_tx.clone();
+                    let epoch = generation;
+                    change(snapshot, |s| {
+                        s.refreshing_provider = Some(name.clone());
+                        s.action_error = None;
+                    });
+                    refresh_inflight = true;
+                    if thread::Builder::new()
+                        .name("paw-provider-refresh".into())
+                        .spawn(move || {
+                            let result = controller.refresh_provider(&name);
+                            let _ = tx.send((epoch, result));
+                        })
+                        .is_err()
+                    {
+                        refresh_inflight = false;
+                        change(snapshot, |s| {
+                            s.refreshing_provider = None;
+                            s.action_error = Some("Could not start provider refresh".into());
+                        });
+                    }
+                }
+            }
             Ok(Command::ReadRules) => {
                 if let Some(active) = &session {
                     let result = active.controller.rules();
@@ -509,6 +577,15 @@ fn run(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        while let Ok((epoch, result)) = refresh_rx.try_recv() {
+            refresh_inflight = false;
+            if epoch != generation {
+                continue;
+            }
+            change(snapshot, |s| finish_provider_refresh(s, result));
+            next_sample = Instant::now();
         }
 
         if let Some(active) = &session
@@ -538,7 +615,8 @@ fn run(
                         down: t.down,
                     }),
                 );
-                s.inventory = inventory;
+                // A temporary controller failure must not erase the last good list.
+                retain_inventory(s, inventory);
                 s.connections = connections;
                 s.traffic = traffic;
             });
@@ -547,9 +625,28 @@ fn run(
     }
 }
 
+fn retain_inventory(snapshot: &mut Snapshot, fresh: Option<Arc<Inventory>>) {
+    if fresh.is_some() {
+        snapshot.inventory = fresh;
+    }
+}
+
+fn finish_provider_refresh(
+    snapshot: &mut Snapshot,
+    result: Result<(), crate::engine::controller::ControllerError>,
+) {
+    snapshot.refreshing_provider = None;
+    snapshot.action_error = result.err().map(|error| match error {
+        crate::engine::controller::ControllerError::Unreachable =>
+            "Provider refresh timed out or disconnected; result is unknown. Check its status before retrying.".into(),
+        error => format!("Provider refresh failed: {error}"),
+    });
+}
+
 fn clear_telemetry(snapshot: &Mutex<Snapshot>) {
     change(snapshot, |s| {
         s.inventory = None;
+        s.refreshing_provider = None;
         s.mode = None;
         s.rules = None;
         s.logs = None;
@@ -583,6 +680,37 @@ fn load_profile(path: &std::path::Path) -> io::Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_provider_refresh_and_lost_sample_preserve_last_inventory() {
+        let mut snapshot = Snapshot {
+            inventory: Some(Arc::new(Inventory::default())),
+            refreshing_provider: Some("one".into()),
+            ..Default::default()
+        };
+        let before = Arc::clone(snapshot.inventory.as_ref().unwrap());
+        finish_provider_refresh(
+            &mut snapshot,
+            Err(crate::engine::controller::ControllerError::Status(503)),
+        );
+        retain_inventory(&mut snapshot, None);
+        assert!(Arc::ptr_eq(&before, snapshot.inventory.as_ref().unwrap()));
+        assert!(snapshot.refreshing_provider.is_none());
+        assert!(snapshot.action_error.as_deref().unwrap().contains("503"));
+        finish_provider_refresh(
+            &mut snapshot,
+            Err(crate::engine::controller::ControllerError::Unreachable),
+        );
+        assert!(
+            snapshot
+                .action_error
+                .as_deref()
+                .unwrap()
+                .contains("unknown")
+        );
+        finish_provider_refresh(&mut snapshot, Ok(()));
+        assert!(snapshot.action_error.is_none());
+    }
 
     #[test]
     fn log_history_is_bounded_and_newest_first() {
