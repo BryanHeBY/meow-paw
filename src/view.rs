@@ -346,6 +346,10 @@ pub struct Paw {
     _subscription_url_changes: Subscription,
     preference_warning: Option<String>,
     language_save_failed: bool,
+    language_choice_focus: [FocusHandle; 3],
+    engine_browse_focus: FocusHandle,
+    engine_reveal_focus: FocusHandle,
+    engine_copy_focus: FocusHandle,
     search: Entity<InputState>,
     _search_changes: Subscription,
     rule_filter: Entity<InputState>,
@@ -526,6 +530,10 @@ pub fn open(
             _subscription_url_changes: subscription_url_changes,
             preference_warning: warning.map(str::to_owned),
             language_save_failed: false,
+            language_choice_focus: std::array::from_fn(|_| cx.focus_handle()),
+            engine_browse_focus: cx.focus_handle(),
+            engine_reveal_focus: cx.focus_handle(),
+            engine_copy_focus: cx.focus_handle(),
             search,
             _search_changes: search_changes,
             rule_filter,
@@ -3537,82 +3545,118 @@ impl Paw {
             LanguagePreference::En => "English",
             LanguagePreference::ZhCn => "简体中文",
         };
-        let language = form_card(self.locale.message(Message::Language)).child(
-            div()
-                .mx_4()
-                .py_3()
-                .border_t_1()
-                .border_color(rgb(LINE))
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(format!(
-                    "{}: {}",
-                    self.locale.message(Message::SavedLanguage),
-                    language_name(saved_language)
-                ))
-                .child(format!(
-                    "{}: {}",
-                    self.locale.message(Message::CurrentLanguage),
-                    match self.locale {
-                        Locale::En => "English",
-                        Locale::ZhCn => "简体中文",
-                    }
-                ))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(FAINT))
-                        .child(self.locale.message(Message::LanguageRestart)),
-                )
-                .when(!can_save_language, |el| {
-                    el.child(
+        let language = settings_card(self.locale.message(Message::Language), "icons/globe.svg")
+            .child(
+                div()
+                    .mx_4()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(rgb(LINE))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!(
+                                "{}: {}",
+                                self.locale.message(Message::SavedLanguage),
+                                language_name(saved_language),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("language-options")
+                            .role(Role::Group)
+                            .aria_label(self.locale.message(Message::SavedLanguage))
+                            .flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .p_1()
+                            .rounded_lg()
+                            .bg(rgb(SOFT_BLUE))
+                            .children(
+                                [
+                                    LanguagePreference::System,
+                                    LanguagePreference::En,
+                                    LanguagePreference::ZhCn,
+                                ]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, choice)| {
+                                    let selected = choice == saved_language;
+                                    subscription_button(
+                                        ("language-choice", index),
+                                        language_name(choice),
+                                        selected,
+                                        cx,
+                                    )
+                                    .px_3()
+                                    .py_1()
+                                    .track_focus(&self.language_choice_focus[index])
+                                    .selected(selected)
+                                    .toggled(selected)
+                                    .disabled(!can_save_language)
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.language_choice_focus[index].focus(window, cx);
+                                            if this.preferences.has_persistent_file()
+                                                && this.preferences.language() != choice
+                                            {
+                                                this.language_save_failed =
+                                                    this.preferences.set_language(choice).is_err();
+                                            }
+                                            cx.notify();
+                                        },
+                                    ))
+                                }),
+                            ),
+                    )
+                    .child(div().text_sm().text_color(rgb(FAINT)).child(format!(
+                        "{}: {}",
+                        self.locale.message(Message::CurrentLanguage),
+                        match self.locale {
+                            Locale::En => "English",
+                            Locale::ZhCn => "简体中文",
+                        }
+                    )))
+                    .child(
                         div()
                             .text_xs()
                             .text_color(rgb(FAINT))
-                            .child(self.locale.message(Message::LanguageUnavailable)),
+                            .child(self.locale.message(Message::LanguageRestart)),
                     )
-                })
-                .when(self.language_save_failed, |el| {
-                    el.child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0xb42318))
-                            .child(self.locale.message(Message::LanguageSaveFailed)),
-                    )
-                })
-                .children(
-                    [
-                        LanguagePreference::System,
-                        LanguagePreference::En,
-                        LanguagePreference::ZhCn,
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, choice)| {
-                        let selected = choice == saved_language;
-                        Button::new(("language-choice", index))
-                            .label(language_name(choice))
-                            .selected(selected)
-                            .toggled(selected)
-                            .disabled(!can_save_language)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.preferences.has_persistent_file()
-                                    && this.preferences.language() != choice
-                                {
-                                    this.language_save_failed =
-                                        this.preferences.set_language(choice).is_err();
-                                }
-                                cx.notify();
-                            }))
+                    .when(!can_save_language, |el| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(FAINT))
+                                .child(self.locale.message(Message::LanguageUnavailable)),
+                        )
+                    })
+                    .when(self.language_save_failed, |el| {
+                        el.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xb42318))
+                                .child(self.locale.message(Message::LanguageSaveFailed)),
+                        )
                     }),
-                ),
-        );
+            );
         let binary = self.binary.as_ref().map_or_else(
             || self.locale.message(Message::NoExecutableSelected).into(),
             |p| p.display().to_string(),
         );
-        let system = form_card(self.locale.message(Message::System))
+        let system = settings_card(self.locale.message(Message::System), "icons/settings.svg")
+            .child(
+                div()
+                    .px_4()
+                    .pb_2()
+                    .text_xs()
+                    .text_color(rgb(FAINT))
+                    .child(self.locale.message(Message::SettingsReadOnly)),
+            )
             .child(form_row(
                 self.locale.message(Message::SystemProxy),
                 self.locale.message(Message::SystemProxyDescription),
@@ -3639,16 +3683,25 @@ impl Paw {
                     gpui_kit::component::tooltip::Tooltip::new(shown_path.clone()).build(window, cx)
                 })
             });
-        let engine = form_card(self.locale.message(Message::MeowEngine))
+        let engine = settings_card(self.locale.message(Message::MeowEngine), "icons/server.svg")
             .child(form_row_with_detail(
                 self.locale.message(Message::MeowExecutable),
                 path_detail,
                 if self.can_change_binary() {
-                    secondary_button("select-binary", self.locale.message(Message::Browse))
-                        .on_click(cx.listener(|this, _, _, cx| this.choose_file(true, cx)))
-                        .into_any_element()
+                    subscription_button(
+                        "select-binary",
+                        self.locale.message(Message::Browse),
+                        false,
+                        cx,
+                    )
+                    .track_focus(&self.engine_browse_focus)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.engine_browse_focus.focus(window, cx);
+                        this.choose_file(true, cx);
+                    }))
+                    .into_any_element()
                 } else {
-                    chip("Locked", FAINT, BG).into_any_element()
+                    chip(self.locale.message(Message::EngineLocked), FAINT, BG).into_any_element()
                 },
             ))
             .when(self.binary.is_some(), |engine| {
@@ -3657,18 +3710,25 @@ impl Paw {
                         .mx_4()
                         .pb_3()
                         .child(
-                            secondary_button(
+                            subscription_button(
                                 "engine-path-reveal",
                                 if self.show_engine_path {
                                     self.locale.message(Message::HideFullPath)
                                 } else {
                                     self.locale.message(Message::ShowFullPath)
                                 },
+                                false,
+                                cx,
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_engine_path = !this.show_engine_path;
-                                cx.notify();
-                            })),
+                            .track_focus(&self.engine_reveal_focus)
+                            .aria_expanded(self.show_engine_path)
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.engine_reveal_focus.focus(window, cx);
+                                    this.show_engine_path = !this.show_engine_path;
+                                    cx.notify();
+                                },
+                            )),
                         )
                         .when(self.show_engine_path, |row| {
                             row.child(
@@ -3680,12 +3740,16 @@ impl Paw {
                                     .child(binary.clone()),
                             )
                             .child(
-                                secondary_button(
+                                subscription_button(
                                     "engine-path-copy",
                                     self.locale.message(Message::CopyPath),
+                                    false,
+                                    cx,
                                 )
+                                .track_focus(&self.engine_copy_focus)
                                 .on_click(cx.listener(
-                                    move |_, _, _, cx| {
+                                    move |this, _, window, cx| {
+                                        this.engine_copy_focus.focus(window, cx);
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             binary.clone(),
                                         ));
@@ -3695,7 +3759,7 @@ impl Paw {
                         }),
                 )
             });
-        let app = form_card("Meow Paw")
+        let app = settings_card("Meow Paw", "icons/house.svg")
             .child(form_row(
                 self.locale.message(Message::TrayBehavior),
                 self.locale.message(Message::TrayDescription),
@@ -3709,7 +3773,7 @@ impl Paw {
             .child(form_row(
                 self.locale.message(Message::QuitApplication),
                 self.locale.message(Message::QuitDescription),
-                secondary_button("quit-paw", self.locale.message(Message::QuitPaw))
+                subscription_button("quit-paw", self.locale.message(Message::QuitPaw), false, cx)
                     .on_click(cx.listener(|_, _, _, cx| cx.quit())),
             ));
         div()
@@ -3862,6 +3926,39 @@ fn chip(label: impl Into<SharedString>, foreground: u32, background: u32) -> Div
 
 fn compact_chip(label: impl Into<SharedString>, foreground: u32, background: u32) -> Div {
     chip(label, foreground, background).px_2().py(px(1.))
+}
+
+// Settings has its own card treatment; the shared form cards also serve other pages.
+fn settings_card(title: &'static str, icon: &'static str) -> Div {
+    card().p_0().child(
+        div()
+            .px_4()
+            .pt_4()
+            .pb_3()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .size(px(36.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(0xe9bd56))
+                    .bg(rgb(0xffe5a3))
+                    .shadow_sm()
+                    .child(line_icon(icon, BLUE, 18.)),
+            )
+            .child(
+                div()
+                    .text_base()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(INK))
+                    .child(title),
+            ),
+    )
 }
 
 fn form_card(title: &'static str) -> Div {
