@@ -142,6 +142,7 @@ pub struct Paw {
     subscription_notice: Option<Message>,
     subscription_entry_open: bool,
     subscription_url: Entity<InputState>,
+    subscription_add_focus: FocusHandle,
     _subscription_url_changes: Subscription,
     preference_warning: Option<String>,
     language_save_failed: bool,
@@ -266,6 +267,7 @@ pub fn open(
             subscription_notice,
             subscription_entry_open: false,
             subscription_url,
+            subscription_add_focus: cx.focus_handle(),
             _subscription_url_changes: subscription_url_changes,
             preference_warning: warning.map(str::to_owned),
             language_save_failed: false,
@@ -1159,6 +1161,17 @@ impl Paw {
             if self.subscription_entry_open {
                 page = page.child(
                     div()
+                        .id("subscription-entry")
+                        .on_key_down(cx.listener(|paw, event: &KeyDownEvent, window, cx| {
+                            // Leave input keystrokes to the input's IME and editing handlers.
+                            if event.keystroke.key == "escape"
+                                && !event.keystroke.modifiers.modified()
+                                && !paw.subscription_url.focus_handle(cx).is_focused(window)
+                            {
+                                paw.cancel_subscription(window, cx);
+                                cx.stop_propagation();
+                            }
+                        }))
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -1177,21 +1190,22 @@ impl Paw {
                                         .child(Input::new(&self.subscription_url).cleanable(true)),
                                 )
                                 .child(
-                                    action_button_base(
+                                    subscription_button(
                                         "confirm-subscription",
                                         self.locale.message(Message::ImportSubscription),
+                                        true,
+                                        cx,
                                     )
-                                    .bg(rgb(BLUE))
-                                    .text_color(rgb(SURFACE))
-                                    .hover(|style| style.bg(rgb(0x124db5)))
                                     .on_click(cx.listener(
                                         |paw, _, window, cx| paw.import_subscription(window, cx),
                                     )),
                                 )
                                 .child(
-                                    secondary_button(
+                                    subscription_button(
                                         "cancel-subscription",
                                         self.locale.message(Message::CancelSubscription),
+                                        false,
+                                        cx,
                                     )
                                     .on_click(cx.listener(
                                         |paw, _, window, cx| paw.cancel_subscription(window, cx),
@@ -1201,10 +1215,13 @@ impl Paw {
                 );
             } else {
                 page = page.child(
-                    secondary_button(
+                    subscription_button(
                         "import-subscription",
                         self.locale.message(Message::AddSubscription),
+                        false,
+                        cx,
                     )
+                    .track_focus(&self.subscription_add_focus)
                     .on_click(cx.listener(|paw, _, window, cx| {
                         paw.subscription_entry_open = true;
                         paw.subscription_notice = None;
@@ -1473,6 +1490,12 @@ impl Paw {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.subscription_entry_open = false;
         self.subscription_notice = None;
+        if self.page == Page::Profiles
+            && !self.subscription_busy
+            && self.preferences.subscription_dir().is_some()
+        {
+            self.subscription_add_focus.focus(window, cx);
+        }
         cx.notify();
     }
 
@@ -2815,6 +2838,35 @@ fn action_button_base(id: impl Into<ElementId>, label: &'static str) -> Stateful
         .px_4()
         .py_2()
         .child(label)
+}
+
+fn subscription_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    primary: bool,
+    cx: &App,
+) -> Button {
+    let (background, foreground, hover) = if primary {
+        (BLUE, SURFACE, 0x124db5)
+    } else {
+        (SOFT_BLUE, BLUE, 0xd8e7ff)
+    };
+    Button::new(id)
+        .label(label)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(rgb(background).into())
+                .foreground(rgb(foreground).into())
+                .hover(rgb(hover).into())
+                .active(rgb(hover).into()),
+        )
+        .bg(rgb(background))
+        .border_1()
+        .border_color(rgb(0xb5cafa))
+        .rounded_md()
+        .font_weight(FontWeight::SEMIBOLD)
+        .px_4()
+        .py_2()
 }
 
 fn secondary_button(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
