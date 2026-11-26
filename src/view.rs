@@ -2154,6 +2154,14 @@ impl Paw {
                 );
                 #[cfg(not(any(target_os = "linux", windows)))]
                 let (live, applying): (bool, Option<&PathBuf>) = (false, None);
+                #[cfg(any(target_os = "linux", windows))]
+                let confirmed_active = overview_current_profile(
+                    live,
+                    applying.is_some(),
+                    self.snapshot.profile.as_deref(),
+                ) == Some(profile.as_path());
+                #[cfg(not(any(target_os = "linux", windows)))]
+                let confirmed_active = false;
                 let apply_path = profile.clone();
                 let use_path = profile.clone();
                 let forget_path = profile.clone();
@@ -2289,7 +2297,7 @@ impl Paw {
                             .flex_wrap()
                             .items_center()
                             .gap_2()
-                            .when(active, |el| {
+                            .when(confirmed_active, |el| {
                                 el.child(chip(
                                     self.locale.message(Message::Running),
                                     0x168460,
@@ -5173,6 +5181,37 @@ mod tests {
         assert_eq!(overview_current_profile(true, false, active), active);
         assert_eq!(overview_current_profile(false, false, active), None);
         assert_eq!(overview_current_profile(true, true, active), None);
+        assert_eq!(overview_current_profile(true, false, None), None);
+    }
+
+    #[test]
+    fn profile_running_badge_tracks_confirmed_identity_during_live_apply() {
+        use super::overview_current_profile;
+        use std::path::Path;
+
+        let previous = Path::new("previous");
+        let candidate = Path::new("candidate");
+
+        // Selecting a candidate does not change the confirmed running profile.
+        assert_eq!(
+            overview_current_profile(true, false, Some(previous)),
+            Some(previous)
+        );
+        assert_ne!(
+            overview_current_profile(true, false, Some(previous)),
+            Some(candidate)
+        );
+        // An apply may already have changed Meow before its result is known.
+        assert_eq!(overview_current_profile(true, true, Some(previous)), None);
+        assert_eq!(
+            overview_current_profile(true, false, Some(candidate)),
+            Some(candidate)
+        );
+        // A rejected apply retains the previous identity; an unconfirmed one does not.
+        assert_eq!(
+            overview_current_profile(true, false, Some(previous)),
+            Some(previous)
+        );
         assert_eq!(overview_current_profile(true, false, None), None);
     }
 
