@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 use std::{error::Error, fmt, net::SocketAddrV4};
 use url::Url;
 
+mod geodata;
+
 pub const MAX_PROFILE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +114,7 @@ impl Profile {
                 path: format!("proxies[{i}].port"),
                 message: "Trojan requires a decimal port from 1 to 65535.",
             })
+            .chain(geodata::diagnostics(&self.root))
             .collect()
     }
 
@@ -140,6 +143,7 @@ impl Profile {
         {
             return Err(ProfileError::InvalidSettings);
         }
+        geodata::validate_paths(&self.root)?;
         let mut root = self.root.clone();
         // M0 does not opt into script execution, native subscription writers,
         // alternate listeners, or provider-controlled local file access.
