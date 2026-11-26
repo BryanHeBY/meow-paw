@@ -2069,6 +2069,11 @@ impl Paw {
                 let use_path = profile.clone();
                 let forget_path = profile.clone();
                 let subscription = self.subscription_for(profile).map(|(_, id)| id);
+                let unreadable = subscription.is_some()
+                    && self
+                        .subscription_metadata
+                        .get(profile)
+                        .is_some_and(Option::is_none);
                 let name = self.display_profile_name(profile);
                 let action_id = |action: &str| SharedString::from(format!("{action}:{profile:?}"));
                 let details = if subscription.is_some() {
@@ -2116,12 +2121,13 @@ impl Paw {
                             ),
                     )
                     .when(subscription.is_some(), |card| {
-                        card.child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(FAINT))
-                                .child(self.locale.message(Message::SubscriptionManualOnly)),
-                        )
+                        card.child(div().text_xs().text_color(rgb(FAINT)).child(
+                            self.locale.message(if unreadable {
+                                Message::SubscriptionReadFailed
+                            } else {
+                                Message::SubscriptionManualOnly
+                            }),
+                        ))
                         .when_some(interval, |card, interval| {
                             card.child(div().text_xs().text_color(rgb(FAINT)).child(interval))
                         })
@@ -2216,7 +2222,7 @@ impl Paw {
                                     SOFT_BLUE,
                                 ))
                             })
-                            .when(live && applying.is_none(), |el| {
+                            .when(live && applying.is_none() && !unreadable, |el| {
                                 el.child(
                                     secondary_button(
                                         action_id("profile-apply"),
@@ -2242,11 +2248,19 @@ impl Paw {
                                     el.child(
                                         secondary_button(
                                             action_id("profile-refresh"),
-                                            self.locale.message(Message::Refresh),
+                                            self.locale.message(if unreadable {
+                                                Message::CheckSavedSubscription
+                                            } else {
+                                                Message::Refresh
+                                            }),
                                         )
                                         .on_click(
                                             cx.listener(move |paw, _, _, cx| {
-                                                paw.refresh_subscription(id, cx);
+                                                if unreadable {
+                                                    paw.check_saved_subscription(id, cx);
+                                                } else {
+                                                    paw.refresh_subscription(id, cx);
+                                                }
                                             }),
                                         ),
                                     )
@@ -2296,7 +2310,7 @@ impl Paw {
                                     )
                                 },
                             )
-                            .when(!next, |el| {
+                            .when(!next && !unreadable, |el| {
                                 el.child(
                                     secondary_button(
                                         action_id("profile-use"),
@@ -2637,26 +2651,48 @@ impl Paw {
         cx.notify();
     }
 
+    // Recheck a known unreadable managed record without sending any provider request.
+    fn check_saved_subscription(&mut self, id: SubscriptionId, cx: &mut Context<Self>) {
+        self.run_subscription_task(
+            Message::CheckingSavedSubscription,
+            Message::SavedSubscriptionReadable,
+            cx,
+            move |store| {
+                let metadata = store
+                    .metadata(id)
+                    .map_err(|_| Message::SubscriptionReadFailed)?;
+                Ok((store.record_path(id), Some(metadata)))
+            },
+        );
+    }
+
     fn refresh_subscription(&mut self, id: SubscriptionId, cx: &mut Context<Self>) {
         if self.subscription_rename.is_some() {
             return;
         }
-        self.run_subscription_refresh(cx, move |store| {
-            let prior = store
-                .read(id)
-                .map_err(|_| Message::SubscriptionReadFailed)?;
-            let candidate = prior
-                .fetch_latest()
-                .map_err(subscription_download_feedback)?;
-            store
-                .refresh(id, candidate)
-                .map_err(|_| Message::SubscriptionRefreshSaveFailed)?;
-            Ok((store.record_path(id), store.metadata(id).ok()))
-        });
+        self.run_subscription_task(
+            Message::DownloadingSubscription,
+            Message::SubscriptionRefreshed,
+            cx,
+            move |store| {
+                let prior = store
+                    .read(id)
+                    .map_err(|_| Message::SubscriptionReadFailed)?;
+                let candidate = prior
+                    .fetch_latest()
+                    .map_err(subscription_download_feedback)?;
+                store
+                    .refresh(id, candidate)
+                    .map_err(|_| Message::SubscriptionRefreshSaveFailed)?;
+                Ok((store.record_path(id), store.metadata(id).ok()))
+            },
+        );
     }
 
-    fn run_subscription_refresh(
+    fn run_subscription_task(
         &mut self,
+        pending: Message,
+        success: Message,
         cx: &mut Context<Self>,
         job: impl FnOnce(
             &mut SubscriptionStore,
@@ -2671,7 +2707,7 @@ impl Paw {
             return;
         }
         self.subscription_busy = true;
-        self.subscription_busy_message = Message::DownloadingSubscription;
+        self.subscription_busy_message = pending;
         self.subscription_notice = None;
         cx.notify();
         cx.spawn(async move |weak, cx| {
@@ -2687,7 +2723,7 @@ impl Paw {
                             paw.subscription_paths.push(path.clone());
                         }
                         paw.subscription_metadata.insert(path, metadata);
-                        paw.subscription_notice = Some(Message::SubscriptionRefreshed);
+                        paw.subscription_notice = Some(success);
                     }
                     Err(notice) => paw.subscription_notice = Some(notice),
                 }
