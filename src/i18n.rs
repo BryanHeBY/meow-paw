@@ -160,7 +160,6 @@ pub enum Message {
     RuleColumn,
     CloseConnection,
     RuleSets,
-    HideRuleSets,
     ReadRuleSets,
     RuleSetsReadOnly,
     RuleSetsNotLoaded,
@@ -479,7 +478,6 @@ fn english(key: Message) -> &'static str {
         Message::RuleColumn => "RULE",
         Message::CloseConnection => "Close",
         Message::RuleSets => "Rule sets",
-        Message::HideRuleSets => "Hide rule sets",
         Message::ReadRuleSets => "Read rule sets",
         Message::RuleSetsReadOnly => "Read-only · This list does not update providers.",
         Message::RuleSetsNotLoaded => "Rule sets have not been loaded.",
@@ -677,7 +675,6 @@ fn chinese(key: Message) -> &'static str {
         Message::RuleColumn => "规则",
         Message::CloseConnection => "关闭",
         Message::RuleSets => "规则集",
-        Message::HideRuleSets => "隐藏规则集",
         Message::ReadRuleSets => "读取规则集",
         Message::RuleSetsReadOnly => "只读 · 此列表不会更新提供者。",
         Message::RuleSetsNotLoaded => "尚未加载规则集。",
@@ -953,7 +950,6 @@ mod tests {
     fn rules_and_logs_catalog() {
         let cases = [
             (Message::RuleSets, "Rule sets", "规则集"),
-            (Message::HideRuleSets, "Hide rule sets", "隐藏规则集"),
             (Message::ReadRuleSets, "Read rule sets", "读取规则集"),
             (
                 Message::RuleSetsReadOnly,

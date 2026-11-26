@@ -262,6 +262,9 @@ pub struct Paw {
     rule_page: usize,
     rule_sets_open: bool,
     rule_sets_read_failed: bool,
+    rules_tab_focus: FocusHandle,
+    rule_sets_tab_focus: FocusHandle,
+    rule_sets_read_focus: FocusHandle,
     rule_previous_focus: FocusHandle,
     rule_next_focus: FocusHandle,
     connection_filter: Entity<InputState>,
@@ -428,6 +431,9 @@ pub fn open(
             rule_page: 0,
             rule_sets_open: false,
             rule_sets_read_failed: false,
+            rules_tab_focus: cx.focus_handle(),
+            rule_sets_tab_focus: cx.focus_handle(),
+            rule_sets_read_focus: cx.focus_handle(),
             rule_previous_focus: cx.focus_handle(),
             rule_next_focus: cx.focus_handle(),
             connection_filter,
@@ -789,34 +795,45 @@ impl Paw {
                         this.read_rules();
                         cx.notify();
                     }));
-            let toggle = subscription_button(
-                "toggle-rule-sets",
-                self.locale.message(if self.rule_sets_open {
-                    Message::HideRuleSets
-                } else {
-                    Message::RuleSets
-                }),
-                false,
+            let rules_tab = subscription_button(
+                "rules-tab",
+                self.locale.message(Message::Rules),
+                !self.rule_sets_open,
                 cx,
             )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.rule_sets_open = !this.rule_sets_open;
+            .toggled(!self.rule_sets_open)
+            .track_focus(&self.rules_tab_focus)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.rules_tab_focus.focus(window, cx);
+                this.rule_sets_open = false;
+                cx.notify();
+            }));
+            let rule_sets_tab = subscription_button(
+                "rule-sets-tab",
+                self.locale.message(Message::RuleSets),
+                self.rule_sets_open,
+                cx,
+            )
+            .toggled(self.rule_sets_open)
+            .track_focus(&self.rule_sets_tab_focus)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.rule_sets_tab_focus.focus(window, cx);
+                this.rule_sets_open = true;
                 this.rule_sets_read_failed = false;
                 cx.notify();
             }));
-            let page = div()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .gap_3()
-                        .child(toggle)
-                        .child(button),
-                )
-                .when(self.rule_sets_open, |page| page.child(self.rule_sets(cx)));
+            let page = div().flex().flex_col().gap_3().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(div().flex().gap_2().child(rules_tab).child(rule_sets_tab))
+                    .when(!self.rule_sets_open, |row| row.child(button)),
+            );
+            if self.rule_sets_open {
+                return page.child(self.rule_sets(cx));
+            }
             return match &self.snapshot.rules {
                 Some(rules) => {
                     const PAGE_SIZE: usize = 100;
@@ -964,6 +981,7 @@ impl Paw {
             false,
             cx,
         )
+        .track_focus(&self.rule_sets_read_focus)
         .on_click(cx.listener(|this, _, _, cx| {
             this.rule_sets_read_failed = this
                 .desktop
