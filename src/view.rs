@@ -1,5 +1,7 @@
 use crate::preferences::{LanguagePreference, Preferences};
 use gpui_kit::base::{Disableable, Selectable};
+#[cfg(any(target_os = "linux", windows))]
+use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -231,6 +233,19 @@ fn filter_logs<'a>(
         .collect()
 }
 
+#[cfg(any(target_os = "linux", windows))]
+#[derive(Clone)]
+enum ConnectionDetailSelection {
+    Active {
+        sample: std::sync::Arc<Vec<meow_paw::engine::controller::Connection>>,
+        index: usize,
+    },
+    Closed {
+        history: meow_paw::app::ConnectionHistory,
+        index: usize,
+    },
+}
+
 pub struct Paw {
     page: Page,
     locale: Locale,
@@ -268,6 +283,10 @@ pub struct Paw {
     rule_previous_focus: FocusHandle,
     rule_next_focus: FocusHandle,
     closed_connections_open: bool,
+    #[cfg(any(target_os = "linux", windows))]
+    connection_detail: Option<ConnectionDetailSelection>,
+    connection_detail_focus: FocusHandle,
+    connection_detail_return: Option<(bool, usize)>,
     active_connections_tab_focus: FocusHandle,
     closed_connections_tab_focus: FocusHandle,
     connection_filter: Entity<InputState>,
@@ -440,6 +459,10 @@ pub fn open(
             rule_previous_focus: cx.focus_handle(),
             rule_next_focus: cx.focus_handle(),
             closed_connections_open: false,
+            #[cfg(any(target_os = "linux", windows))]
+            connection_detail: None,
+            connection_detail_focus: cx.focus_handle(),
+            connection_detail_return: None,
             active_connections_tab_focus: cx.focus_handle(),
             closed_connections_tab_focus: cx.focus_handle(),
             connection_filter,
@@ -520,6 +543,14 @@ impl Paw {
             if self.snapshot.revision != snap.revision {
                 if !matches!(&snap.engine, meow_paw::app::EngineStatus::Running { .. }) {
                     self.rule_sets_read_failed = false;
+                }
+                if self.snapshot.probe_epoch != snap.probe_epoch
+                    || self.snapshot.profile != snap.profile
+                    || snap.applying_profile.is_some()
+                    || !matches!(snap.engine, meow_paw::app::EngineStatus::Running { .. })
+                {
+                    self.connection_detail = None;
+                    self.connection_detail_return = None;
                 }
                 self.snapshot = snap;
                 return true;
@@ -3006,6 +3037,48 @@ impl Paw {
         )
     }
 
+    #[cfg(any(target_os = "linux", windows))]
+    fn reconcile_connection_detail(&mut self, cx: &App) {
+        if self.page != Page::Connections {
+            self.connection_detail = None;
+            self.connection_detail_return = None;
+            return;
+        }
+        let Some(selection) = &self.connection_detail else {
+            return;
+        };
+        let visible = self.page == Page::Connections
+            && matches!(
+                self.snapshot.engine,
+                meow_paw::app::EngineStatus::Running { .. }
+            )
+            && self.snapshot.applying_profile.is_none()
+            && detail_row_index(selection, &self.snapshot, self.closed_connections_open)
+                .is_some_and(|index| {
+                    let row = if self.closed_connections_open {
+                        self.snapshot.connection_history.recent().nth(index)
+                    } else {
+                        self.snapshot
+                            .connections
+                            .as_ref()
+                            .and_then(|rows| rows.get(index))
+                    };
+                    let query = self
+                        .connection_filter
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .to_lowercase();
+                    row.is_some_and(|row| {
+                        !matching_connections(std::iter::once(row), &query).is_empty()
+                    })
+                });
+        if !visible {
+            self.connection_detail = None;
+            self.connection_detail_return = None;
+        }
+    }
+
     fn connections(&self, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
         if matches!(
@@ -3022,6 +3095,10 @@ impl Paw {
             .track_focus(&self.active_connections_tab_focus)
             .on_click(cx.listener(|this, _, window, cx| {
                 this.active_connections_tab_focus.focus(window, cx);
+                if this.closed_connections_open {
+                    this.connection_detail = None;
+                    this.connection_detail_return = None;
+                }
                 this.closed_connections_open = false;
                 cx.notify();
             }));
@@ -3035,6 +3112,10 @@ impl Paw {
             .track_focus(&self.closed_connections_tab_focus)
             .on_click(cx.listener(|this, _, window, cx| {
                 this.closed_connections_tab_focus.focus(window, cx);
+                if !this.closed_connections_open {
+                    this.connection_detail = None;
+                    this.connection_detail_return = None;
+                }
                 this.closed_connections_open = true;
                 cx.notify();
             }));
@@ -3095,6 +3176,9 @@ impl Paw {
                         .child(Input::new(&self.connection_filter).cleanable(true)),
                 )
                 .child(chip(count, BLUE, SOFT_BLUE));
+            let selected_index = self.connection_detail.as_ref().and_then(|selection| {
+                detail_row_index(selection, &self.snapshot, self.closed_connections_open)
+            });
             let table = if results.is_empty() {
                 let (title, detail) =
                     connection_empty_messages(self.closed_connections_open, rows.len());
@@ -3108,16 +3192,48 @@ impl Paw {
                             section_label(self.locale.message(Message::RouteColumn)),
                             section_label(self.locale.message(Message::RuleColumn)),
                             None,
-                            !self.closed_connections_open,
                         )
                         .bg(rgb(CHROME)),
                     )
                     .children(results.into_iter().map(|(c, destination, route)| {
-                        let close = if self.closed_connections_open {
-                            None
+                        let index = rows.iter().position(|row| std::ptr::eq(*row, c)).unwrap();
+                        let selected = selected_index == Some(index);
+                        let return_focus = selected
+                            || (selected_index.is_none()
+                                && self.connection_detail_return
+                                    == Some((self.closed_connections_open, index)));
+                        let selection = if self.closed_connections_open {
+                            ConnectionDetailSelection::Closed {
+                                history: self.snapshot.connection_history.clone(),
+                                index,
+                            }
                         } else {
+                            ConnectionDetailSelection::Active {
+                                sample: self.snapshot.connections.as_ref().unwrap().clone(),
+                                index,
+                            }
+                        };
+                        let details = small_connection_button(
+                            ("connection-details", index),
+                            self.locale.message(Message::ConnectionDetails),
+                            cx,
+                        )
+                        .aria_expanded(selected)
+                        .when(return_focus, |button| {
+                            button.track_focus(&self.connection_detail_focus)
+                        })
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.connection_detail_focus.focus(window, cx);
+                                this.connection_detail_return = None;
+                                this.connection_detail = Some(selection.clone());
+                                cx.notify();
+                            },
+                        ));
+                        let mut actions = div().flex().items_center().gap_1().child(details);
+                        if !self.closed_connections_open {
                             let key = c.id.clone();
-                            Some(
+                            actions = actions.child(
                                 div()
                                     .id(SharedString::from(format!("connection-close:{key}")))
                                     .px_2()
@@ -3135,25 +3251,51 @@ impl Paw {
                                             .and_then(|d| d.close_connection(key.clone()).err())
                                             .map(|err| err.to_string());
                                         cx.notify();
-                                    }))
-                                    .into_any_element(),
-                            )
-                        };
-                        connection_row(
-                            div().font_weight(FontWeight::MEDIUM).child(destination),
+                                    })),
+                            );
+                        }
+                        let row = connection_row(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(destination.clone()),
                             div().child(if route.is_empty() {
                                 "—".into()
                             } else {
-                                route
+                                route.clone()
                             }),
                             div().child(if c.rule.is_empty() {
                                 "—".into()
                             } else {
                                 c.rule.clone()
                             }),
-                            close,
-                            !self.closed_connections_open,
-                        )
+                            Some(actions.into_any_element()),
+                        );
+                        let mut item = div().child(row);
+                        if selected {
+                            let close = small_connection_button(
+                                "connection-details-close",
+                                self.locale.message(Message::CloseDetails),
+                                cx,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.connection_detail_return =
+                                        Some((this.closed_connections_open, index));
+                                    this.connection_detail = None;
+                                    this.connection_detail_focus.focus(window, cx);
+                                    cx.notify();
+                                },
+                            ));
+                            item = item.child(connection_detail_area(
+                                c,
+                                &destination,
+                                &route,
+                                self.closed_connections_open,
+                                self.locale,
+                                close,
+                            ));
+                        }
+                        item
                     }))
             };
             return page.child(toolbar).child(table);
@@ -3423,6 +3565,8 @@ impl Paw {
 
 impl Render for Paw {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(target_os = "linux", windows))]
+        self.reconcile_connection_detail(cx);
         let compact = window.viewport_size().width < px(820.);
         let body = match self.page {
             Page::Overview => self.overview(window.viewport_size().width >= px(960.), cx),
@@ -3905,6 +4049,176 @@ fn matching_connections<'a>(
         .collect()
 }
 
+// History entries have no stable public key. Retaining the captured history keeps
+// its backing storage alive, so a changed or evicted history cannot select a new row.
+#[cfg(any(target_os = "linux", windows))]
+fn detail_row_index(
+    selection: &ConnectionDetailSelection,
+    snapshot: &meow_paw::app::Snapshot,
+    closed: bool,
+) -> Option<usize> {
+    match selection {
+        ConnectionDetailSelection::Closed { history, index } if closed => {
+            let captured = history.recent().nth(*index)?;
+            snapshot
+                .connection_history
+                .recent()
+                .position(|row| std::ptr::eq(row, captured))
+        }
+        ConnectionDetailSelection::Active { sample, index } if !closed => {
+            let captured = sample.get(*index)?;
+            let current = snapshot.connections.as_ref()?;
+            if std::sync::Arc::ptr_eq(sample, current) {
+                return current.get(*index).map(|_| *index);
+            }
+            if captured.id.is_empty()
+                || sample.iter().filter(|row| row.id == captured.id).count() != 1
+            {
+                return None;
+            }
+            let mut matches = current
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.id == captured.id);
+            let (index, row) = matches.next()?;
+            if matches.next().is_some() || !same_connection_identity(captured, row) {
+                return None;
+            }
+            Some(index)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn same_connection_identity(
+    a: &meow_paw::engine::controller::Connection,
+    b: &meow_paw::engine::controller::Connection,
+) -> bool {
+    a.id == b.id
+        && a.metadata.host == b.metadata.host
+        && a.metadata.destination_ip == b.metadata.destination_ip
+        && a.metadata.destination_port == b.metadata.destination_port
+        && a.metadata.network == b.metadata.network
+        && a.chains == b.chains
+        && a.rule == b.rule
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn connection_transport<'a>(network: Option<&'a str>, unknown: &'a str) -> &'a str {
+    network
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        })
+        .unwrap_or(unknown)
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn connection_total(value: Option<u64>, locale: Locale) -> String {
+    value
+        .map(bytes)
+        .unwrap_or_else(|| locale.message(Message::UnknownValue).to_owned())
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn small_connection_button(id: impl Into<ElementId>, label: &'static str, cx: &App) -> Button {
+    subscription_button(id, label, false, cx)
+        .small()
+        .px_2()
+        .py_1()
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn connection_detail_area(
+    connection: &meow_paw::engine::controller::Connection,
+    destination: &str,
+    route: &str,
+    closed: bool,
+    locale: Locale,
+    close: Button,
+) -> Div {
+    let unknown = locale.message(Message::UnknownValue);
+    let field = |label: &'static str, value: String| {
+        div()
+            .flex()
+            .gap_3()
+            .items_start()
+            .text_sm()
+            .child(
+                div()
+                    .w(px(105.))
+                    .flex_shrink_0()
+                    .text_color(rgb(FAINT))
+                    .child(label),
+            )
+            .child(div().flex_1().min_w_0().child(value))
+    };
+    let value = |text: &str| {
+        if text.is_empty() || text == "—" {
+            unknown.to_owned()
+        } else {
+            text.to_owned()
+        }
+    };
+    div()
+        .px_4()
+        .py_3()
+        .border_b_1()
+        .border_color(rgb(LINE))
+        .bg(rgb(CHROME))
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(locale.message(Message::ConnectionDetails)),
+                )
+                .child(close),
+        )
+        .child(field(
+            locale.message(Message::DestinationColumn),
+            value(destination),
+        ))
+        .child(field(locale.message(Message::RouteColumn), value(route)))
+        .child(field(
+            locale.message(Message::RuleColumn),
+            value(&connection.rule),
+        ))
+        .child(field(
+            locale.message(Message::Transport),
+            connection_transport(connection.metadata.network.as_deref(), unknown).to_owned(),
+        ))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(FAINT))
+                .child(locale.message(if closed {
+                    Message::ClosedSampleTotals
+                } else {
+                    Message::CurrentSampleTotals
+                })),
+        )
+        .child(field(
+            locale.message(Message::Upload),
+            connection_total(connection.upload, locale),
+        ))
+        .child(field(
+            locale.message(Message::Download),
+            connection_total(connection.download, locale),
+        ))
+}
+
 #[cfg(any(target_os = "linux", windows))]
 fn connection_empty_messages(closed: bool, total: usize) -> (Message, Message) {
     if total == 0 {
@@ -3928,7 +4242,7 @@ fn connection_empty_messages(closed: bool, total: usize) -> (Message, Message) {
 }
 
 #[cfg(any(target_os = "linux", windows))]
-fn connection_row(a: Div, b: Div, c: Div, action: Option<AnyElement>, has_action: bool) -> Div {
+fn connection_row(a: Div, b: Div, c: Div, action: Option<AnyElement>) -> Div {
     div()
         .flex()
         .gap_3()
@@ -3941,9 +4255,7 @@ fn connection_row(a: Div, b: Div, c: Div, action: Option<AnyElement>, has_action
         .child(a.flex_1().min_w_0())
         .child(b.flex_1().min_w_0().text_color(rgb(FAINT)))
         .child(c.flex_1().min_w_0().text_color(rgb(FAINT)))
-        .when(has_action, |row| {
-            row.child(div().w(px(54.)).flex_shrink_0().children(action))
-        })
+        .child(div().w(px(132.)).flex_shrink_0().children(action))
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -4447,6 +4759,55 @@ mod tests {
         assert!(matching_connections(rows.iter(), "192.0.2.1").is_empty());
         assert!(matching_connections(rows.iter(), "missing").is_empty());
         assert_eq!(matching_connections(rows.iter(), "").len(), 2);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn connection_details_keep_unknown_and_zero_distinct() {
+        use super::{connection_total, connection_transport};
+        use meow_paw::i18n::Locale;
+        assert_eq!(connection_total(Some(0), Locale::En), "0 B");
+        assert_eq!(connection_total(None, Locale::En), "Unknown");
+        assert_eq!(connection_total(None, Locale::ZhCn), "未知");
+        assert_eq!(connection_transport(Some("tcp"), "Unknown"), "tcp");
+        assert_eq!(
+            connection_transport(Some("tcp\nsecret"), "Unknown"),
+            "Unknown"
+        );
+        assert_eq!(connection_transport(None, "Unknown"), "Unknown");
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn active_detail_tracks_only_an_unambiguous_unchanged_identity() {
+        use super::{ConnectionDetailSelection, detail_row_index};
+        use meow_paw::{app::Snapshot, engine::controller::Connection};
+        use std::sync::Arc;
+        let first = Connection {
+            id: "one".into(),
+            upload: Some(0),
+            ..Default::default()
+        };
+        let sample = Arc::new(vec![first.clone()]);
+        let selected = ConnectionDetailSelection::Active {
+            sample: sample.clone(),
+            index: 0,
+        };
+        let mut snapshot = Snapshot::default();
+        snapshot.connections = Some(sample);
+        assert_eq!(detail_row_index(&selected, &snapshot, false), Some(0));
+        let mut updated = first.clone();
+        updated.upload = Some(10);
+        snapshot.connections = Some(Arc::new(vec![updated.clone()]));
+        assert_eq!(detail_row_index(&selected, &snapshot, false), Some(0));
+        snapshot.connections = Some(Arc::new(vec![updated.clone(), updated.clone()]));
+        assert_eq!(detail_row_index(&selected, &snapshot, false), None);
+        updated.metadata.host = "different".into();
+        snapshot.connections = Some(Arc::new(vec![updated]));
+        assert_eq!(detail_row_index(&selected, &snapshot, false), None);
+        snapshot.connections = Some(Arc::new(vec![]));
+        assert_eq!(detail_row_index(&selected, &snapshot, false), None);
+        assert_eq!(detail_row_index(&selected, &snapshot, true), None);
     }
 
     #[test]

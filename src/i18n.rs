@@ -165,6 +165,12 @@ pub enum Message {
     RouteColumn,
     RuleColumn,
     CloseConnection,
+    ConnectionDetails,
+    CloseDetails,
+    Transport,
+    UnknownValue,
+    CurrentSampleTotals,
+    ClosedSampleTotals,
     RuleSets,
     ReadRuleSets,
     ReadingRuleSets,
@@ -258,9 +264,9 @@ impl Locale {
     pub fn closed_connection_history_detail(self, limit: usize) -> String {
         match self {
             Self::En => {
-                format!("Read-only · Last {limit} closed connections in the current session.")
+                format!("Read-only · Up to {limit} closures observed in this session.")
             }
-            Self::ZhCn => format!("只读 · 当前会话最近关闭的 {limit} 个连接。"),
+            Self::ZhCn => format!("只读 · 仅显示本次会话中观察到关闭的连接，最多 {limit} 条。"),
         }
     }
 
@@ -510,6 +516,13 @@ fn english(key: Message) -> &'static str {
         Message::RouteColumn => "ROUTE",
         Message::RuleColumn => "RULE",
         Message::CloseConnection => "Close",
+        Message::ConnectionDetails => "Details",
+        Message::CloseDetails => "Close details",
+        Message::Transport => "Transport",
+        Message::UnknownValue => "Unknown",
+        Message::CurrentSampleTotals => "Last reported totals · Active sample",
+        Message::ClosedSampleTotals => "Last reported totals · Last sample before closure",
+
         Message::RuleSets => "Rule sets",
         Message::ReadRuleSets => "Read rule sets",
         Message::ReadingRuleSets => "Reading rule sets…",
@@ -714,6 +727,13 @@ fn chinese(key: Message) -> &'static str {
         Message::RouteColumn => "路线",
         Message::RuleColumn => "规则",
         Message::CloseConnection => "关闭",
+        Message::ConnectionDetails => "详情",
+        Message::CloseDetails => "关闭详情",
+        Message::Transport => "传输协议",
+        Message::UnknownValue => "未知",
+        Message::CurrentSampleTotals => "最近报告的总量 · 活动采样",
+        Message::ClosedSampleTotals => "最近报告的总量 · 关闭前最后一次采样",
+
         Message::RuleSets => "规则集",
         Message::ReadRuleSets => "读取规则集",
         Message::ReadingRuleSets => "正在读取规则集…",
@@ -1004,11 +1024,11 @@ mod tests {
         );
         assert_eq!(
             Locale::En.closed_connection_history_detail(100),
-            "Read-only · Last 100 closed connections in the current session."
+            "Read-only · Up to 100 closures observed in this session."
         );
         assert_eq!(
             Locale::ZhCn.closed_connection_history_detail(100),
-            "只读 · 当前会话最近关闭的 100 个连接。"
+            "只读 · 仅显示本次会话中观察到关闭的连接，最多 100 条。"
         );
     }
 
@@ -1365,6 +1385,20 @@ mod tests {
             (Message::RouteColumn, "ROUTE", "路线"),
             (Message::RuleColumn, "RULE", "规则"),
             (Message::CloseConnection, "Close", "关闭"),
+            (Message::ConnectionDetails, "Details", "详情"),
+            (Message::CloseDetails, "Close details", "关闭详情"),
+            (Message::Transport, "Transport", "传输协议"),
+            (Message::UnknownValue, "Unknown", "未知"),
+            (
+                Message::CurrentSampleTotals,
+                "Last reported totals · Active sample",
+                "最近报告的总量 · 活动采样",
+            ),
+            (
+                Message::ClosedSampleTotals,
+                "Last reported totals · Last sample before closure",
+                "最近报告的总量 · 关闭前最后一次采样",
+            ),
         ];
         for (key, english, chinese) in cases {
             assert_eq!(Locale::En.message(key), english, "English: {key:?}");
