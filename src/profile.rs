@@ -123,8 +123,6 @@ impl Profile {
         for key in [
             "listeners",
             "subscriptions",
-            "proxy-providers",
-            "rule-providers",
             "script",
             "post-up",
             "post-down",
@@ -138,6 +136,11 @@ impl Profile {
             }
             root.remove(key);
         }
+        // Inline providers are part of the active profile, not external files
+        // or downloads. Keep those two other vehicle types disabled until Paw
+        // owns their cache, origins and fetch policy.
+        allow_inline_providers(&mut root, "proxy-providers", true)?;
+        allow_inline_providers(&mut root, "rule-providers", false)?;
         for key in [
             "port",
             "socks-port",
@@ -165,6 +168,49 @@ impl Profile {
         root.insert("tun".into(), json!({"enable": false}));
         serde_saphyr::to_string(&root).map_err(|_| ProfileError::Encode)
     }
+}
+
+fn allow_inline_providers(
+    root: &mut Map<String, Value>,
+    key: &str,
+    proxies: bool,
+) -> Result<(), ProfileError> {
+    let Some(value) = root.get_mut(key) else {
+        return Ok(());
+    };
+    if value.is_null() || value.as_array().is_some_and(Vec::is_empty) {
+        root.remove(key);
+        return Ok(());
+    }
+    let providers = value
+        .as_object_mut()
+        .ok_or_else(|| ProfileError::UnsupportedField(key.into()))?;
+    for (index, entry) in providers.values_mut().enumerate() {
+        // Use only an index in diagnostics, never log provider-supplied names.
+        let path = || ProfileError::UnsupportedField(format!("{key}[{index}]"));
+        let provider = entry.as_object_mut().ok_or_else(path)?;
+        if provider.get("type").and_then(Value::as_str) != Some("inline")
+            || ["url", "path", "header"]
+                .iter()
+                .any(|field| provider.contains_key(*field))
+            || !provider
+                .get("payload")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    if proxies {
+                        items.iter().all(Value::is_object)
+                    } else {
+                        items.iter().all(Value::is_string)
+                    }
+                })
+        {
+            return Err(path());
+        }
+        if proxies {
+            provider.insert("allow-external-plugin".into(), json!(false));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -214,14 +260,38 @@ mod tests {
     }
 
     #[test]
+    fn permits_inline_payloads_but_not_provider_paths_or_downloads() {
+        let value = generated(
+            "proxy-providers: { local: {type: inline, allow-external-plugin: true, payload: [{name: Node, type: direct}]}}\n\
+             rule-providers: { local: {type: inline, behavior: domain, payload: [example.test]}}\n",
+        );
+        assert_eq!(
+            value["proxy-providers"]["local"]["allow-external-plugin"],
+            false
+        );
+        assert_eq!(
+            value["rule-providers"]["local"]["payload"][0],
+            "example.test"
+        );
+        for key in ["proxy-providers", "rule-providers"] {
+            for fields in [
+                "type: file, path: /tmp/secret",
+                "type: http, url: 'https://example.test/token'",
+                "type: inline, path: ../../escape, payload: []",
+                "type: inline, payload: invalid",
+            ] {
+                let profile = Profile::parse(&format!("{key}: {{hidden: {{{fields}}}}}")).unwrap();
+                assert!(matches!(
+                    profile.managed("127.0.0.1:19200".parse().unwrap(), 19201, "local-test"),
+                    Err(ProfileError::UnsupportedField(path)) if path == format!("{key}[0]")
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn rejects_external_file_and_explicit_side_effect_layers_in_m0() {
-        for key in [
-            "proxy-providers",
-            "rule-providers",
-            "listeners",
-            "subscriptions",
-            "post-up",
-        ] {
+        for key in ["listeners", "subscriptions", "post-up"] {
             let profile = Profile::parse(&format!("{key}: {{ x: y }}")).unwrap();
             assert!(matches!(
                 profile.managed("127.0.0.1:19200".parse().unwrap(), 19201, "local-test"),

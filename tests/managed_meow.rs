@@ -332,3 +332,28 @@ fn subscription_refresh_only_changes_disk_until_the_user_applies() {
     );
     assert_eq!(after.profile, started.profile);
 }
+
+#[test]
+#[ignore = "requires a local Meow binary: MEOW_BIN=/path/to/meow"]
+fn isolated_session_loads_inline_proxy_and_rule_providers() {
+    use meow_paw::engine::controller::Origin;
+
+    let binary = PathBuf::from(std::env::var_os("MEOW_BIN").expect("set MEOW_BIN"));
+    let profile = Profile::parse(
+        "strict: true\n\
+         mode: rule\n\
+         proxy-providers: {Embedded: {type: inline, payload: [{name: ProviderNode, type: socks5, server: 127.0.0.1, port: 9}]}}\n\
+         proxy-groups: [{name: Select, type: select, use: [Embedded]}]\n\
+         rule-providers: {Domains: {type: inline, behavior: domain, payload: [example.test]}}\n\
+         rules: ['RULE-SET,Domains,Select', 'MATCH,DIRECT']\n",
+    )
+    .unwrap();
+    let session = Session::launch(&binary, &profile, || false).unwrap();
+    let inventory = session.controller.inventory().unwrap();
+    assert!(inventory.nodes.iter().any(|node| {
+        node.name == "ProviderNode" && node.origin == Origin::Provider("Embedded".to_owned())
+    }));
+    let rules = session.controller.rules().unwrap();
+    assert_eq!(rules[0].payload, "Domains");
+    assert_eq!(rules[0].proxy, "Select");
+}
