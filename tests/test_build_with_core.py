@@ -22,22 +22,87 @@ class BuildWithCoreTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        (self.root / "vendor/meow-rs").mkdir(parents=True)
-        (self.root / "vendor/meow-rs/Cargo.toml").touch()
+        self.core = self.root / "vendor/meow-rs"
+        self.core.mkdir(parents=True)
+        self.git(self.root, "init", "-q")
+        self.git(self.core, "init", "-q")
+        (self.core / "Cargo.toml").write_text("[package]\nname = 'core'\n")
+        self.git(self.core, "add", "Cargo.toml")
+        self.git(self.core, "commit", "-qm", "core")
+        self.pin = self.git(self.core, "rev-parse", "HEAD").strip()
+        self.git(self.root, "update-index", "--add", "--cacheinfo", "160000", self.pin, "vendor/meow-rs")
+        self.git(self.root, "commit", "-qm", "parent")
         (self.root / "tools").mkdir()
         self.dest = self.root / "target/release"
         self.dest.mkdir(parents=True)
 
+    @staticmethod
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+             "-C", str(cwd), *args], check=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        ).stdout
+
     def run_main(self, platform, argv, run, replace=None):
         # Override only this module's platform view, leaving pathlib and tempfile intact.
-        platform_os = types.SimpleNamespace(name=platform, replace=replace or build.os.replace)
+        platform_os = types.SimpleNamespace(name=platform, replace=replace or build.os.replace,
+                                            fsdecode=build.os.fsdecode)
         with mock.patch.object(build, "__file__", str(self.root / "tools/build-with-core.py")), \
              mock.patch.object(build, "os", platform_os), \
-             mock.patch.object(build.subprocess, "run", side_effect=run), \
+             mock.patch.object(build, "cargo", side_effect=lambda cwd, *args: run(
+                 ["cargo", "build", "--locked", "--release", *args], cwd=cwd, check=True)), \
              mock.patch("sys.argv", ["build-with-core.py", *argv]), \
              contextlib.redirect_stdout(io.StringIO()) as output:
             build.main()
         return output.getvalue()
+
+    def assert_preflight_fails(self):
+        with mock.patch.object(build, "cargo") as cargo, \
+             mock.patch.object(build, "__file__", str(self.root / "tools/build-with-core.py")), \
+             mock.patch("sys.argv", ["build-with-core.py"]), \
+             contextlib.redirect_stderr(io.StringIO()) as error:
+            with self.assertRaises(SystemExit):
+                build.main()
+        cargo.assert_not_called()
+        self.assertIn("initialized, clean checkout", error.getvalue())
+        self.assertNotIn(str(self.root), error.getvalue())
+
+    def test_clean_committed_pin_passes(self):
+        build.verify_core(self.root, self.core)
+
+    def test_wrong_pin_even_if_index_is_staged_to_match(self):
+        (self.core / "Cargo.toml").write_text("changed\n")
+        self.git(self.core, "add", "Cargo.toml")
+        self.git(self.core, "commit", "-qm", "other")
+        other = self.git(self.core, "rev-parse", "HEAD").strip()
+        self.git(self.root, "update-index", "--cacheinfo", "160000", other, "vendor/meow-rs")
+        self.assert_preflight_fails()
+
+    def test_uninitialized_and_wrong_top_level(self):
+        import shutil
+        shutil.rmtree(self.core / ".git")
+        self.assert_preflight_fails()
+
+    def test_dirty_core(self):
+        for state in ("modified", "staged", "untracked"):
+            with self.subTest(state=state):
+                if state == "untracked":
+                    path = self.core / "new-source.rs"
+                    path.write_text("source")
+                else:
+                    path = self.core / "Cargo.toml"
+                    original = path.read_text()
+                    path.write_text("modified")
+                    if state == "staged":
+                        self.git(self.core, "add", "Cargo.toml")
+                self.assert_preflight_fails()
+                if state == "staged":
+                    self.git(self.core, "reset", "-q", "HEAD", "--", "Cargo.toml")
+                if state == "untracked":
+                    path.unlink()
+                else:
+                    path.write_text(original)
 
     def test_success_publishes_exact_core_atomically_for_platform_names(self):
         for platform, filename in (("posix", "meow"), ("nt", "meow.exe")):

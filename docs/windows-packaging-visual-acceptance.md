@@ -13,14 +13,14 @@ They are not evidence of a successful Windows run by themselves.
    `git submodule update --init --recursive` when dependencies are available,
    then compare `git -C vendor/meow-rs rev-parse HEAD` with the gitlink and
    check both worktrees are clean. Do not record local paths or private data in
-   evidence. At Paw commit `c2078538c9eac252a6ed3bbe24f86d1c8ee4f485`, the
-   recorded core commit is `4954a8d6f9d3ac602d6d5e0e22433ac892cc390f`.
+   evidence.
 2. When builds are appropriate, `python tools/build-with-core.py` builds the
    pinned core `meow-app`/`meow` and Paw with `--locked --release`, and copies
    `meow.exe` beside `meow-paw.exe` in `target/release`. The script requires an
-   initialized submodule but does **not** verify its checkout matches the
-   gitlink or is clean. Check those explicitly before building. Paw's Cargo
-   package version is `0.1.0` at this commit; the gitlink identifies the core,
+   initialized core checkout whose repository root and HEAD match the parent
+   commit's gitlink, with no tracked, staged, or non-ignored untracked changes.
+   It checks these before either build; a staged parent gitlink does not change
+   the required pin. Check the Paw worktree separately. The gitlink identifies the core,
    not a verified core version or binary signature. Record both commits and
    SHA-256 hashes of the two resulting binaries for the candidate package.
 3. Copy both executables together to a clean package directory. Paw looks for
