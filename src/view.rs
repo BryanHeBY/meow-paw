@@ -240,10 +240,7 @@ enum ConnectionDetailSelection {
         sample: std::sync::Arc<Vec<meow_paw::engine::controller::Connection>>,
         index: usize,
     },
-    Closed {
-        history: meow_paw::app::ConnectionHistory,
-        index: usize,
-    },
+    Closed(meow_paw::app::ClosedConnectionKey),
 }
 
 pub struct Paw {
@@ -286,7 +283,7 @@ pub struct Paw {
     #[cfg(any(target_os = "linux", windows))]
     connection_detail: Option<ConnectionDetailSelection>,
     connection_detail_focus: FocusHandle,
-    connection_detail_return: Option<(bool, usize)>,
+    connection_detail_return: Option<ConnectionDetailSelection>,
     active_connections_tab_focus: FocusHandle,
     closed_connections_tab_focus: FocusHandle,
     connection_filter: Entity<InputState>,
@@ -3179,6 +3176,12 @@ impl Paw {
             let selected_index = self.connection_detail.as_ref().and_then(|selection| {
                 detail_row_index(selection, &self.snapshot, self.closed_connections_open)
             });
+            let return_index = self
+                .connection_detail_return
+                .as_ref()
+                .and_then(|selection| {
+                    detail_row_index(selection, &self.snapshot, self.closed_connections_open)
+                });
             let table = if results.is_empty() {
                 let (title, detail) =
                     connection_empty_messages(self.closed_connections_open, rows.len());
@@ -3192,27 +3195,31 @@ impl Paw {
                             section_label(self.locale.message(Message::RouteColumn)),
                             section_label(self.locale.message(Message::RuleColumn)),
                             None,
+                            self.closed_connections_open,
                         )
                         .bg(rgb(CHROME)),
                     )
                     .children(results.into_iter().map(|(c, destination, route)| {
                         let index = rows.iter().position(|row| std::ptr::eq(*row, c)).unwrap();
                         let selected = selected_index == Some(index);
-                        let return_focus = selected
-                            || (selected_index.is_none()
-                                && self.connection_detail_return
-                                    == Some((self.closed_connections_open, index)));
+                        let return_focus =
+                            selected || (selected_index.is_none() && return_index == Some(index));
                         let selection = if self.closed_connections_open {
-                            ConnectionDetailSelection::Closed {
-                                history: self.snapshot.connection_history.clone(),
-                                index,
-                            }
+                            ConnectionDetailSelection::Closed(
+                                self.snapshot
+                                    .connection_history
+                                    .recent_keyed()
+                                    .nth(index)
+                                    .unwrap()
+                                    .0,
+                            )
                         } else {
                             ConnectionDetailSelection::Active {
                                 sample: self.snapshot.connections.as_ref().unwrap().clone(),
                                 index,
                             }
                         };
+                        let close_selection = selection.clone();
                         let details = small_connection_button(
                             ("connection-details", index),
                             self.locale.message(Message::ConnectionDetails),
@@ -3269,6 +3276,7 @@ impl Paw {
                                 c.rule.clone()
                             }),
                             Some(actions.into_any_element()),
+                            self.closed_connections_open,
                         );
                         let mut item = div().child(row);
                         if selected {
@@ -3279,8 +3287,7 @@ impl Paw {
                             )
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
-                                    this.connection_detail_return =
-                                        Some((this.closed_connections_open, index));
+                                    this.connection_detail_return = Some(close_selection.clone());
                                     this.connection_detail = None;
                                     this.connection_detail_focus.focus(window, cx);
                                     cx.notify();
@@ -4049,8 +4056,6 @@ fn matching_connections<'a>(
         .collect()
 }
 
-// History entries have no stable public key. Retaining the captured history keeps
-// its backing storage alive, so a changed or evicted history cannot select a new row.
 #[cfg(any(target_os = "linux", windows))]
 fn detail_row_index(
     selection: &ConnectionDetailSelection,
@@ -4058,13 +4063,10 @@ fn detail_row_index(
     closed: bool,
 ) -> Option<usize> {
     match selection {
-        ConnectionDetailSelection::Closed { history, index } if closed => {
-            let captured = history.recent().nth(*index)?;
-            snapshot
-                .connection_history
-                .recent()
-                .position(|row| std::ptr::eq(row, captured))
-        }
+        ConnectionDetailSelection::Closed(key) if closed => snapshot
+            .connection_history
+            .recent_keyed()
+            .position(|(candidate, _)| candidate == *key),
         ConnectionDetailSelection::Active { sample, index } if !closed => {
             let captured = sample.get(*index)?;
             let current = snapshot.connections.as_ref()?;
@@ -4242,7 +4244,7 @@ fn connection_empty_messages(closed: bool, total: usize) -> (Message, Message) {
 }
 
 #[cfg(any(target_os = "linux", windows))]
-fn connection_row(a: Div, b: Div, c: Div, action: Option<AnyElement>) -> Div {
+fn connection_row(a: Div, b: Div, c: Div, action: Option<AnyElement>, closed: bool) -> Div {
     div()
         .flex()
         .gap_3()
@@ -4255,7 +4257,12 @@ fn connection_row(a: Div, b: Div, c: Div, action: Option<AnyElement>) -> Div {
         .child(a.flex_1().min_w_0())
         .child(b.flex_1().min_w_0().text_color(rgb(FAINT)))
         .child(c.flex_1().min_w_0().text_color(rgb(FAINT)))
-        .child(div().w(px(132.)).flex_shrink_0().children(action))
+        .child(
+            div()
+                .w(px(if closed { 80. } else { 132. }))
+                .flex_shrink_0()
+                .children(action),
+        )
 }
 
 #[cfg(any(target_os = "linux", windows))]

@@ -85,18 +85,35 @@ impl TrafficHistory {
 
 pub const CLOSED_CONNECTION_LIMIT: usize = 100;
 
+/// An opaque, in-memory identity for one observed closed connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ClosedConnectionKey {
+    generation: u64,
+    sequence: u128,
+}
+
 /// Closed connections observed in the current profile generation, in memory only.
 #[derive(Clone, Debug, Default)]
 pub struct ConnectionHistory {
     previous: Option<Arc<Vec<Connection>>>,
-    closed: Arc<VecDeque<Connection>>,
+    closed: Arc<VecDeque<(ClosedConnectionKey, Connection)>>,
+    generation: u64,
+    next_sequence: u128,
 }
 
 impl ConnectionHistory {
     /// Returns the last observed metadata for closed connections, newest first.
     /// Closures detected in the same sample are ordered by descending ID.
     pub fn recent(&self) -> impl ExactSizeIterator<Item = &Connection> + '_ {
-        self.closed.iter().rev()
+        self.closed.iter().rev().map(|(_, connection)| connection)
+    }
+
+    /// Returns the same rows and order as `recent`, with stable per-closure keys.
+    /// Keys are valid only while the entry remains in this generation's history.
+    pub fn recent_keyed(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (ClosedConnectionKey, &Connection)> + '_ {
+        self.closed.iter().rev().map(|(key, row)| (*key, row))
     }
 
     fn record(&mut self, sample: Option<&Arc<Vec<Connection>>>) {
@@ -116,7 +133,15 @@ impl ConnectionHistory {
                     if closed.len() == CLOSED_CONNECTION_LIMIT {
                         closed.pop_front();
                     }
-                    closed.push_back(connection.clone());
+                    let key = ClosedConnectionKey {
+                        generation: self.generation,
+                        sequence: self.next_sequence,
+                    };
+                    self.next_sequence = self
+                        .next_sequence
+                        .checked_add(1)
+                        .expect("closed connection sequence exhausted");
+                    closed.push_back((key, connection.clone()));
                 }
             }
         }
@@ -1251,7 +1276,10 @@ fn retain_inventory(snapshot: &mut Snapshot, fresh: Option<Arc<Inventory>>) {
 }
 
 fn clear_connection_history(snapshot: &mut Snapshot) {
-    snapshot.connection_history = ConnectionHistory::default();
+    snapshot.connection_history = ConnectionHistory {
+        generation: snapshot.probe_epoch,
+        ..ConnectionHistory::default()
+    };
 }
 
 fn clear_rule_provider_state(snapshot: &mut Snapshot) {
@@ -1512,6 +1540,88 @@ mod tests {
         assert_eq!(ids.len(), CLOSED_CONNECTION_LIMIT);
         assert_eq!(ids[0], "102");
         assert_eq!(ids[99], "003");
+    }
+
+    #[test]
+    fn closed_keys_survive_new_closures_and_distinguish_reused_ids() {
+        let mut history = ConnectionHistory::default();
+        connection_sample(&mut history, vec![connection("a", "original")]);
+        connection_sample(&mut history, vec![]);
+        let captured = history.clone();
+        let original_key = captured.recent_keyed().next().unwrap().0;
+
+        connection_sample(
+            &mut history,
+            vec![connection("a", "reused"), connection("b", "other")],
+        );
+        connection_sample(&mut history, vec![]);
+        let rows = history.recent_keyed().collect::<Vec<_>>();
+        assert_eq!(
+            rows.iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>(),
+            ["b", "a", "a"]
+        );
+        assert_eq!(rows[2].0, original_key);
+        assert_ne!(rows[1].0, original_key);
+        assert_ne!(rows[0].0, rows[1].0);
+        assert_eq!(captured.recent_keyed().next().unwrap().0, original_key);
+        assert_eq!(rows[2].1.metadata.host, "original");
+        assert_eq!(rows[1].1.metadata.host, "reused");
+    }
+
+    #[test]
+    fn closed_keys_remain_stable_until_truncated() {
+        let mut history = ConnectionHistory::default();
+        connection_sample(&mut history, vec![connection("old", "old")]);
+        connection_sample(&mut history, vec![]);
+        let old_key = history.recent_keyed().next().unwrap().0;
+        connection_sample(
+            &mut history,
+            (0..CLOSED_CONNECTION_LIMIT - 1)
+                .map(|i| connection(&format!("{i:03}"), "host"))
+                .collect(),
+        );
+        connection_sample(&mut history, vec![]);
+        assert_eq!(history.recent_keyed().len(), CLOSED_CONNECTION_LIMIT);
+        assert_eq!(history.recent_keyed().last().unwrap().0, old_key);
+        let retained_key = history.recent_keyed().next().unwrap().0;
+        connection_sample(&mut history, vec![connection("new", "new")]);
+        connection_sample(&mut history, vec![]);
+        assert_eq!(history.recent_keyed().len(), CLOSED_CONNECTION_LIMIT);
+        assert!(!history.recent_keyed().any(|(key, _)| key == old_key));
+        assert!(history.recent_keyed().any(|(key, _)| key == retained_key));
+    }
+
+    #[test]
+    fn closed_keys_change_on_session_reset_and_baseline_is_cleared() {
+        let mut snapshot = Snapshot {
+            probe_epoch: 1,
+            ..Snapshot::default()
+        };
+        clear_connection_history(&mut snapshot);
+        connection_sample(
+            &mut snapshot.connection_history,
+            vec![connection("a", "old")],
+        );
+        connection_sample(&mut snapshot.connection_history, vec![]);
+        let old_key = snapshot.connection_history.recent_keyed().next().unwrap().0;
+        connection_sample(
+            &mut snapshot.connection_history,
+            vec![connection("live", "live")],
+        );
+
+        let snapshot = Mutex::new(snapshot);
+        clear_telemetry(&snapshot, 2);
+        let mut snapshot = snapshot.lock().unwrap();
+        assert_eq!(snapshot.connection_history.recent_keyed().len(), 0);
+        connection_sample(
+            &mut snapshot.connection_history,
+            vec![connection("a", "new")],
+        );
+        assert_eq!(snapshot.connection_history.recent_keyed().len(), 0);
+        connection_sample(&mut snapshot.connection_history, vec![]);
+        let (new_key, row) = snapshot.connection_history.recent_keyed().next().unwrap();
+        assert_eq!(row.id, "a");
+        assert_ne!(new_key, old_key);
     }
 
     #[test]
