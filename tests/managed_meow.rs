@@ -194,12 +194,43 @@ fn applies_local_profile_without_rebinding_and_preserves_it_on_rejection() {
         unreachable!()
     };
 
+    let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let endpoint = origin.local_addr().unwrap();
+    let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, mixed_port)).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        client,
+        "CONNECT {endpoint} HTTP/1.1\r\nHost: {endpoint}\r\n\r\n"
+    )
+    .unwrap();
+    let mut reply = Vec::new();
+    while !reply.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        client.read_exact(&mut byte).unwrap();
+        reply.push(byte[0]);
+        assert!(reply.len() < 4096);
+    }
+    assert!(std::str::from_utf8(&reply).unwrap().contains(" 200 "));
+    let (mut server, _) = origin.accept().unwrap();
+    server.write_all(b"X").unwrap();
+    let mut marker = [0];
+    client.read_exact(&mut marker).unwrap();
+    assert_eq!(marker, *b"X");
+
     desktop.apply_profile(candidate.clone()).unwrap();
     let applied = wait(&desktop, |s| s.profile.as_ref() == Some(&candidate));
     assert!(
         matches!(applied.engine, EngineStatus::Running { mixed_port: port } if port == mixed_port)
     );
     assert_eq!(applied.mode, Some(RoutingMode::Global));
+    // A real change keeps the listener bound, not the established TCP stream.
+    match client.read(&mut marker) {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        outcome => panic!("changed profile should close the tracked connection: {outcome:?}"),
+    }
     desktop.read_rules().unwrap();
     let rules = wait(&desktop, |s| s.rules.is_some()).rules.unwrap();
     assert_eq!(rules[0].proxy, "REJECT");

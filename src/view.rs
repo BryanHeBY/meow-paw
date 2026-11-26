@@ -848,6 +848,11 @@ impl Paw {
             profiles.insert(0, path);
         }
         let mut page = div().flex().flex_col().gap_3().child(import);
+        if self.state().2.is_some() {
+            page = page.child(div().text_sm().text_color(rgb(FAINT)).child(
+                "Apply live and Reload keep Meow running, but can disconnect active connections.",
+            ));
+        }
         if profiles.is_empty() {
             page = page.child(empty_state("No local profiles", "Import a YAML file. Paw prepares a separate session copy and leaves your file unchanged."));
         } else {
