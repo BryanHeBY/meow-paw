@@ -3,7 +3,10 @@
 use crate::subscription_store::{SubscriptionId, SubscriptionStore};
 use crate::{
     engine::{
-        controller::{Connection, Inventory, LogEntry, Origin, RoutingMode, Rule, Traffic},
+        controller::{
+            Connection, ControllerError, Inventory, LogEntry, Origin, RoutingMode, Rule,
+            RuleProviderStatus, Traffic,
+        },
         session::{ApplyError, Session},
     },
     profile::{Diagnostic, MAX_PROFILE_BYTES, Profile},
@@ -331,6 +334,8 @@ pub struct Snapshot {
     pub inventory: Option<Arc<Inventory>>,
     pub mode: Option<RoutingMode>,
     pub rules: Option<Arc<Vec<Rule>>>,
+    pub rule_providers: Option<Arc<BTreeMap<String, RuleProviderStatus>>>,
+    pub rule_provider_error: Option<String>,
     pub logs: Option<LogHistory>,
     pub traffic: Option<Traffic>,
     pub traffic_history: TrafficHistory,
@@ -485,6 +490,7 @@ enum Command {
     },
     SetMode(RoutingMode),
     ReadRules,
+    ReadRuleProviders,
     RefreshProvider(String),
     ProbeProxy {
         epoch: u64,
@@ -634,13 +640,21 @@ impl Desktop {
         self.send(Command::ReadRules)
     }
 
+    pub fn read_rule_providers(&self) -> io::Result<()> {
+        self.send(Command::ReadRuleProviders)
+    }
+
     pub fn close_connection(&self, id: String) -> io::Result<()> {
         self.send(Command::CloseConnection(id))
     }
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
-        self.invalidate_group_probe();
+        change(&self.snapshot, |s| {
+            s.group_probe = None;
+            s.rule_providers = None;
+            s.rule_provider_error = None;
+        });
     }
 
     fn send(&self, command: Command) -> io::Result<()> {
@@ -690,6 +704,8 @@ fn run(
     let (refresh_tx, refresh_rx) = mpsc::channel();
     let mut generation = 0_u64;
     let mut refresh_inflight = false;
+    let (rule_provider_tx, rule_provider_rx) = mpsc::channel();
+    let mut rule_provider_inflight = false;
     let (probe_tx, probe_rx) = mpsc::channel();
     let mut probe_inflight = false;
     let cancelled = || stop.load(Ordering::Acquire) || quit.load(Ordering::Acquire);
@@ -725,19 +741,19 @@ fn run(
                     generation = generation.wrapping_add(1);
                     session.take();
                     logs.take();
+                    clear_telemetry(snapshot, generation);
                     change(snapshot, |s| {
                         s.engine = EngineStatus::Error(format!("Meow exited ({code})"))
                     });
-                    clear_telemetry(snapshot, generation);
                 }
                 Err(error) => {
                     generation = generation.wrapping_add(1);
                     session.take();
                     logs.take();
+                    clear_telemetry(snapshot, generation);
                     change(snapshot, |s| {
                         s.engine = EngineStatus::Error(error.to_string())
                     });
-                    clear_telemetry(snapshot, generation);
                 }
             }
         }
@@ -759,6 +775,8 @@ fn run(
                     s.probe_epoch = generation;
                     s.probes = ProxyProbeResults::default();
                     s.group_probe = None;
+                    s.rule_providers = None;
+                    s.rule_provider_error = None;
                     s.profile = Some(path.clone());
                     s.diagnostics.clear();
                     s.action_error = None;
@@ -798,6 +816,8 @@ fn run(
                 change(snapshot, |s| {
                     s.refreshing_provider = None;
                     s.provider_error = None;
+                    s.rule_providers = None;
+                    s.rule_provider_error = None;
                     s.probe_epoch = generation;
                     s.probes = ProxyProbeResults::default();
                     s.group_probe = None;
@@ -978,6 +998,35 @@ fn run(
                     });
                 }
             }
+            Ok(Command::ReadRuleProviders) => {
+                if let Some(active) = &session {
+                    if rule_provider_inflight {
+                        change(snapshot, |s| {
+                            s.rule_provider_error =
+                                Some("Rule provider read is still finishing".into());
+                        });
+                        continue;
+                    }
+                    let controller = active.controller.clone();
+                    let tx = rule_provider_tx.clone();
+                    let epoch = generation;
+                    change(snapshot, |s| s.rule_provider_error = None);
+                    rule_provider_inflight = true;
+                    if thread::Builder::new()
+                        .name("paw-rule-provider-read".into())
+                        .spawn(move || {
+                            let _ = tx.send((epoch, controller.rule_providers()));
+                        })
+                        .is_err()
+                    {
+                        rule_provider_inflight = false;
+                        change(snapshot, |s| {
+                            s.rule_provider_error =
+                                Some("Could not start rule provider read".into());
+                        });
+                    }
+                }
+            }
             Ok(Command::CloseConnection(id)) => {
                 if let Some(active) = &session {
                     let result = active.controller.close_connection(&id);
@@ -998,6 +1047,15 @@ fn run(
             }
             change(snapshot, |s| finish_provider_refresh(s, result));
             next_sample = Instant::now();
+        }
+
+        while let Ok((epoch, result)) = rule_provider_rx.try_recv() {
+            rule_provider_inflight = false;
+            change(snapshot, |s| {
+                if !cancelled() {
+                    finish_rule_provider_read(s, epoch, result);
+                }
+            });
         }
 
         while let Ok(completion) = probe_rx.try_recv() {
@@ -1141,6 +1199,25 @@ fn retain_inventory(snapshot: &mut Snapshot, fresh: Option<Arc<Inventory>>) {
     }
 }
 
+fn finish_rule_provider_read(
+    snapshot: &mut Snapshot,
+    epoch: u64,
+    result: Result<BTreeMap<String, RuleProviderStatus>, ControllerError>,
+) {
+    if epoch != snapshot.probe_epoch || !matches!(snapshot.engine, EngineStatus::Running { .. }) {
+        return;
+    }
+    match result {
+        Ok(providers) => {
+            snapshot.rule_providers = Some(Arc::new(providers));
+            snapshot.rule_provider_error = None;
+        }
+        Err(error) => {
+            snapshot.rule_provider_error = Some(format!("Could not read rule providers: {error}"));
+        }
+    }
+}
+
 fn finish_provider_refresh(
     snapshot: &mut Snapshot,
     result: Result<(), crate::engine::controller::ControllerError>,
@@ -1214,6 +1291,8 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64) {
         s.provider_error = None;
         s.mode = None;
         s.rules = None;
+        s.rule_providers = None;
+        s.rule_provider_error = None;
         s.logs = None;
         s.connections = None;
         s.traffic = None;
@@ -1245,6 +1324,52 @@ fn load_profile(path: &std::path::Path) -> io::Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rule_provider_reads_keep_unknown_empty_errors_and_sessions_distinct() {
+        let mut snapshot = Snapshot {
+            engine: EngineStatus::Running { mixed_port: 1234 },
+            probe_epoch: 7,
+            inventory: Some(Arc::new(Inventory::default())),
+            rules: Some(Arc::new(Vec::new())),
+            action_error: Some("other action".into()),
+            provider_error: Some("proxy provider".into()),
+            ..Default::default()
+        };
+        assert!(snapshot.rule_providers.is_none());
+        finish_rule_provider_read(&mut snapshot, 7, Err(ControllerError::Status(404)));
+        assert!(snapshot.rule_providers.is_none());
+        assert_eq!(
+            snapshot.rule_provider_error.as_deref(),
+            Some("Could not read rule providers: Controller returned HTTP 404")
+        );
+        finish_rule_provider_read(&mut snapshot, 7, Ok(BTreeMap::new()));
+        let empty = Arc::clone(snapshot.rule_providers.as_ref().unwrap());
+        assert!(empty.is_empty());
+        assert!(snapshot.rule_provider_error.is_none());
+        finish_rule_provider_read(&mut snapshot, 7, Err(ControllerError::InvalidResponse));
+        assert!(Arc::ptr_eq(
+            &empty,
+            snapshot.rule_providers.as_ref().unwrap()
+        ));
+        assert_eq!(snapshot.action_error.as_deref(), Some("other action"));
+        assert_eq!(snapshot.provider_error.as_deref(), Some("proxy provider"));
+        assert!(snapshot.inventory.is_some());
+        assert!(snapshot.rules.is_some());
+
+        let snapshot = Mutex::new(snapshot);
+        clear_telemetry(&snapshot, 8);
+        let mut state = snapshot.lock().unwrap();
+        assert!(state.rule_providers.is_none());
+        assert!(state.rule_provider_error.is_none());
+        finish_rule_provider_read(&mut state, 7, Ok(BTreeMap::new()));
+        finish_rule_provider_read(&mut state, 7, Err(ControllerError::Status(503)));
+        assert!(state.rule_providers.is_none());
+        assert!(state.rule_provider_error.is_none());
+        state.engine = EngineStatus::Stopped;
+        finish_rule_provider_read(&mut state, 8, Ok(BTreeMap::new()));
+        assert!(state.rule_providers.is_none());
+    }
 
     #[test]
     fn group_targets_are_ordered_deduplicated_and_skip_ambiguous_members() {

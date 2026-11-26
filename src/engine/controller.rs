@@ -60,6 +60,26 @@ pub struct ProviderStatus {
     pub subscription_info: Option<ProviderUsage>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleProviderStatus {
+    #[serde(default)]
+    pub behavior: String,
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub rule_count: Option<usize>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub vehicle_type: String,
+}
+
+#[derive(Deserialize)]
+struct RuleProvidersResponse {
+    providers: BTreeMap<String, RuleProviderStatus>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ProviderUsage {
@@ -377,6 +397,12 @@ impl Controller {
         Ok(self.get::<Rules>(self.endpoint(&["rules"]))?.rules)
     }
 
+    pub fn rule_providers(&self) -> Result<BTreeMap<String, RuleProviderStatus>, ControllerError> {
+        Ok(self
+            .get::<RuleProvidersResponse>(self.endpoint(&["providers", "rules"]))?
+            .providers)
+    }
+
     pub fn read_log_stream(
         &self,
         mut sink: impl FnMut(LogEntry),
@@ -488,6 +514,43 @@ mod tests {
         net::TcpListener,
         thread,
     };
+
+    #[test]
+    fn decodes_rule_provider_response_with_empty_and_partial_statuses() {
+        let empty: RuleProvidersResponse = serde_json::from_str(r#"{"providers":{}}"#).unwrap();
+        assert!(empty.providers.is_empty());
+        let response: RuleProvidersResponse = serde_json::from_str(
+            r#"{"providers":{"map key":{"name":"ignored","behavior":"domain","format":"yaml","ruleCount":12,"updatedAt":"2026-11-26T04:00:00Z","vehicleType":"HTTP"},"partial":{"behavior":"ipcidr","ruleCount":null}}}"#,
+        )
+        .unwrap();
+        let full = &response.providers["map key"];
+        assert_eq!(full.behavior, "domain");
+        assert_eq!(full.format, "yaml");
+        assert_eq!(full.rule_count, Some(12));
+        assert_eq!(full.updated_at.as_deref(), Some("2026-11-26T04:00:00Z"));
+        assert_eq!(full.vehicle_type, "HTTP");
+        let partial = &response.providers["partial"];
+        assert_eq!(partial.behavior, "ipcidr");
+        assert_eq!(partial.format, "");
+        assert_eq!(partial.rule_count, None);
+        assert_eq!(partial.updated_at, None);
+        assert_eq!(partial.vehicle_type, "");
+        assert!(serde_json::from_str::<RuleProvidersResponse>(r#"{}"#).is_err());
+    }
+
+    #[test]
+    fn reads_rule_providers_and_reports_unavailable_endpoint() {
+        let (controller, worker) = fixture(vec![
+            ("GET /providers/rules HTTP/", r#"{"providers":{}}"#),
+            ("GET /providers/rules HTTP/", "x"),
+        ]);
+        assert!(controller.rule_providers().unwrap().is_empty());
+        assert!(matches!(
+            controller.rule_providers(),
+            Err(ControllerError::Status(503))
+        ));
+        worker.join().unwrap();
+    }
 
     fn fixture(
         responses: Vec<(&'static str, &'static str)>,
