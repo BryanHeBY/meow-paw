@@ -1209,12 +1209,13 @@ impl Paw {
         self.error = None;
     }
 
-    fn proxies(&self, cx: &mut Context<Self>) -> Div {
+    fn proxies(&self, window_width: Pixels, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
         if let Some(inventory) = self.snapshot.inventory.as_ref() {
             let value = self.search.read(cx).value();
             let query = value.trim().to_lowercase();
             let mut count = 0;
+            let columns = route_columns(window_width);
             use meow_paw::app::{ProxyProbeStatus, ProxyProbeTarget, parse_probe_url};
             let delays = unambiguous_route_delays(inventory);
             let probe_ready = parse_probe_url(&self.probe_url.read(cx).value()).is_some();
@@ -1344,7 +1345,7 @@ impl Paw {
                                             ),
                                         ),
                                     )
-                                    .children(members.chunks(2).map(|pair| {
+                                    .children(members.chunks(columns).map(|pair| {
                                         let row = div().flex().gap_2().children(pair.iter().map(
                                             |&(index, member)| {
                                                 let (g, n) = (name.clone(), member.to_owned());
@@ -1499,9 +1500,9 @@ impl Paw {
                                                     })
                                             },
                                         ));
-                                        row.when(pair.len() == 1, |el| {
-                                            el.child(div().flex_1().min_w_0())
-                                        })
+                                        row.children(
+                                            (pair.len()..columns).map(|_| div().flex_1().min_w_0()),
+                                        )
                                     }));
                                 if expandable && query.is_empty() {
                                     panel.child(
@@ -1641,7 +1642,7 @@ impl Paw {
                 page.children(groups)
             };
         }
-        let _ = cx;
+        let _ = (window_width, cx);
         empty_state(
             "No proxy groups yet",
             "Select a YAML profile and start the engine to view its groups.",
@@ -1874,7 +1875,7 @@ impl Render for Paw {
         let compact = window.viewport_size().width < px(820.);
         let body = match self.page {
             Page::Overview => self.overview(window.viewport_size().width >= px(960.), cx),
-            Page::Proxies => self.proxies(cx),
+            Page::Proxies => self.proxies(window.viewport_size().width, cx),
             Page::Profiles => self.profiles(cx),
             Page::Connections => self.connections(cx),
             Page::Rules => self.rules(cx),
@@ -2120,6 +2121,21 @@ fn mode_groups(
         visible.extend(global);
     }
     visible
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn route_columns(width: Pixels) -> usize {
+    if width > px(1920.) {
+        5
+    } else if width > px(1450.) {
+        4
+    } else if width > px(1024.) {
+        3
+    } else if width >= px(600.) {
+        2
+    } else {
+        1
+    }
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -2429,6 +2445,23 @@ mod tests {
             ]
         );
         assert_eq!(default.next().next().next(), default);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn route_grid_adapts_at_desktop_breakpoints() {
+        for (width, columns) in [
+            (599., 1),
+            (600., 2),
+            (1024., 2),
+            (1025., 3),
+            (1450., 3),
+            (1451., 4),
+            (1920., 4),
+            (1921., 5),
+        ] {
+            assert_eq!(super::route_columns(super::px(width)), columns);
+        }
     }
 
     #[test]
