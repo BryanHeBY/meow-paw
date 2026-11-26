@@ -743,13 +743,23 @@ impl Paw {
         let (phase, color, port) = self.state();
         let metric_row = || div().flex().gap_3().when(!wide, |el| el.flex_col());
         let width = |card: Div| card.w_full().min_w_0().when(wide, |el| el.flex_1());
+        let phase = self.locale.message(match phase {
+            "Running" => Message::Running,
+            "Starting" => Message::OverviewStarting,
+            "Stopping" => Message::Stopping,
+            "Needs attention" => Message::OverviewNeedsAttention,
+            _ => Message::OverviewStopped,
+        });
         let session_state = chip(phase, color, if port.is_some() { 0xe2f6ec } else { BG });
-        let address = port.map_or_else(|| "No listener".into(), |p| format!("127.0.0.1:{p}"));
+        let address = port.map_or_else(
+            || self.locale.message(Message::OverviewNoListener).into(),
+            |p| format!("127.0.0.1:{p}"),
+        );
         let copy = if let Some(port) = port {
             secondary_button(
                 "copy-listener",
                 if self.copied_listener == Some(port) {
-                    "Copied"
+                    self.locale.message(Message::OverviewCopied)
                 } else {
                     self.locale.message(Message::Copy)
                 },
@@ -761,28 +771,108 @@ impl Paw {
             }))
             .into_any_element()
         } else {
-            chip("Loopback", BLUE, SOFT_BLUE).into_any_element()
+            chip(self.locale.message(Message::Loopback), BLUE, SOFT_BLUE).into_any_element()
         };
-        let profile =
-            form_card(self.locale.message(Message::ActiveProfile))
-                .child(form_row(
-                    self.locale.message(Message::Configuration),
-                    self.overview_profile_label(),
-                    secondary_button("home-profiles", self.locale.message(Message::Profiles))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.page = Page::Profiles;
-                            cx.notify();
-                        })),
-                ))
-                .child(form_row(
-                    self.locale.message(Message::ProxyGroups),
-                    self.locale.message(Message::SelectedRoutes),
-                    secondary_button("home-proxies", self.locale.message(Message::Proxies))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.page = Page::Proxies;
-                            cx.notify();
-                        })),
-                ));
+        #[cfg(any(target_os = "linux", windows))]
+        let (running, applying, active) = (
+            self.state().2.is_some(),
+            self.snapshot.applying_profile.is_some(),
+            self.snapshot.profile.as_deref(),
+        );
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let (running, applying, active) = (false, false, None);
+        let current = overview_current_profile(running, applying, active);
+        let current_label = current.map_or_else(
+            || {
+                self.locale
+                    .message(if running {
+                        Message::OverviewUnconfirmedProfile
+                    } else {
+                        Message::OverviewNoRunningProfile
+                    })
+                    .to_owned()
+            },
+            |path| self.display_profile_name(path),
+        );
+        let next_label = self.profile.as_deref().map_or_else(
+            || self.locale.message(Message::NoProfileSelected).to_owned(),
+            |path| self.display_profile_name(path),
+        );
+        let refresh = overview_refresh_path(current, &self.subscription_paths).and_then(|path| {
+            self.subscription_for(path)
+                .map(|(_, id)| (id, path.to_owned()))
+        });
+        let profile = form_card(self.locale.message(Message::OverviewCurrentProfile))
+            .child(form_row(
+                self.locale.message(Message::Running),
+                current_label,
+                secondary_button("home-profiles", self.locale.message(Message::Profiles)).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.page = Page::Profiles;
+                        cx.notify();
+                    }),
+                ),
+            ))
+            .child(form_row(
+                self.locale.message(Message::OverviewNextProfile),
+                next_label,
+                div(),
+            ))
+            .when_some(refresh, |card, (id, path)| {
+                card.child(
+                    div()
+                        .px_4()
+                        .pb_4()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(FAINT))
+                                .child(self.locale.message(Message::SubscriptionDetail)),
+                        )
+                        .when(!self.subscription_busy, |el| {
+                            el.child(
+                                secondary_button(
+                                    "home-refresh-subscription",
+                                    self.locale.message(Message::OverviewRefreshSubscription),
+                                )
+                                .on_click(cx.listener(
+                                    move |paw, _, _, cx| {
+                                        #[cfg(any(target_os = "linux", windows))]
+                                        if overview_current_profile(
+                                            paw.state().2.is_some(),
+                                            paw.snapshot.applying_profile.is_some(),
+                                            paw.snapshot.profile.as_deref(),
+                                        ) == Some(path.as_path())
+                                            && paw.subscription_paths.contains(&path)
+                                        {
+                                            paw.refresh_subscription(id, cx);
+                                        }
+                                        #[cfg(not(any(target_os = "linux", windows)))]
+                                        let _ = (paw, id, &path, cx);
+                                    },
+                                )),
+                            )
+                        }),
+                )
+            })
+            .when(
+                self.subscription_busy || self.subscription_notice.is_some(),
+                |card| {
+                    card.child(div().px_4().pb_4().text_sm().text_color(rgb(FAINT)).child(
+                        if self.subscription_busy {
+                            self.locale.message(Message::DownloadingSubscription)
+                        } else {
+                            self.subscription_notice
+                                .map(|notice| self.locale.message(notice))
+                                .unwrap_or_default()
+                        },
+                    ))
+                },
+            );
+        let route = self.overview_route(cx);
         let network = form_card(self.locale.message(Message::Network))
             .child(form_row(
                 self.locale.message(Message::MeowEngine),
@@ -796,8 +886,8 @@ impl Paw {
             ))
             .child(form_row(
                 self.locale.message(Message::SystemProxy),
-                self.locale.message(Message::ExistingSystemProxy),
-                chip("Unmanaged", FAINT, BG),
+                self.locale.message(Message::SystemProxyDescription),
+                chip(self.locale.message(Message::Unmanaged), FAINT, BG),
             ));
         let usage_toggle = secondary_button(
             "home-toggle-usage",
@@ -816,7 +906,8 @@ impl Paw {
             .flex()
             .flex_col()
             .gap_3()
-            .child(metric_row().child(width(profile)).child(width(network)))
+            .child(metric_row().child(width(profile)).child(width(route)))
+            .child(network)
             .child(
                 card()
                     .flex()
@@ -966,22 +1057,31 @@ impl Paw {
             .into_owned()
     }
 
-    fn profile_label(&self) -> String {
-        self.profile.as_deref().map_or_else(
-            || self.locale.message(Message::NoProfileSelected).into(),
-            |path| self.display_profile_name(path),
-        )
-    }
-
-    fn overview_profile_label(&self) -> String {
+    fn overview_route(&self, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
-        if self.state().2.is_some() {
-            return self.snapshot.profile.as_deref().map_or_else(
-                || "Unconfirmed live profile".into(),
-                |path| self.display_profile_name(path),
-            );
-        }
-        self.profile_label()
+        let (detail, selections) =
+            if self.state().2.is_some() && self.snapshot.applying_profile.is_none() {
+                overview_route_summary(self.snapshot.mode, self.snapshot.inventory.as_deref())
+            } else {
+                (Message::OverviewRouteUnavailable, Vec::new())
+            };
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let (detail, selections): (Message, Vec<String>) =
+            (Message::OverviewRouteUnavailable, Vec::new());
+        form_card(self.locale.message(Message::OverviewCurrentRoute)).child(form_row(
+            self.locale.message(detail),
+            if selections.is_empty() {
+                "—".to_owned()
+            } else {
+                selections.join(" · ")
+            },
+            secondary_button("home-proxies", self.locale.message(Message::Proxies)).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.page = Page::Proxies;
+                    cx.notify();
+                }),
+            ),
+        ))
     }
 
     fn profiles(&self, cx: &mut Context<Self>) -> Div {
@@ -2709,6 +2809,68 @@ fn empty_state(title: &'static str, detail: &'static str) -> Div {
         .child(div().text_sm().text_color(rgb(FAINT)).child(detail))
 }
 
+fn overview_current_profile(
+    running: bool,
+    applying: bool,
+    active: Option<&std::path::Path>,
+) -> Option<&std::path::Path> {
+    if running && !applying { active } else { None }
+}
+
+fn overview_refresh_path<'a>(
+    current: Option<&'a std::path::Path>,
+    known_subscriptions: &[PathBuf],
+) -> Option<&'a std::path::Path> {
+    current.filter(|path| {
+        known_subscriptions
+            .iter()
+            .any(|known| known.as_path() == *path)
+    })
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn overview_route_summary(
+    mode: Option<meow_paw::engine::controller::RoutingMode>,
+    inventory: Option<&meow_paw::engine::controller::Inventory>,
+) -> (Message, Vec<String>) {
+    use meow_paw::engine::controller::RoutingMode;
+    match mode {
+        Some(RoutingMode::Direct) => (Message::OverviewDirectRoute, Vec::new()),
+        Some(mode @ (RoutingMode::Rule | RoutingMode::Global)) => {
+            let selections = inventory
+                .map(|inventory| {
+                    mode_groups(inventory, Some(mode))
+                        .into_iter()
+                        .filter(|(name, _)| {
+                            mode != RoutingMode::Global || name.as_str() == "GLOBAL"
+                        })
+                        .filter_map(|(name, group)| {
+                            group
+                                .now
+                                .as_deref()
+                                .filter(|value| !value.is_empty())
+                                .map(|value| format!("{name} → {value}"))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if selections.is_empty() {
+                (Message::OverviewRouteUnavailable, selections)
+            } else {
+                (
+                    if mode == RoutingMode::Global {
+                        Message::OverviewGlobalSelection
+                    } else {
+                        Message::OverviewRouteSelections
+                    },
+                    selections,
+                )
+            }
+        }
+        None => (Message::OverviewRouteUnavailable, Vec::new()),
+    }
+}
+
 #[cfg(any(target_os = "linux", windows))]
 fn mode_groups(
     inventory: &meow_paw::engine::controller::Inventory,
@@ -2969,6 +3131,93 @@ fn paw_badge(size: f32) -> Div {
 #[cfg(test)]
 mod tests {
     use super::Page;
+
+    #[test]
+    fn overview_current_profile_requires_a_confirmed_running_identity() {
+        use super::overview_current_profile;
+        use std::path::Path;
+        let active = Some(Path::new("active"));
+        assert_eq!(overview_current_profile(true, false, active), active);
+        assert_eq!(overview_current_profile(false, false, active), None);
+        assert_eq!(overview_current_profile(true, true, active), None);
+        assert_eq!(overview_current_profile(true, false, None), None);
+    }
+
+    #[test]
+    fn overview_refresh_requires_the_confirmed_profile_to_be_a_known_subscription() {
+        use super::{overview_current_profile, overview_refresh_path};
+        use std::path::{Path, PathBuf};
+        let active = Path::new("active");
+        let next = PathBuf::from("next");
+        let known = vec![next];
+        assert_eq!(overview_refresh_path(Some(active), &known), None);
+        assert_eq!(overview_refresh_path(None, &known), None);
+        assert_eq!(
+            overview_refresh_path(Some(Path::new("next")), &known),
+            Some(Path::new("next"))
+        );
+        assert_eq!(
+            overview_refresh_path(
+                overview_current_profile(true, true, Some(Path::new("next"))),
+                &known
+            ),
+            None
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn overview_routes_report_mode_and_group_selections_without_guessing() {
+        use super::overview_route_summary;
+        use meow_paw::engine::controller::{Inventory, Proxy, RoutingMode};
+        use meow_paw::i18n::Message;
+        let mut inventory = Inventory::default();
+        inventory.groups.insert(
+            "GLOBAL".into(),
+            Proxy {
+                now: Some("chosen".into()),
+                ..Proxy::default()
+            },
+        );
+        inventory.groups.insert(
+            "work".into(),
+            Proxy {
+                now: Some("node".into()),
+                ..Proxy::default()
+            },
+        );
+        inventory.groups.insert(
+            "hidden".into(),
+            Proxy {
+                now: Some("secret".into()),
+                hidden: true,
+                ..Proxy::default()
+            },
+        );
+        assert_eq!(
+            overview_route_summary(None, Some(&inventory)),
+            (Message::OverviewRouteUnavailable, vec![])
+        );
+        assert_eq!(
+            overview_route_summary(Some(RoutingMode::Direct), Some(&inventory)),
+            (Message::OverviewDirectRoute, vec![])
+        );
+        assert_eq!(
+            overview_route_summary(Some(RoutingMode::Global), Some(&inventory)),
+            (
+                Message::OverviewGlobalSelection,
+                vec!["GLOBAL → chosen".into()]
+            )
+        );
+        assert_eq!(
+            overview_route_summary(Some(RoutingMode::Rule), Some(&inventory)),
+            (Message::OverviewRouteSelections, vec!["work → node".into()])
+        );
+        assert_eq!(
+            overview_route_summary(Some(RoutingMode::Rule), None),
+            (Message::OverviewRouteUnavailable, vec![])
+        );
+    }
 
     #[test]
     fn subscription_url_preflight_matches_downloader_policy() {

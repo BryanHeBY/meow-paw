@@ -31,6 +31,21 @@ pub enum Message {
     ModeGlobal,
     ModeDirect,
     ActiveProfile,
+    OverviewCurrentProfile,
+    OverviewStarting,
+    OverviewNeedsAttention,
+    OverviewStopped,
+    OverviewNoListener,
+    OverviewCopied,
+    OverviewNoRunningProfile,
+    OverviewUnconfirmedProfile,
+    OverviewNextProfile,
+    OverviewRefreshSubscription,
+    OverviewCurrentRoute,
+    OverviewRouteUnavailable,
+    OverviewRouteSelections,
+    OverviewGlobalSelection,
+    OverviewDirectRoute,
     Configuration,
     ProxyGroups,
     SelectedRoutes,
@@ -224,6 +239,21 @@ fn english(key: Message) -> &'static str {
         Message::ModeGlobal => "Global",
         Message::ModeDirect => "Direct",
         Message::ActiveProfile => "Active profile",
+        Message::OverviewCurrentProfile => "Current profile",
+        Message::OverviewStarting => "Starting…",
+        Message::OverviewNeedsAttention => "Needs attention",
+        Message::OverviewStopped => "Stopped",
+        Message::OverviewNoListener => "No listener",
+        Message::OverviewCopied => "Copied",
+        Message::OverviewNoRunningProfile => "No running profile",
+        Message::OverviewUnconfirmedProfile => "Running profile unconfirmed",
+        Message::OverviewNextProfile => "Next session",
+        Message::OverviewRefreshSubscription => "Refresh subscription",
+        Message::OverviewCurrentRoute => "Current route",
+        Message::OverviewRouteUnavailable => "Route information unavailable",
+        Message::OverviewRouteSelections => "Group selections · Rules may use different routes",
+        Message::OverviewGlobalSelection => "Global group selection",
+        Message::OverviewDirectRoute => "Direct mode",
         Message::Configuration => "Configuration",
         Message::ProxyGroups => "Proxy groups",
         Message::SelectedRoutes => "Selected routes",
@@ -400,6 +430,21 @@ fn chinese(key: Message) -> &'static str {
         Message::ModeGlobal => "全局",
         Message::ModeDirect => "直连",
         Message::ActiveProfile => "当前配置",
+        Message::OverviewCurrentProfile => "当前配置",
+        Message::OverviewStarting => "正在启动…",
+        Message::OverviewNeedsAttention => "需要处理",
+        Message::OverviewStopped => "已停止",
+        Message::OverviewNoListener => "未监听",
+        Message::OverviewCopied => "已复制",
+        Message::OverviewNoRunningProfile => "没有运行中的配置",
+        Message::OverviewUnconfirmedProfile => "运行中的配置尚未确认",
+        Message::OverviewNextProfile => "下次会话",
+        Message::OverviewRefreshSubscription => "刷新订阅",
+        Message::OverviewCurrentRoute => "当前路线",
+        Message::OverviewRouteUnavailable => "路线信息不可用",
+        Message::OverviewRouteSelections => "代理组选择 · 不同规则可能使用不同路线",
+        Message::OverviewGlobalSelection => "全局代理组选择",
+        Message::OverviewDirectRoute => "直连模式",
         Message::Configuration => "配置文件",
         Message::ProxyGroups => "代理组",
         Message::SelectedRoutes => "已选路线",
@@ -627,6 +672,54 @@ mod tests {
         assert_eq!(Locale::En.message(Message::Home), "Home");
         assert_eq!(Locale::ZhCn.message(Message::Home), "首页");
     }
+    #[test]
+    fn overview_state_labels_are_localized() {
+        let cases = [
+            (
+                Message::OverviewCurrentProfile,
+                "Current profile",
+                "当前配置",
+            ),
+            (
+                Message::OverviewNoRunningProfile,
+                "No running profile",
+                "没有运行中的配置",
+            ),
+            (
+                Message::OverviewUnconfirmedProfile,
+                "Running profile unconfirmed",
+                "运行中的配置尚未确认",
+            ),
+            (Message::OverviewNextProfile, "Next session", "下次会话"),
+            (
+                Message::OverviewRefreshSubscription,
+                "Refresh subscription",
+                "刷新订阅",
+            ),
+            (Message::OverviewCurrentRoute, "Current route", "当前路线"),
+            (
+                Message::OverviewRouteUnavailable,
+                "Route information unavailable",
+                "路线信息不可用",
+            ),
+            (
+                Message::OverviewRouteSelections,
+                "Group selections · Rules may use different routes",
+                "代理组选择 · 不同规则可能使用不同路线",
+            ),
+            (
+                Message::OverviewGlobalSelection,
+                "Global group selection",
+                "全局代理组选择",
+            ),
+            (Message::OverviewDirectRoute, "Direct mode", "直连模式"),
+        ];
+        for (key, english, chinese) in cases {
+            assert_eq!(Locale::En.message(key), english);
+            assert_eq!(Locale::ZhCn.message(key), chinese);
+        }
+    }
+
     #[test]
     fn settings_badges_and_unlock_help_are_localized() {
         let cases = [
