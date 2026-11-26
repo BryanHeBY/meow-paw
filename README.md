@@ -40,6 +40,8 @@ Without an override, Linux uses the first nonempty `LC_ALL`, `LC_MESSAGES`, or
 names such as `zh_CN.UTF-8` and `zh-Hans-CN` are recognized; missing or
 unsupported values fall back to English. A present but unsupported override
 also falls back to English. The shell relies on native font fallback for CJK
-glyphs, so a suitable system font must be installed. This first slice covers
-navigation and shell controls; page content is still being localized. Persistent
-language selection in Settings is a separate future step.
+glyphs, so a suitable system font must be installed. Navigation, shell controls,
+and fixed labels and descriptions on Home, Proxies, and Settings are localized.
+Live statuses, engine-provided content, and other page content remain in English
+or their original language. Persistent language selection in Settings is a
+separate future step.

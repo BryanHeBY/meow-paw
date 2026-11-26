@@ -684,7 +684,7 @@ impl Paw {
                 if self.copied_listener == Some(port) {
                     "Copied"
                 } else {
-                    "Copy"
+                    self.locale.message(Message::Copy)
                 },
             )
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -696,41 +696,48 @@ impl Paw {
         } else {
             chip("Loopback", BLUE, SOFT_BLUE).into_any_element()
         };
-        let profile = form_card("Active profile")
+        let profile =
+            form_card(self.locale.message(Message::ActiveProfile))
+                .child(form_row(
+                    self.locale.message(Message::Configuration),
+                    self.overview_profile_label(),
+                    secondary_button("home-profiles", self.locale.message(Message::Profiles))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.page = Page::Profiles;
+                            cx.notify();
+                        })),
+                ))
+                .child(form_row(
+                    self.locale.message(Message::ProxyGroups),
+                    self.locale.message(Message::SelectedRoutes),
+                    secondary_button("home-proxies", self.locale.message(Message::Proxies))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.page = Page::Proxies;
+                            cx.notify();
+                        })),
+                ));
+        let network = form_card(self.locale.message(Message::Network))
             .child(form_row(
-                "Configuration",
-                self.overview_profile_label(),
-                secondary_button("home-profiles", "Profiles").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.page = Page::Profiles;
-                        cx.notify();
-                    },
-                )),
+                self.locale.message(Message::MeowEngine),
+                self.locale.message(Message::ManagedSession),
+                session_state,
             ))
             .child(form_row(
-                "Proxy groups",
-                "Selected routes",
-                secondary_button("home-proxies", self.locale.message(Message::Proxies)).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.page = Page::Proxies;
-                        cx.notify();
-                    }),
-                ),
-            ));
-        let network = form_card("Network")
-            .child(form_row("Meow engine", "Managed session", session_state))
-            .child(form_row("Local listener", address, copy))
+                self.locale.message(Message::LocalListener),
+                address,
+                copy,
+            ))
             .child(form_row(
-                "System proxy",
-                "Existing system proxy",
+                self.locale.message(Message::SystemProxy),
+                self.locale.message(Message::ExistingSystemProxy),
                 chip("Unmanaged", FAINT, BG),
             ));
         let usage_toggle = secondary_button(
             "home-toggle-usage",
             if self.show_usage {
-                "Hide details"
+                self.locale.message(Message::HideDetails)
             } else {
-                "Show details"
+                self.locale.message(Message::ShowDetails)
             },
         )
         .on_click(cx.listener(|this, _, _, cx| {
@@ -1336,7 +1343,11 @@ impl Paw {
                                         .child(compact_chip(
                                             format!(
                                                 "{route_count} {}",
-                                                if route_count == 1 { "route" } else { "routes" }
+                                                self.locale.message(if route_count == 1 {
+                                                    Message::Route
+                                                } else {
+                                                    Message::Routes
+                                                })
                                             ),
                                             FAINT,
                                             BG,
@@ -1377,7 +1388,7 @@ impl Paw {
                                             .py_2()
                                             .text_sm()
                                             .text_color(rgb(FAINT))
-                                            .child("This group has no candidate routes."),
+                                            .child(self.locale.message(Message::NoCandidateRoutes)),
                                     );
                                 }
                                 let group_name = name.clone();
@@ -1389,7 +1400,7 @@ impl Paw {
                                         div().flex().justify_end().child(
                                             secondary_button(
                                                 SharedString::from(format!("proxy-order:{name}")),
-                                                order.label(),
+                                                self.locale.message(order.message()),
                                             )
                                             .on_click(
                                                 cx.listener(move |paw, _, _, cx| {
@@ -1502,7 +1513,7 @@ impl Paw {
                                                                 SharedString::from(format!(
                                                                     "probe:{name}:{index}"
                                                                 )),
-                                                                "Test",
+                                                                self.locale.message(Message::Test),
                                                             )
                                                             .on_click(cx.listener(
                                                                 move |paw, _, _, cx| {
@@ -1583,14 +1594,23 @@ impl Paw {
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(div().text_sm().text_color(rgb(FAINT)).child("Filter"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child(self.locale.message(Message::Filter)),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .child(Input::new(&self.search).cleanable(true)),
                 )
-                .child(chip(format!("{count} groups"), BLUE, SOFT_BLUE));
+                .child(chip(
+                    format!("{count} {}", self.locale.message(Message::Groups)),
+                    BLUE,
+                    SOFT_BLUE,
+                ));
             let mut node_counts = std::collections::HashMap::new();
             for node in &inventory.nodes {
                 if let meow_paw::engine::controller::Origin::Provider(origin) = &node.origin {
@@ -1653,7 +1673,11 @@ impl Paw {
                                         .child(compact_chip(
                                             format!(
                                                 "{count} {}",
-                                                if count == 1 { "node" } else { "nodes" }
+                                                self.locale.message(if count == 1 {
+                                                    Message::Node
+                                                } else {
+                                                    Message::Nodes
+                                                })
                                             ),
                                             FAINT,
                                             BG,
@@ -1675,7 +1699,7 @@ impl Paw {
                                     } else if busy {
                                         "Refresh busy"
                                     } else {
-                                        "Refresh"
+                                        self.locale.message(Message::Refresh)
                                     },
                                 )
                                 .when(!busy, |button| {
@@ -1693,15 +1717,17 @@ impl Paw {
                         })
                 })
                 .collect::<Vec<_>>();
-            let probe_settings =
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().text_sm().text_color(rgb(FAINT)).child(
-                        "Latency test · Meow opens this HTTPS URL through the chosen proxy.",
-                    ))
-                    .child(Input::new(&self.probe_url).cleanable(true));
+            let probe_settings = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child(self.locale.message(Message::LatencyTestDescription)),
+                )
+                .child(Input::new(&self.probe_url).cleanable(true));
             let page = div()
                 .flex()
                 .flex_col()
@@ -1714,14 +1740,14 @@ impl Paw {
                             .mt_2()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Providers"),
+                            .child(self.locale.message(Message::Providers)),
                     )
                     .children(providers)
                 });
             return if groups.is_empty() {
                 page.child(empty_state(
-                    "No matching groups",
-                    "Try another route or group name.",
+                    self.locale.message(Message::NoMatchingGroups),
+                    self.locale.message(Message::TryAnotherRoute),
                 ))
             } else {
                 page.children(groups)
@@ -1729,8 +1755,8 @@ impl Paw {
         }
         let _ = (window_width, cx);
         empty_state(
-            "No proxy groups yet",
-            "Select a YAML profile and start the engine to view its groups.",
+            self.locale.message(Message::NoProxyGroups),
+            self.locale.message(Message::StartToViewGroups),
         )
     }
 
@@ -1886,20 +1912,20 @@ impl Paw {
             || "No executable selected".into(),
             |p| p.display().to_string(),
         );
-        let system = form_card("System")
+        let system = form_card(self.locale.message(Message::System))
             .child(form_row(
-                "System proxy",
-                "Paw does not change the operating system’s proxy.",
+                self.locale.message(Message::SystemProxy),
+                self.locale.message(Message::SystemProxyDescription),
                 chip("Unmanaged", FAINT, BG),
             ))
             .child(form_row(
-                "TUN mode",
-                "A virtual network interface is not available in this build.",
+                self.locale.message(Message::TunMode),
+                self.locale.message(Message::TunDescription),
                 chip("Unavailable", FAINT, BG),
             ))
             .child(form_row(
-                "Local listener",
-                "Only apps configured to use Paw are routed through it.",
+                self.locale.message(Message::LocalListener),
+                self.locale.message(Message::ListenerDescription),
                 chip("Loopback", BLUE, SOFT_BLUE),
             ));
         let shown_path = binary.clone();
@@ -1913,12 +1939,12 @@ impl Paw {
                     gpui_kit::component::tooltip::Tooltip::new(shown_path.clone()).build(window, cx)
                 })
             });
-        let engine = form_card("Meow engine")
+        let engine = form_card(self.locale.message(Message::MeowEngine))
             .child(form_row_with_detail(
-                "Meow executable",
+                self.locale.message(Message::MeowExecutable),
                 path_detail,
                 if self.can_change_binary() {
-                    secondary_button("select-binary", "Browse…")
+                    secondary_button("select-binary", self.locale.message(Message::Browse))
                         .on_click(cx.listener(|this, _, _, cx| this.choose_file(true, cx)))
                         .into_any_element()
                 } else {
@@ -1934,9 +1960,9 @@ impl Paw {
                             secondary_button(
                                 "engine-path-reveal",
                                 if self.show_engine_path {
-                                    "Hide full path"
+                                    self.locale.message(Message::HideFullPath)
                                 } else {
-                                    "Show full path"
+                                    self.locale.message(Message::ShowFullPath)
                                 },
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -1954,32 +1980,36 @@ impl Paw {
                                     .child(binary.clone()),
                             )
                             .child(
-                                secondary_button("engine-path-copy", "Copy path").on_click(
-                                    cx.listener(move |_, _, _, cx| {
+                                secondary_button(
+                                    "engine-path-copy",
+                                    self.locale.message(Message::CopyPath),
+                                )
+                                .on_click(cx.listener(
+                                    move |_, _, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             binary.clone(),
                                         ));
-                                    }),
-                                ),
+                                    },
+                                )),
                             )
                         }),
                 )
             });
         let app = form_card("Meow Paw")
             .child(form_row(
-                "Tray behavior",
-                "Closing the window keeps Paw running when a desktop tray is available.",
+                self.locale.message(Message::TrayBehavior),
+                self.locale.message(Message::TrayDescription),
                 chip("Keep running", BLUE, SOFT_BLUE),
             ))
             .child(form_row(
-                "Application version",
+                self.locale.message(Message::ApplicationVersion),
                 std::env::consts::OS,
                 chip(env!("CARGO_PKG_VERSION"), FAINT, BG),
             ))
             .child(form_row(
-                "Quit application",
-                "Quitting also stops the managed engine.",
-                secondary_button("quit-paw", "Quit Meow Paw")
+                self.locale.message(Message::QuitApplication),
+                self.locale.message(Message::QuitDescription),
+                secondary_button("quit-paw", self.locale.message(Message::QuitPaw))
                     .on_click(cx.listener(|_, _, _, cx| cx.quit())),
             ));
         div()
@@ -2314,11 +2344,11 @@ impl ProxyOrder {
         }
     }
 
-    fn label(self) -> &'static str {
+    fn message(self) -> Message {
         match self {
-            Self::Configured => "Sort: Default",
-            Self::Delay => "Sort: Latency",
-            Self::Name => "Sort: Name",
+            Self::Configured => Message::SortDefault,
+            Self::Delay => Message::SortLatency,
+            Self::Name => Message::SortName,
         }
     }
 }
