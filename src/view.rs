@@ -1019,6 +1019,8 @@ impl Paw {
                 div()
                     .text_sm()
                     .text_color(rgb(FAINT))
+                    .child(self.locale.message(Message::ProfileSelectionDetail))
+                    .child(" ")
                     .child(self.locale.message(Message::LiveApplyWarning)),
             );
         }
@@ -1028,7 +1030,7 @@ impl Paw {
                 self.locale.message(Message::ImportYamlDetail),
             ));
         } else {
-            page = page.children(profiles.into_iter().enumerate().map(|(index, profile)| {
+            page = page.children(profiles.into_iter().map(|profile| {
                 let next = selected == Some(profile);
                 #[cfg(any(target_os = "linux", windows))]
                 let active =
@@ -1047,21 +1049,22 @@ impl Paw {
                 let forget_path = profile.clone();
                 let subscription = self.subscription_for(profile).map(|(_, id)| id);
                 let name = self.display_profile_name(profile);
+                let action_id = |action: &str| SharedString::from(format!("{action}:{profile:?}"));
                 let details = if subscription.is_some() {
                     self.locale.message(Message::SubscriptionDetail).to_owned()
                 } else {
                     profile.display().to_string()
                 };
                 card()
+                    .min_w_0()
                     .flex()
-                    .items_center()
-                    .justify_between()
+                    .flex_col()
                     .gap_3()
                     .child(
                         div()
                             .min_w_0()
                             .flex_1()
-                            .child(div().font_weight(FontWeight::BOLD).child(name))
+                            .child(div().font_weight(FontWeight::BOLD).truncate().child(name))
                             .child(
                                 div()
                                     .mt_1()
@@ -1071,102 +1074,113 @@ impl Paw {
                                     .child(details),
                             ),
                     )
-                    .when(active, |el| {
-                        el.child(chip(
-                            self.locale.message(Message::Running),
-                            0x168460,
-                            0xe2f6ec,
-                        ))
-                    })
-                    .when(next && !active, |el| {
-                        el.child(chip(
-                            self.locale.message(Message::NextSession),
-                            BLUE,
-                            SOFT_BLUE,
-                        ))
-                    })
-                    .when(applying == Some(profile), |el| {
-                        el.child(chip(
-                            self.locale.message(Message::Applying),
-                            BLUE,
-                            SOFT_BLUE,
-                        ))
-                    })
-                    .when(live && applying.is_none(), |el| {
-                        el.child(
-                            secondary_button(
-                                ("profile-apply", index),
-                                self.locale.message(if active {
-                                    Message::Reload
-                                } else {
-                                    Message::ApplyLive
-                                }),
-                            )
-                            .on_click(cx.listener(
-                                move |paw, _, _, cx| {
-                                    paw.apply_local_profile(apply_path.clone());
-                                    cx.notify();
-                                },
-                            )),
-                        )
-                    })
-                    .when_some(
-                        subscription.filter(|_| !self.subscription_busy),
-                        |el, id| {
-                            el.child(
-                                secondary_button(
-                                    ("profile-refresh", index),
-                                    self.locale.message(Message::Refresh),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .when(active, |el| {
+                                el.child(chip(
+                                    self.locale.message(Message::Running),
+                                    0x168460,
+                                    0xe2f6ec,
+                                ))
+                            })
+                            .when(next, |el| {
+                                el.child(chip(
+                                    self.locale.message(Message::NextSession),
+                                    BLUE,
+                                    SOFT_BLUE,
+                                ))
+                            })
+                            .when(applying == Some(profile), |el| {
+                                el.child(chip(
+                                    self.locale.message(Message::Applying),
+                                    BLUE,
+                                    SOFT_BLUE,
+                                ))
+                            })
+                            .when(live && applying.is_none(), |el| {
+                                el.child(
+                                    secondary_button(
+                                        action_id("profile-apply"),
+                                        self.locale.message(if active {
+                                            Message::Reload
+                                        } else {
+                                            Message::ApplyLive
+                                        }),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |paw, _, _, cx| {
+                                            paw.apply_local_profile(apply_path.clone());
+                                            cx.notify();
+                                        },
+                                    )),
                                 )
-                                .on_click(cx.listener(
-                                    move |paw, _, _, cx| {
-                                        paw.refresh_subscription(id, cx);
-                                    },
-                                )),
-                            )
-                        },
-                    )
-                    .when(!next, |el| {
-                        el.child(
-                            secondary_button(
-                                ("profile-use", index),
-                                self.locale.message(Message::Use),
-                            )
-                            .on_click(cx.listener(
-                                move |paw, _, _, cx| {
-                                    paw.select_local_profile(use_path.clone());
-                                    cx.notify();
+                            })
+                            .when_some(
+                                subscription.filter(|_| !self.subscription_busy),
+                                |el, id| {
+                                    el.child(
+                                        secondary_button(
+                                            action_id("profile-refresh"),
+                                            self.locale.message(Message::Refresh),
+                                        )
+                                        .on_click(
+                                            cx.listener(move |paw, _, _, cx| {
+                                                paw.refresh_subscription(id, cx);
+                                            }),
+                                        ),
+                                    )
                                 },
-                            )),
-                        )
-                    })
-                    .when(
-                        subscription.is_none()
-                            && !active
-                            && applying != Some(profile)
-                            && self.preferences.profiles().contains(profile),
-                        |el| {
-                            el.child(
-                                secondary_button(
-                                    ("profile-forget", index),
-                                    self.locale.message(Message::Forget),
+                            )
+                            .when(!next, |el| {
+                                el.child(
+                                    secondary_button(
+                                        action_id("profile-use"),
+                                        self.locale.message(Message::Use),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |paw, _, _, cx| {
+                                            paw.select_local_profile(use_path.clone());
+                                            cx.notify();
+                                        },
+                                    )),
                                 )
-                                .on_click(cx.listener(
-                                    move |paw, _, _, cx| {
-                                        match paw.preferences.forget_profile(&forget_path) {
-                                            Ok(()) => {
-                                                if paw.profile.as_ref() == Some(&forget_path) {
-                                                    paw.profile = None;
+                            })
+                            .when(
+                                subscription.is_none()
+                                    && !active
+                                    && applying != Some(profile)
+                                    && self.preferences.profiles().contains(profile),
+                                |el| {
+                                    el.child(
+                                        secondary_button(
+                                            action_id("profile-forget"),
+                                            self.locale.message(Message::Forget),
+                                        )
+                                        .on_click(
+                                            cx.listener(move |paw, _, _, cx| {
+                                                match paw.preferences.forget_profile(&forget_path) {
+                                                    Ok(()) => {
+                                                        if paw.profile.as_ref()
+                                                            == Some(&forget_path)
+                                                        {
+                                                            paw.profile = None;
+                                                        }
+                                                        paw.error = None;
+                                                    }
+                                                    Err(error) => {
+                                                        paw.error = Some(error.to_string())
+                                                    }
                                                 }
-                                                paw.error = None;
-                                            }
-                                            Err(error) => paw.error = Some(error.to_string()),
-                                        }
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                        },
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                },
+                            ),
                     )
             }));
         }

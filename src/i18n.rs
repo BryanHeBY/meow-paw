@@ -96,6 +96,7 @@ pub enum Message {
     ImportSubscription,
     DownloadingSubscription,
     LiveApplyWarning,
+    ProfileSelectionDetail,
     NoLocalProfiles,
     ImportYamlDetail,
     SubscriptionDetail,
@@ -298,6 +299,9 @@ fn english(key: Message) -> &'static str {
         Message::ImportLocalYaml => "Import local YAML",
         Message::ImportSubscription => "Import HTTPS subscription from clipboard",
         Message::DownloadingSubscription => "Downloading subscription…",
+        Message::ProfileSelectionDetail => {
+            "Use selects the next session; Apply live changes the running profile."
+        }
         Message::LiveApplyWarning => {
             "Apply live and Reload keep Meow running, but can disconnect active connections."
         }
@@ -454,6 +458,9 @@ fn chinese(key: Message) -> &'static str {
         Message::ImportLocalYaml => "导入本地 YAML",
         Message::ImportSubscription => "从剪贴板导入 HTTPS 订阅",
         Message::DownloadingSubscription => "正在下载订阅…",
+        Message::ProfileSelectionDetail => {
+            "使用会选择下次会话的配置；实时应用会更改正在运行的配置。"
+        }
         Message::LiveApplyWarning => "实时应用和重新加载会保持 Meow 运行，但可能断开活动连接。",
         Message::NoLocalProfiles => "暂无本地配置",
         Message::ImportYamlDetail => "导入 YAML 文件。Paw 会为会话准备单独的副本，不会更改原文件。",
@@ -726,6 +733,11 @@ mod tests {
                 Message::DownloadingSubscription,
                 "Downloading subscription…",
                 "正在下载订阅…",
+            ),
+            (
+                Message::ProfileSelectionDetail,
+                "Use selects the next session; Apply live changes the running profile.",
+                "使用会选择下次会话的配置；实时应用会更改正在运行的配置。",
             ),
             (
                 Message::LiveApplyWarning,
