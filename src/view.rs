@@ -1141,17 +1141,27 @@ impl Paw {
                         .flex_col()
                         .gap_2()
                         .child(section_label(self.locale.message(Message::SubscriptionUrl)))
-                        .child(Input::new(&self.subscription_url).cleanable(true))
                         .child(
                             div()
                                 .flex()
                                 .flex_wrap()
+                                .items_center()
                                 .gap_2()
+                                .child(
+                                    div()
+                                        .flex_basis(px(260.))
+                                        .flex_grow(1.)
+                                        .min_w_0()
+                                        .child(Input::new(&self.subscription_url).cleanable(true)),
+                                )
                                 .child(
                                     secondary_button(
                                         "confirm-subscription",
                                         self.locale.message(Message::ImportSubscription),
                                     )
+                                    .bg(rgb(BLUE))
+                                    .text_color(rgb(SURFACE))
+                                    .hover(|style| style.bg(rgb(0x124db5)))
                                     .on_click(cx.listener(
                                         |paw, _, window, cx| paw.import_subscription(window, cx),
                                     )),
@@ -1208,7 +1218,7 @@ impl Paw {
                 self.locale.message(Message::ImportYamlDetail),
             ));
         } else {
-            page = page.children(profiles.into_iter().map(|profile| {
+            let cards = profiles.into_iter().map(|profile| {
                 let next = selected == Some(profile);
                 #[cfg(any(target_os = "linux", windows))]
                 let active =
@@ -1234,10 +1244,13 @@ impl Paw {
                     profile.display().to_string()
                 };
                 card()
+                    .flex_basis(px(300.))
+                    .flex_grow(1.)
                     .min_w_0()
+                    .p_3()
                     .flex()
                     .flex_col()
-                    .gap_3()
+                    .gap_2()
                     .child(
                         div()
                             .min_w_0()
@@ -1360,7 +1373,8 @@ impl Paw {
                                 },
                             ),
                     )
-            }));
+            });
+            page = page.child(div().flex().flex_wrap().gap_3().children(cards));
         }
         #[cfg(any(target_os = "linux", windows))]
         if !self.snapshot.diagnostics.is_empty() {
