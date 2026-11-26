@@ -400,6 +400,9 @@ pub struct Snapshot {
     pub engine: EngineStatus,
     pub profile: Option<PathBuf>,
     pub applying_profile: Option<PathBuf>,
+    // Submission is reserved before the worker confirms that an apply has begun.
+    apply_reservation: Option<ApplyReservation>,
+    next_apply_id: u64,
     pub diagnostics: Vec<Diagnostic>,
     pub inventory: Option<Arc<Inventory>>,
     pub inventory_stale: bool,
@@ -423,6 +426,12 @@ pub struct Snapshot {
     pub probe_busy: bool,
     pub group_probe: Option<GroupComparison>,
     group_run_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ApplyReservation {
+    id: u64,
+    generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -580,7 +589,7 @@ impl ProfileInput {
 
 enum Command {
     Start(ProfileInput),
-    ApplyProfile(ProfileInput),
+    ApplyProfile(ProfileInput, ApplyReservation),
     Select {
         group: String,
         member: String,
@@ -637,8 +646,7 @@ impl Desktop {
     }
 
     pub fn apply_profile(&self, path: PathBuf) -> io::Result<()> {
-        self.invalidate_group_probe();
-        self.send(Command::ApplyProfile(ProfileInput::Local(path)))
+        self.submit_apply(ProfileInput::Local(path))
     }
 
     pub fn start_subscription(
@@ -654,11 +662,7 @@ impl Desktop {
         store: SubscriptionStore,
         id: SubscriptionId,
     ) -> io::Result<()> {
-        self.invalidate_group_probe();
-        self.send(Command::ApplyProfile(ProfileInput::Subscription {
-            store,
-            id,
-        }))
+        self.submit_apply(ProfileInput::Subscription { store, id })
     }
 
     pub fn select(&self, group: String, member: String) -> io::Result<()> {
@@ -747,11 +751,44 @@ impl Desktop {
     }
 
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::Release);
         change(&self.snapshot, |s| {
+            self.stop.store(true, Ordering::Release);
+            s.apply_reservation = None;
             s.group_probe = None;
             clear_rule_provider_state(s);
         });
+    }
+
+    fn submit_apply(&self, input: ProfileInput) -> io::Result<()> {
+        let mut s = self.snapshot.lock().expect("snapshot poisoned");
+        if self.stop.load(Ordering::Acquire)
+            || self.quit.load(Ordering::Acquire)
+            || !matches!(s.engine, EngineStatus::Running { .. })
+        {
+            return Err(Error::new(
+                ErrorKind::NotConnected,
+                "Start Meow before applying a live profile",
+            ));
+        }
+        if s.apply_reservation.is_some() {
+            return Err(Error::new(
+                ErrorKind::WouldBlock,
+                "A live profile apply is already pending",
+            ));
+        }
+        s.next_apply_id = s.next_apply_id.wrapping_add(1);
+        let reservation = ApplyReservation {
+            id: s.next_apply_id,
+            generation: s.probe_epoch,
+        };
+        s.apply_reservation = Some(reservation);
+        if let Err(error) = self.send(Command::ApplyProfile(input, reservation)) {
+            s.apply_reservation = None;
+            return Err(error);
+        }
+        s.group_probe = None;
+        s.revision = s.revision.wrapping_add(1);
+        Ok(())
     }
 
     fn send(&self, command: Command) -> io::Result<()> {
@@ -768,7 +805,10 @@ impl Desktop {
 
 impl Drop for Desktop {
     fn drop(&mut self) {
-        self.quit.store(true, Ordering::Release);
+        change(&self.snapshot, |s| {
+            self.quit.store(true, Ordering::Release);
+            s.apply_reservation = None;
+        });
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -810,24 +850,31 @@ fn run(
         if quit.load(Ordering::Acquire) {
             break;
         }
-        if stop.swap(false, Ordering::AcqRel) {
+        let stopping = {
+            let mut s = snapshot.lock().expect("snapshot poisoned");
+            if stop.swap(false, Ordering::AcqRel) {
+                s.apply_reservation = None;
+                s.engine = EngineStatus::Stopping;
+                s.revision = s.revision.wrapping_add(1);
+                true
+            } else {
+                false
+            }
+        };
+        if stopping {
             generation = generation.wrapping_add(1);
             // Retire already queued actions from the old session.
             while receiver.try_recv().is_ok() {}
-            if let Some(active) = session.take() {
-                change(snapshot, |s| s.engine = EngineStatus::Stopping);
-                let result = active.stop();
-                change(snapshot, |s| {
-                    s.engine = match result {
-                        Ok(()) => EngineStatus::Stopped,
-                        Err(error) => EngineStatus::Error(error.to_string()),
-                    }
-                });
+            let engine = if let Some(active) = session.take() {
+                match active.stop() {
+                    Ok(()) => EngineStatus::Stopped,
+                    Err(error) => EngineStatus::Error(error.to_string()),
+                }
             } else {
-                change(snapshot, |s| s.engine = EngineStatus::Stopped);
-            }
+                EngineStatus::Stopped
+            };
             logs.take();
-            clear_telemetry(snapshot, generation);
+            clear_telemetry(snapshot, generation, engine);
             continue;
         }
 
@@ -838,19 +885,17 @@ fn run(
                     generation = generation.wrapping_add(1);
                     session.take();
                     logs.take();
-                    clear_telemetry(snapshot, generation);
-                    change(snapshot, |s| {
-                        s.engine = EngineStatus::Error(format!("Meow exited ({code})"))
-                    });
+                    clear_telemetry(
+                        snapshot,
+                        generation,
+                        EngineStatus::Error(format!("Meow exited ({code})")),
+                    );
                 }
                 Err(error) => {
                     generation = generation.wrapping_add(1);
                     session.take();
                     logs.take();
-                    clear_telemetry(snapshot, generation);
-                    change(snapshot, |s| {
-                        s.engine = EngineStatus::Error(error.to_string())
-                    });
+                    clear_telemetry(snapshot, generation, EngineStatus::Error(error.to_string()));
                 }
             }
         }
@@ -907,7 +952,21 @@ fn run(
                     }),
                 }
             }
-            Ok(Command::ApplyProfile(input)) => {
+            Ok(Command::ApplyProfile(input, reservation)) => {
+                let path = input.key();
+                {
+                    let mut s = snapshot.lock().expect("snapshot poisoned");
+                    if !begin_apply(
+                        &mut s,
+                        reservation,
+                        generation,
+                        session.is_some(),
+                        cancelled(),
+                        &path,
+                    ) {
+                        continue;
+                    }
+                }
                 // A pending provider response belongs to the previous profile.
                 generation = generation.wrapping_add(1);
                 change(snapshot, |s| {
@@ -919,18 +978,7 @@ fn run(
                     s.group_probe = None;
                     clear_connection_history(s);
                 });
-                let path = input.key();
-                let Some(active) = &session else {
-                    change(snapshot, |s| {
-                        s.action_error = Some("Start Meow before applying a live profile".into())
-                    });
-                    continue;
-                };
-                change(snapshot, |s| {
-                    s.applying_profile = Some(path.clone());
-                    s.action_error = None;
-                    s.diagnostics.clear();
-                });
+                let active = session.as_ref().expect("apply requires a session");
                 let result = input
                     .load()
                     .map_err(ApplyError::Prepare)
@@ -944,24 +992,7 @@ fn run(
                     None
                 };
                 change(snapshot, |s| {
-                    s.applying_profile = None;
-                    match result {
-                        Ok(()) => {
-                            s.profile = Some(path);
-                            s.mode = mode;
-                            s.inventory = None;
-                            s.inventory_stale = false;
-                            s.rules = None;
-                        }
-                        Err(error) => {
-                            if !error.rejected() {
-                                s.profile = None;
-                                s.mode = None;
-                                s.rules = None;
-                            }
-                            s.action_error = Some(error.message());
-                        }
-                    }
+                    finish_apply(s, reservation, path, mode, result);
                 });
                 next_sample = Instant::now();
             }
@@ -1306,6 +1337,69 @@ fn run(
             next_sample = Instant::now() + Duration::from_millis(250);
         }
     }
+    change(snapshot, |s| {
+        s.apply_reservation = None;
+        s.applying_profile = None;
+    });
+}
+
+fn release_apply(snapshot: &mut Snapshot, reservation: ApplyReservation) {
+    if snapshot.apply_reservation == Some(reservation) {
+        snapshot.apply_reservation = None;
+    }
+}
+
+fn finish_apply(
+    snapshot: &mut Snapshot,
+    reservation: ApplyReservation,
+    path: PathBuf,
+    mode: Option<RoutingMode>,
+    result: Result<(), ApplyError>,
+) {
+    snapshot.applying_profile = None;
+    match result {
+        Ok(()) => {
+            snapshot.profile = Some(path);
+            snapshot.mode = mode;
+            snapshot.inventory = None;
+            snapshot.inventory_stale = false;
+            snapshot.rules = None;
+        }
+        Err(error) => {
+            if !error.rejected() {
+                snapshot.profile = None;
+                snapshot.mode = None;
+                snapshot.rules = None;
+            }
+            snapshot.action_error = Some(error.message());
+        }
+    }
+    release_apply(snapshot, reservation);
+}
+
+fn begin_apply(
+    snapshot: &mut Snapshot,
+    reservation: ApplyReservation,
+    generation: u64,
+    has_session: bool,
+    cancelled: bool,
+    path: &std::path::Path,
+) -> bool {
+    if snapshot.apply_reservation != Some(reservation)
+        || reservation.generation != generation
+        || snapshot.probe_epoch != generation
+        || !has_session
+        || cancelled
+        || !matches!(snapshot.engine, EngineStatus::Running { .. })
+    {
+        release_apply(snapshot, reservation);
+        return false;
+    }
+    snapshot.applying_profile = Some(path.to_path_buf());
+    snapshot.action_error = None;
+    snapshot.diagnostics.clear();
+    snapshot.revision = snapshot.revision.wrapping_add(1);
+    true
 }
 
 fn retain_inventory(snapshot: &mut Snapshot, fresh: Option<Arc<Inventory>>) {
@@ -1441,8 +1535,11 @@ fn finish_proxy_probe(
     }
 }
 
-fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64) {
+fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64, engine: EngineStatus) {
     change(snapshot, |s| {
+        s.engine = engine;
+        s.apply_reservation = None;
+        s.applying_profile = None;
         s.probe_epoch = generation;
         s.probes = ProxyProbeResults::default();
         s.group_probe = None;
@@ -1485,6 +1582,206 @@ fn load_profile(path: &std::path::Path) -> io::Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn apply_test_desktop(capacity: usize) -> (Desktop, Receiver<Command>) {
+        let (command, receiver) = mpsc::sync_channel(capacity);
+        let desktop = Desktop {
+            command,
+            snapshot: Arc::new(Mutex::new(Snapshot {
+                engine: EngineStatus::Running { mixed_port: 1234 },
+                profile: Some(PathBuf::from("a.yaml")),
+                probe_epoch: 7,
+                ..Default::default()
+            })),
+            stop: Arc::new(AtomicBool::new(false)),
+            quit: Arc::new(AtomicBool::new(false)),
+            worker: None,
+        };
+        (desktop, receiver)
+    }
+
+    fn queued_apply(receiver: &Receiver<Command>) -> (ProfileInput, ApplyReservation) {
+        match receiver.try_recv().expect("queued apply") {
+            Command::ApplyProfile(input, reservation) => (input, reservation),
+            _ => panic!("expected apply command"),
+        }
+    }
+
+    #[test]
+    fn apply_reservation_blocks_rapid_local_and_subscription_commands() {
+        let (desktop, receiver) = apply_test_desktop(8);
+        let id = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        desktop.apply_profile("b.yaml".into()).unwrap();
+        assert_eq!(
+            desktop.apply_profile("c.yaml".into()).unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            desktop
+                .apply_subscription(SubscriptionStore::new("subscriptions".into()), id)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WouldBlock
+        );
+        let pending = desktop.snapshot();
+        assert_eq!(pending.profile, Some("a.yaml".into()));
+        assert!(pending.applying_profile.is_none());
+        let (input, reservation) = queued_apply(&receiver);
+        assert_eq!(input.key(), PathBuf::from("b.yaml"));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        {
+            let mut s = desktop.snapshot.lock().unwrap();
+            assert!(begin_apply(
+                &mut s,
+                reservation,
+                7,
+                true,
+                false,
+                &input.key()
+            ));
+            assert_eq!(s.applying_profile, Some("b.yaml".into()));
+        }
+        assert_eq!(
+            desktop.apply_profile("c.yaml".into()).unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
+        {
+            let mut s = desktop.snapshot.lock().unwrap();
+            finish_apply(&mut s, reservation, input.key(), None, Ok(()));
+        }
+        assert_eq!(desktop.snapshot().profile, Some("b.yaml".into()));
+        desktop
+            .apply_subscription(SubscriptionStore::new("subscriptions".into()), id)
+            .unwrap();
+        assert_eq!(
+            desktop.apply_profile("c.yaml".into()).unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
+        assert!(matches!(
+            queued_apply(&receiver).0,
+            ProfileInput::Subscription { .. }
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn apply_failure_and_enqueue_errors_release_reservation() {
+        let (desktop, receiver) = apply_test_desktop(1);
+        desktop.apply_profile("b.yaml".into()).unwrap();
+        let (input, reservation) = queued_apply(&receiver);
+        {
+            let mut s = desktop.snapshot.lock().unwrap();
+            assert!(begin_apply(
+                &mut s,
+                reservation,
+                7,
+                true,
+                false,
+                &input.key()
+            ));
+            finish_apply(
+                &mut s,
+                reservation,
+                input.key(),
+                None,
+                Err(ApplyError::Prepare(Error::other("invalid profile"))),
+            );
+            assert_eq!(s.profile, Some("a.yaml".into()));
+            assert!(s.applying_profile.is_none());
+            assert_eq!(s.action_error.as_deref(), Some("invalid profile"));
+        }
+        desktop.read_rules().unwrap();
+        assert_eq!(
+            desktop.apply_profile("c.yaml".into()).unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
+        assert!(desktop.snapshot().apply_reservation.is_none());
+        assert!(matches!(receiver.try_recv(), Ok(Command::ReadRules)));
+        desktop.apply_profile("c.yaml".into()).unwrap();
+        let (_, reservation) = queued_apply(&receiver);
+        release_apply(&mut desktop.snapshot.lock().unwrap(), reservation);
+        drop(receiver);
+        assert_eq!(
+            desktop.apply_profile("d.yaml".into()).unwrap_err().kind(),
+            ErrorKind::BrokenPipe
+        );
+        assert!(desktop.snapshot().apply_reservation.is_none());
+    }
+
+    #[test]
+    fn stale_stopped_and_cancelled_applies_cannot_keep_or_steal_reservations() {
+        let (desktop, receiver) = apply_test_desktop(8);
+        desktop.apply_profile("b.yaml".into()).unwrap();
+        let (input, old) = queued_apply(&receiver);
+        {
+            let mut s = desktop.snapshot.lock().unwrap();
+            assert!(!begin_apply(&mut s, old, 8, true, false, &input.key()));
+            assert!(s.apply_reservation.is_none());
+        }
+        desktop.apply_profile("c.yaml".into()).unwrap();
+        let (input, current) = queued_apply(&receiver);
+        {
+            let mut s = desktop.snapshot.lock().unwrap();
+            assert!(!begin_apply(&mut s, old, 7, true, false, &input.key()));
+            assert_eq!(s.apply_reservation, Some(current));
+            assert!(!begin_apply(&mut s, current, 7, false, false, &input.key()));
+            assert!(s.apply_reservation.is_none());
+        }
+        desktop.apply_profile("d.yaml".into()).unwrap();
+        let (input, current) = queued_apply(&receiver);
+        {
+            let mut s = desktop.snapshot.lock().unwrap();
+            assert!(!begin_apply(&mut s, current, 7, true, true, &input.key()));
+            assert!(s.apply_reservation.is_none());
+            s.engine = EngineStatus::Stopped;
+        }
+        assert_eq!(
+            desktop.apply_profile("e.yaml".into()).unwrap_err().kind(),
+            ErrorKind::NotConnected
+        );
+        {
+            let mut s = desktop.snapshot.lock().unwrap();
+            s.engine = EngineStatus::Running { mixed_port: 1234 };
+        }
+        desktop.apply_profile("f.yaml".into()).unwrap();
+        let (input, stopped) = queued_apply(&receiver);
+        desktop.stop();
+        assert!(desktop.snapshot().apply_reservation.is_none());
+        assert!(!begin_apply(
+            &mut desktop.snapshot.lock().unwrap(),
+            stopped,
+            7,
+            true,
+            true,
+            &input.key()
+        ));
+        assert_eq!(
+            desktop.apply_profile("g.yaml".into()).unwrap_err().kind(),
+            ErrorKind::NotConnected
+        );
+
+        let (desktop, _receiver) = apply_test_desktop(8);
+        desktop.apply_profile("b.yaml".into()).unwrap();
+        clear_telemetry(&desktop.snapshot, 8, EngineStatus::Error("exited".into()));
+        assert!(desktop.snapshot().apply_reservation.is_none());
+        assert_eq!(
+            desktop.apply_profile("c.yaml".into()).unwrap_err().kind(),
+            ErrorKind::NotConnected
+        );
+
+        let (desktop, _receiver) = apply_test_desktop(8);
+        desktop.apply_profile("b.yaml".into()).unwrap();
+        let snapshot = Arc::clone(&desktop.snapshot);
+        drop(desktop);
+        assert!(snapshot.lock().unwrap().apply_reservation.is_none());
+    }
 
     fn connection(id: &str, host: &str) -> Connection {
         Connection {
@@ -1651,7 +1948,7 @@ mod tests {
         );
 
         let snapshot = Mutex::new(snapshot);
-        clear_telemetry(&snapshot, 2);
+        clear_telemetry(&snapshot, 2, EngineStatus::Stopped);
         let mut snapshot = snapshot.lock().unwrap();
         assert_eq!(snapshot.connection_history.recent_keyed().len(), 0);
         connection_sample(
@@ -1678,7 +1975,7 @@ mod tests {
         );
         snapshot.connections = Some(Arc::new(vec![connection("live", "l")]));
         let snapshot = Mutex::new(snapshot);
-        clear_telemetry(&snapshot, 2);
+        clear_telemetry(&snapshot, 2, EngineStatus::Stopped);
         let mut snapshot = snapshot.lock().unwrap();
         assert!(snapshot.connections.is_none());
         assert_eq!(snapshot.connection_history.recent().len(), 0);
@@ -1743,7 +2040,7 @@ mod tests {
         assert!(snapshot.rules.is_some());
 
         let snapshot = Mutex::new(snapshot);
-        clear_telemetry(&snapshot, 8);
+        clear_telemetry(&snapshot, 8, EngineStatus::Stopped);
         let mut state = snapshot.lock().unwrap();
         assert!(state.rule_providers.is_none());
         assert!(state.rule_provider_error.is_none());
