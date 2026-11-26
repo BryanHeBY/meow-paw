@@ -1,5 +1,5 @@
 use crate::preferences::{LanguagePreference, Preferences};
-use gpui_kit::base::{Disableable, Selectable};
+use gpui_kit::base::{Button as SemanticButton, Disableable, Selectable};
 #[cfg(any(target_os = "linux", windows))]
 use gpui_kit::component::Sizable;
 #[cfg(any(target_os = "linux", windows))]
@@ -894,17 +894,18 @@ impl Paw {
         locale: Locale,
         compact: bool,
         cx: &mut Context<Self>,
-    ) -> Vec<Stateful<Div>> {
+    ) -> Vec<SemanticButton> {
         Page::ALL
             .into_iter()
             .enumerate()
             .map(|(index, page)| {
                 let on = active == page;
                 let label = locale.message(page.message());
-                div()
-                    .id(("paw-nav", index))
+                SemanticButton::new(("paw-nav", index))
+                    .accessibility_label(label)
                     .flex()
                     .items_center()
+                    .justify_start()
                     .gap_3()
                     .h(px(46.))
                     .px_3()
@@ -915,7 +916,11 @@ impl Paw {
                     .bg(rgb(if on { SOFT_BLUE } else { CHROME }))
                     .text_color(rgb(if on { BLUE } else { INK }))
                     .hover(|s| s.bg(rgb(SOFT_BLUE)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .focus_visible(|s| s.border_2().border_color(rgb(BLUE)))
+                    .on_click(cx.listener(move |this, event, window, cx| {
+                        if matches!(event, ClickEvent::Keyboard(_)) {
+                            cx.stop_propagation();
+                        }
                         this.page = page;
                         if page != Page::Profiles
                             && !this.subscription_busy
