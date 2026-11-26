@@ -77,6 +77,47 @@ pub enum Message {
     QuitApplication,
     QuitDescription,
     QuitPaw,
+    NoProfileSelected,
+    Subscription,
+    ImportLocalYaml,
+    ImportSubscription,
+    DownloadingSubscription,
+    LiveApplyWarning,
+    NoLocalProfiles,
+    ImportYamlDetail,
+    SubscriptionDetail,
+    Running,
+    NextSession,
+    Applying,
+    Reload,
+    ApplyLive,
+    Use,
+    Forget,
+    LastStartDiagnostics,
+    ChooseYaml,
+    ClipboardSubscriptionRequired,
+    ListSubscriptionsFailed,
+    SubscriptionSaved,
+    SubscriptionRefreshed,
+    ChooseExistingYaml,
+    InvalidSubscriptionUrl,
+    SubscriptionDownloadFailed,
+    SubscriptionTooLarge,
+    SubscriptionInvalidText,
+    SubscriptionNoProxies,
+    SubscriptionSaveFailed,
+    SubscriptionReadFailed,
+    SubscriptionRefreshSaveFailed,
+    ActiveConnections,
+    NoActiveConnections,
+    ListenerConnectionsDetail,
+    NoMatchingConnections,
+    ConnectionFilterDetail,
+    StartToViewConnections,
+    DestinationColumn,
+    RouteColumn,
+    RuleColumn,
+    CloseConnection,
 }
 
 impl Locale {
@@ -185,6 +226,57 @@ fn english(key: Message) -> &'static str {
         Message::QuitApplication => "Quit application",
         Message::QuitDescription => "Quitting also stops the managed engine.",
         Message::QuitPaw => "Quit Meow Paw",
+        Message::NoProfileSelected => "No profile selected",
+        Message::Subscription => "Subscription",
+        Message::ImportLocalYaml => "Import local YAML",
+        Message::ImportSubscription => "Import HTTPS subscription from clipboard",
+        Message::DownloadingSubscription => "Downloading subscription…",
+        Message::LiveApplyWarning => {
+            "Apply live and Reload keep Meow running, but can disconnect active connections."
+        }
+        Message::NoLocalProfiles => "No local profiles",
+        Message::ImportYamlDetail => {
+            "Import a YAML file. Paw prepares a separate session copy and leaves your file unchanged."
+        }
+        Message::SubscriptionDetail => {
+            "HTTPS subscription · Refresh does not change the running profile"
+        }
+        Message::Running => "Running",
+        Message::NextSession => "Next session",
+        Message::Applying => "Applying…",
+        Message::Reload => "Reload",
+        Message::ApplyLive => "Apply live",
+        Message::Use => "Use",
+        Message::Forget => "Forget",
+        Message::LastStartDiagnostics => "Diagnostics from the last start attempt",
+        Message::ChooseYaml => "Choose Meow YAML",
+        Message::ClipboardSubscriptionRequired => {
+            "Copy an HTTPS subscription URL to the clipboard first."
+        }
+        Message::ListSubscriptionsFailed => "Could not list saved subscriptions.",
+        Message::SubscriptionSaved => "Subscription saved. Select Use or Apply live when ready.",
+        Message::SubscriptionRefreshed => {
+            "Subscription refreshed. The running profile is unchanged."
+        }
+        Message::ChooseExistingYaml => "Choose an existing local YAML file.",
+        Message::InvalidSubscriptionUrl => "Enter an HTTPS subscription URL without user info",
+        Message::SubscriptionDownloadFailed => "Could not download the subscription",
+        Message::SubscriptionTooLarge => "Subscription profile exceeds the size limit",
+        Message::SubscriptionInvalidText => "Subscription did not return UTF-8 text",
+        Message::SubscriptionNoProxies => "Subscription has no proxies or proxy providers",
+        Message::SubscriptionSaveFailed => "Could not save the subscription",
+        Message::SubscriptionReadFailed => "Could not read the saved subscription",
+        Message::SubscriptionRefreshSaveFailed => "Could not save the refreshed subscription",
+        Message::ActiveConnections => "active",
+        Message::NoActiveConnections => "No active connections",
+        Message::ListenerConnectionsDetail => "Traffic handled by the Paw listener appears here.",
+        Message::NoMatchingConnections => "No matching connections",
+        Message::ConnectionFilterDetail => "Filter by destination, policy chain, or matched rule.",
+        Message::StartToViewConnections => "Start a profile to monitor its live connections.",
+        Message::DestinationColumn => "DESTINATION",
+        Message::RouteColumn => "ROUTE",
+        Message::RuleColumn => "RULE",
+        Message::CloseConnection => "Close",
     }
 }
 
@@ -259,6 +351,47 @@ fn chinese(key: Message) -> &'static str {
         Message::QuitApplication => "退出应用",
         Message::QuitDescription => "退出时也会停止托管的引擎。",
         Message::QuitPaw => "退出 Meow Paw",
+        Message::NoProfileSelected => "未选择配置",
+        Message::Subscription => "订阅",
+        Message::ImportLocalYaml => "导入本地 YAML",
+        Message::ImportSubscription => "从剪贴板导入 HTTPS 订阅",
+        Message::DownloadingSubscription => "正在下载订阅…",
+        Message::LiveApplyWarning => "实时应用和重新加载会保持 Meow 运行，但可能断开活动连接。",
+        Message::NoLocalProfiles => "暂无本地配置",
+        Message::ImportYamlDetail => "导入 YAML 文件。Paw 会为会话准备单独的副本，不会更改原文件。",
+        Message::SubscriptionDetail => "HTTPS 订阅 · 刷新不会更改正在运行的配置",
+        Message::Running => "运行中",
+        Message::NextSession => "下次会话",
+        Message::Applying => "正在应用…",
+        Message::Reload => "重新加载",
+        Message::ApplyLive => "实时应用",
+        Message::Use => "使用",
+        Message::Forget => "移除",
+        Message::LastStartDiagnostics => "上次启动尝试的诊断信息",
+        Message::ChooseYaml => "选择 Meow YAML",
+        Message::ClipboardSubscriptionRequired => "请先将 HTTPS 订阅地址复制到剪贴板。",
+        Message::ListSubscriptionsFailed => "无法列出已保存的订阅。",
+        Message::SubscriptionSaved => "订阅已保存。准备就绪后请选择使用或实时应用。",
+        Message::SubscriptionRefreshed => "订阅已刷新。正在运行的配置未更改。",
+        Message::ChooseExistingYaml => "请选择存在的本地 YAML 文件。",
+        Message::InvalidSubscriptionUrl => "请输入不含用户信息的 HTTPS 订阅地址",
+        Message::SubscriptionDownloadFailed => "无法下载订阅",
+        Message::SubscriptionTooLarge => "订阅配置超过大小限制",
+        Message::SubscriptionInvalidText => "订阅返回的内容不是 UTF-8 文本",
+        Message::SubscriptionNoProxies => "订阅中没有代理或代理提供者",
+        Message::SubscriptionSaveFailed => "无法保存订阅",
+        Message::SubscriptionReadFailed => "无法读取已保存的订阅",
+        Message::SubscriptionRefreshSaveFailed => "无法保存刷新后的订阅",
+        Message::ActiveConnections => "个活动连接",
+        Message::NoActiveConnections => "暂无活动连接",
+        Message::ListenerConnectionsDetail => "由 Paw 监听器处理的流量会显示在这里。",
+        Message::NoMatchingConnections => "没有匹配的连接",
+        Message::ConnectionFilterDetail => "可按目标地址、策略链或匹配规则筛选。",
+        Message::StartToViewConnections => "启动配置后即可监控实时连接。",
+        Message::DestinationColumn => "目标地址",
+        Message::RouteColumn => "路线",
+        Message::RuleColumn => "规则",
+        Message::CloseConnection => "关闭",
     }
 }
 
@@ -361,6 +494,165 @@ mod tests {
         assert_eq!(Locale::En.message(Message::Home), "Home");
         assert_eq!(Locale::ZhCn.message(Message::Home), "首页");
     }
+    #[test]
+    fn profiles_and_connections_catalog() {
+        let cases = [
+            (
+                Message::NoProfileSelected,
+                "No profile selected",
+                "未选择配置",
+            ),
+            (Message::Subscription, "Subscription", "订阅"),
+            (
+                Message::ImportLocalYaml,
+                "Import local YAML",
+                "导入本地 YAML",
+            ),
+            (
+                Message::ImportSubscription,
+                "Import HTTPS subscription from clipboard",
+                "从剪贴板导入 HTTPS 订阅",
+            ),
+            (
+                Message::DownloadingSubscription,
+                "Downloading subscription…",
+                "正在下载订阅…",
+            ),
+            (
+                Message::LiveApplyWarning,
+                "Apply live and Reload keep Meow running, but can disconnect active connections.",
+                "实时应用和重新加载会保持 Meow 运行，但可能断开活动连接。",
+            ),
+            (
+                Message::NoLocalProfiles,
+                "No local profiles",
+                "暂无本地配置",
+            ),
+            (
+                Message::ImportYamlDetail,
+                "Import a YAML file. Paw prepares a separate session copy and leaves your file unchanged.",
+                "导入 YAML 文件。Paw 会为会话准备单独的副本，不会更改原文件。",
+            ),
+            (
+                Message::SubscriptionDetail,
+                "HTTPS subscription · Refresh does not change the running profile",
+                "HTTPS 订阅 · 刷新不会更改正在运行的配置",
+            ),
+            (Message::Running, "Running", "运行中"),
+            (Message::NextSession, "Next session", "下次会话"),
+            (Message::Applying, "Applying…", "正在应用…"),
+            (Message::Reload, "Reload", "重新加载"),
+            (Message::ApplyLive, "Apply live", "实时应用"),
+            (Message::Use, "Use", "使用"),
+            (Message::Forget, "Forget", "移除"),
+            (
+                Message::LastStartDiagnostics,
+                "Diagnostics from the last start attempt",
+                "上次启动尝试的诊断信息",
+            ),
+            (Message::ChooseYaml, "Choose Meow YAML", "选择 Meow YAML"),
+            (
+                Message::ClipboardSubscriptionRequired,
+                "Copy an HTTPS subscription URL to the clipboard first.",
+                "请先将 HTTPS 订阅地址复制到剪贴板。",
+            ),
+            (
+                Message::ListSubscriptionsFailed,
+                "Could not list saved subscriptions.",
+                "无法列出已保存的订阅。",
+            ),
+            (
+                Message::SubscriptionSaved,
+                "Subscription saved. Select Use or Apply live when ready.",
+                "订阅已保存。准备就绪后请选择使用或实时应用。",
+            ),
+            (
+                Message::SubscriptionRefreshed,
+                "Subscription refreshed. The running profile is unchanged.",
+                "订阅已刷新。正在运行的配置未更改。",
+            ),
+            (
+                Message::ChooseExistingYaml,
+                "Choose an existing local YAML file.",
+                "请选择存在的本地 YAML 文件。",
+            ),
+            (
+                Message::InvalidSubscriptionUrl,
+                "Enter an HTTPS subscription URL without user info",
+                "请输入不含用户信息的 HTTPS 订阅地址",
+            ),
+            (
+                Message::SubscriptionDownloadFailed,
+                "Could not download the subscription",
+                "无法下载订阅",
+            ),
+            (
+                Message::SubscriptionTooLarge,
+                "Subscription profile exceeds the size limit",
+                "订阅配置超过大小限制",
+            ),
+            (
+                Message::SubscriptionInvalidText,
+                "Subscription did not return UTF-8 text",
+                "订阅返回的内容不是 UTF-8 文本",
+            ),
+            (
+                Message::SubscriptionNoProxies,
+                "Subscription has no proxies or proxy providers",
+                "订阅中没有代理或代理提供者",
+            ),
+            (
+                Message::SubscriptionSaveFailed,
+                "Could not save the subscription",
+                "无法保存订阅",
+            ),
+            (
+                Message::SubscriptionReadFailed,
+                "Could not read the saved subscription",
+                "无法读取已保存的订阅",
+            ),
+            (
+                Message::SubscriptionRefreshSaveFailed,
+                "Could not save the refreshed subscription",
+                "无法保存刷新后的订阅",
+            ),
+            (Message::ActiveConnections, "active", "个活动连接"),
+            (
+                Message::NoActiveConnections,
+                "No active connections",
+                "暂无活动连接",
+            ),
+            (
+                Message::ListenerConnectionsDetail,
+                "Traffic handled by the Paw listener appears here.",
+                "由 Paw 监听器处理的流量会显示在这里。",
+            ),
+            (
+                Message::NoMatchingConnections,
+                "No matching connections",
+                "没有匹配的连接",
+            ),
+            (
+                Message::ConnectionFilterDetail,
+                "Filter by destination, policy chain, or matched rule.",
+                "可按目标地址、策略链或匹配规则筛选。",
+            ),
+            (
+                Message::StartToViewConnections,
+                "Start a profile to monitor its live connections.",
+                "启动配置后即可监控实时连接。",
+            ),
+            (Message::DestinationColumn, "DESTINATION", "目标地址"),
+            (Message::RouteColumn, "ROUTE", "路线"),
+            (Message::RuleColumn, "RULE", "规则"),
+            (Message::CloseConnection, "Close", "关闭"),
+        ];
+        for (key, english, chinese) in cases {
+            assert_eq!(Locale::En.message(key), english, "English: {key:?}");
+            assert_eq!(Locale::ZhCn.message(key), chinese, "Chinese: {key:?}");
+        }
+    }
+
     #[test]
     fn page_catalog_preserves_english_and_translates_chinese() {
         let cases = [

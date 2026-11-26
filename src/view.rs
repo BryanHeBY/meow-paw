@@ -91,6 +91,19 @@ impl Page {
     }
 }
 
+fn subscription_error(locale: Locale, error: subscription::DownloadError) -> String {
+    use subscription::DownloadError;
+    let message = match error {
+        DownloadError::InvalidUrl => Message::InvalidSubscriptionUrl,
+        DownloadError::Request => Message::SubscriptionDownloadFailed,
+        DownloadError::TooLarge => Message::SubscriptionTooLarge,
+        DownloadError::InvalidText => Message::SubscriptionInvalidText,
+        DownloadError::NoProxies => Message::SubscriptionNoProxies,
+        DownloadError::InvalidProfile(error) => return error.to_string(),
+    };
+    locale.message(message).to_owned()
+}
+
 fn subscription_paths(dir: PathBuf) -> std::io::Result<Vec<PathBuf>> {
     let store = SubscriptionStore::new(dir);
     Ok(store
@@ -112,7 +125,7 @@ pub struct Paw {
     preferences: Preferences,
     subscription_paths: Vec<PathBuf>,
     subscription_busy: bool,
-    subscription_notice: Option<&'static str>,
+    subscription_notice: Option<Message>,
     preference_warning: Option<String>,
     search: Entity<InputState>,
     _search_changes: Subscription,
@@ -189,7 +202,7 @@ pub fn open(
             .map(subscription_paths)
             .map_or((Vec::new(), None), |result| match result {
                 Ok(paths) => (paths, None),
-                Err(_) => (Vec::new(), Some("Could not list saved subscriptions.")),
+                Err(_) => (Vec::new(), Some(Message::ListSubscriptionsFailed)),
             });
         let mut paw = Paw {
             page,
@@ -899,7 +912,11 @@ impl Paw {
 
     fn display_profile_name(&self, path: &std::path::Path) -> String {
         if let Some((_, id)) = self.subscription_for(path) {
-            return format!("Subscription {}", &id.to_string()[..8]);
+            return format!(
+                "{} {}",
+                self.locale.message(Message::Subscription),
+                &id.to_string()[..8]
+            );
         }
         path.file_name()
             .unwrap_or(path.as_os_str())
@@ -909,7 +926,7 @@ impl Paw {
 
     fn profile_label(&self) -> String {
         self.profile.as_deref().map_or_else(
-            || "No profile selected".into(),
+            || self.locale.message(Message::NoProfileSelected).into(),
             |path| self.display_profile_name(path),
         )
     }
@@ -927,7 +944,7 @@ impl Paw {
 
     fn profiles(&self, cx: &mut Context<Self>) -> Div {
         let path = self.profile.as_ref().map_or_else(
-            || "No profile selected".into(),
+            || self.locale.message(Message::NoProfileSelected).into(),
             |path| {
                 if self.subscription_for(path).is_some() {
                     self.display_profile_name(path)
@@ -936,8 +953,11 @@ impl Paw {
                 }
             },
         );
-        let browse = secondary_button("select-profile", "Import local YAML")
-            .on_click(cx.listener(|this, _, _, cx| this.choose_file(false, cx)));
+        let browse = secondary_button(
+            "select-profile",
+            self.locale.message(Message::ImportLocalYaml),
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.choose_file(false, cx)));
         let import = div()
             .flex()
             .gap_2()
@@ -975,7 +995,7 @@ impl Paw {
             page = page.child(
                 secondary_button(
                     "import-subscription",
-                    "Import HTTPS subscription from clipboard",
+                    self.locale.message(Message::ImportSubscription),
                 )
                 .on_click(cx.listener(|paw, _, _, cx| paw.import_subscription(cx))),
             );
@@ -983,19 +1003,27 @@ impl Paw {
         if self.subscription_busy || self.subscription_notice.is_some() {
             page = page.child(div().text_sm().text_color(rgb(FAINT)).child(
                 if self.subscription_busy {
-                    "Downloading subscription…"
+                    self.locale.message(Message::DownloadingSubscription)
                 } else {
-                    self.subscription_notice.unwrap_or_default()
+                    self.subscription_notice
+                        .map(|message| self.locale.message(message))
+                        .unwrap_or_default()
                 },
             ));
         }
         if self.state().2.is_some() {
-            page = page.child(div().text_sm().text_color(rgb(FAINT)).child(
-                "Apply live and Reload keep Meow running, but can disconnect active connections.",
-            ));
+            page = page.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(FAINT))
+                    .child(self.locale.message(Message::LiveApplyWarning)),
+            );
         }
         if profiles.is_empty() {
-            page = page.child(empty_state("No local profiles", "Import a YAML file. Paw prepares a separate session copy and leaves your file unchanged."));
+            page = page.child(empty_state(
+                self.locale.message(Message::NoLocalProfiles),
+                self.locale.message(Message::ImportYamlDetail),
+            ));
         } else {
             page = page.children(profiles.into_iter().enumerate().map(|(index, profile)| {
                 let next = selected == Some(profile);
@@ -1017,7 +1045,7 @@ impl Paw {
                 let subscription = self.subscription_for(profile).map(|(_, id)| id);
                 let name = self.display_profile_name(profile);
                 let details = if subscription.is_some() {
-                    "HTTPS subscription · Refresh does not change the running profile".to_owned()
+                    self.locale.message(Message::SubscriptionDetail).to_owned()
                 } else {
                     profile.display().to_string()
                 };
@@ -1040,18 +1068,36 @@ impl Paw {
                                     .child(details),
                             ),
                     )
-                    .when(active, |el| el.child(chip("Running", 0x168460, 0xe2f6ec)))
+                    .when(active, |el| {
+                        el.child(chip(
+                            self.locale.message(Message::Running),
+                            0x168460,
+                            0xe2f6ec,
+                        ))
+                    })
                     .when(next && !active, |el| {
-                        el.child(chip("Next session", BLUE, SOFT_BLUE))
+                        el.child(chip(
+                            self.locale.message(Message::NextSession),
+                            BLUE,
+                            SOFT_BLUE,
+                        ))
                     })
                     .when(applying == Some(profile), |el| {
-                        el.child(chip("Applying…", BLUE, SOFT_BLUE))
+                        el.child(chip(
+                            self.locale.message(Message::Applying),
+                            BLUE,
+                            SOFT_BLUE,
+                        ))
                     })
                     .when(live && applying.is_none(), |el| {
                         el.child(
                             secondary_button(
                                 ("profile-apply", index),
-                                if active { "Reload" } else { "Apply live" },
+                                self.locale.message(if active {
+                                    Message::Reload
+                                } else {
+                                    Message::ApplyLive
+                                }),
                             )
                             .on_click(cx.listener(
                                 move |paw, _, _, cx| {
@@ -1065,21 +1111,31 @@ impl Paw {
                         subscription.filter(|_| !self.subscription_busy),
                         |el, id| {
                             el.child(
-                                secondary_button(("profile-refresh", index), "Refresh").on_click(
-                                    cx.listener(move |paw, _, _, cx| {
+                                secondary_button(
+                                    ("profile-refresh", index),
+                                    self.locale.message(Message::Refresh),
+                                )
+                                .on_click(cx.listener(
+                                    move |paw, _, _, cx| {
                                         paw.refresh_subscription(id, cx);
-                                    }),
-                                ),
+                                    },
+                                )),
                             )
                         },
                     )
                     .when(!next, |el| {
-                        el.child(secondary_button(("profile-use", index), "Use").on_click(
-                            cx.listener(move |paw, _, _, cx| {
-                                paw.select_local_profile(use_path.clone());
-                                cx.notify();
-                            }),
-                        ))
+                        el.child(
+                            secondary_button(
+                                ("profile-use", index),
+                                self.locale.message(Message::Use),
+                            )
+                            .on_click(cx.listener(
+                                move |paw, _, _, cx| {
+                                    paw.select_local_profile(use_path.clone());
+                                    cx.notify();
+                                },
+                            )),
+                        )
                     })
                     .when(
                         subscription.is_none()
@@ -1088,8 +1144,12 @@ impl Paw {
                             && self.preferences.profiles().contains(profile),
                         |el| {
                             el.child(
-                                secondary_button(("profile-forget", index), "Forget").on_click(
-                                    cx.listener(move |paw, _, _, cx| {
+                                secondary_button(
+                                    ("profile-forget", index),
+                                    self.locale.message(Message::Forget),
+                                )
+                                .on_click(cx.listener(
+                                    move |paw, _, _, cx| {
                                         match paw.preferences.forget_profile(&forget_path) {
                                             Ok(()) => {
                                                 if paw.profile.as_ref() == Some(&forget_path) {
@@ -1100,8 +1160,8 @@ impl Paw {
                                             Err(error) => paw.error = Some(error.to_string()),
                                         }
                                         cx.notify();
-                                    }),
-                                ),
+                                    },
+                                )),
                             )
                         },
                     )
@@ -1114,7 +1174,7 @@ impl Paw {
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Diagnostics from the last start attempt"),
+                            .child(self.locale.message(Message::LastStartDiagnostics)),
                     )
                     .children(self.snapshot.diagnostics.iter().take(40).map(|d| {
                         div()
@@ -1141,7 +1201,7 @@ impl Paw {
                 if binary {
                     "Choose Meow executable"
                 } else {
-                    "Choose Meow YAML"
+                    self.locale.message(Message::ChooseYaml)
                 }
                 .into(),
             ),
@@ -1181,29 +1241,35 @@ impl Paw {
             return;
         }
         let Some(url) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            self.subscription_notice =
-                Some("Copy an HTTPS subscription URL to the clipboard first.");
+            self.subscription_notice = Some(Message::ClipboardSubscriptionRequired);
             cx.notify();
             return;
         };
+        let locale = self.locale;
         self.subscription_job(cx, move |store| {
-            let candidate = subscription::fetch(&url).map_err(|err| err.to_string())?;
+            let candidate =
+                subscription::fetch(&url).map_err(|err| subscription_error(locale, err))?;
             let id = store
                 .import(&url, candidate, RefreshPolicy::default())
-                .map_err(|_| "Could not save the subscription".to_owned())?;
+                .map_err(|_| locale.message(Message::SubscriptionSaveFailed).to_owned())?;
             Ok(Some(store.record_path(id)))
         });
     }
 
     fn refresh_subscription(&mut self, id: SubscriptionId, cx: &mut Context<Self>) {
+        let locale = self.locale;
         self.subscription_job(cx, move |store| {
             let prior = store
                 .read(id)
-                .map_err(|_| "Could not read the saved subscription".to_owned())?;
-            let candidate = prior.fetch_latest().map_err(|err| err.to_string())?;
-            store
-                .refresh(id, candidate)
-                .map_err(|_| "Could not save the refreshed subscription".to_owned())?;
+                .map_err(|_| locale.message(Message::SubscriptionReadFailed).to_owned())?;
+            let candidate = prior
+                .fetch_latest()
+                .map_err(|err| subscription_error(locale, err))?;
+            store.refresh(id, candidate).map_err(|_| {
+                locale
+                    .message(Message::SubscriptionRefreshSaveFailed)
+                    .to_owned()
+            })?;
             Ok(None)
         });
     }
@@ -1235,13 +1301,9 @@ impl Paw {
                         if !paw.subscription_paths.contains(&path) {
                             paw.subscription_paths.push(path);
                         }
-                        paw.subscription_notice =
-                            Some("Subscription saved. Select Use or Apply live when ready.");
+                        paw.subscription_notice = Some(Message::SubscriptionSaved);
                     }
-                    Ok(None) => {
-                        paw.subscription_notice =
-                            Some("Subscription refreshed. The running profile is unchanged.")
-                    }
+                    Ok(None) => paw.subscription_notice = Some(Message::SubscriptionRefreshed),
                     Err(error) => paw.error = Some(error),
                 }
                 cx.notify();
@@ -1266,7 +1328,7 @@ impl Paw {
 
     fn select_local_profile(&mut self, path: PathBuf) {
         if !path.is_file() {
-            self.error = Some("Choose an existing local YAML file.".into());
+            self.error = Some(self.locale.message(Message::ChooseExistingYaml).into());
             return;
         }
         let path = std::path::absolute(&path).unwrap_or(path);
@@ -1933,23 +1995,36 @@ impl Paw {
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(div().text_sm().text_color(rgb(FAINT)).child("Filter"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child(self.locale.message(Message::Filter)),
+                )
                 .child(
                     div()
                         .flex_1()
                         .child(Input::new(&self.connection_filter).cleanable(true)),
                 )
-                .child(chip(format!("{} active", list.len()), BLUE, SOFT_BLUE));
+                .child(chip(
+                    format!(
+                        "{} {}",
+                        list.len(),
+                        self.locale.message(Message::ActiveConnections)
+                    ),
+                    BLUE,
+                    SOFT_BLUE,
+                ));
             let table = if results.is_empty() {
                 if query.is_empty() {
                     empty_state(
-                        "No active connections",
-                        "Traffic handled by the Paw listener appears here.",
+                        self.locale.message(Message::NoActiveConnections),
+                        self.locale.message(Message::ListenerConnectionsDetail),
                     )
                 } else {
                     empty_state(
-                        "No matching connections",
-                        "Filter by destination, policy chain, or matched rule.",
+                        self.locale.message(Message::NoMatchingConnections),
+                        self.locale.message(Message::ConnectionFilterDetail),
                     )
                 }
             } else {
@@ -1957,9 +2032,9 @@ impl Paw {
                     .p_0()
                     .child(
                         active_connection_row(
-                            section_label("DESTINATION"),
-                            section_label("ROUTE"),
-                            section_label("RULE"),
+                            section_label(self.locale.message(Message::DestinationColumn)),
+                            section_label(self.locale.message(Message::RouteColumn)),
+                            section_label(self.locale.message(Message::RuleColumn)),
                             div(),
                         )
                         .bg(rgb(CHROME)),
@@ -1975,7 +2050,7 @@ impl Paw {
                             .text_xs()
                             .text_color(rgb(BLUE))
                             .hover(|s| s.bg(rgb(SOFT_BLUE)))
-                            .child("Close")
+                            .child(self.locale.message(Message::CloseConnection))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.error = this
                                     .desktop
@@ -2004,8 +2079,8 @@ impl Paw {
         }
         let _ = cx;
         empty_state(
-            "No active connections",
-            "Start a profile to monitor its live connections.",
+            self.locale.message(Message::NoActiveConnections),
+            self.locale.message(Message::StartToViewConnections),
         )
     }
 
