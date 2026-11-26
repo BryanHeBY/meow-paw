@@ -31,6 +31,25 @@ pub struct Node {
 pub struct Inventory {
     pub groups: BTreeMap<String, Proxy>,
     pub nodes: Vec<Node>,
+    pub providers: BTreeMap<String, ProviderStatus>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderStatus {
+    #[serde(default)]
+    pub vehicle_type: String,
+    pub updated_at: Option<String>,
+    pub subscription_info: Option<ProviderUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ProviderUsage {
+    pub upload: u64,
+    pub download: u64,
+    pub total: u64,
+    pub expire: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -200,6 +219,8 @@ impl Controller {
         #[derive(Deserialize)]
         struct Provider {
             proxies: Vec<NamedProxy>,
+            #[serde(flatten)]
+            status: ProviderStatus,
         }
         #[derive(Deserialize)]
         struct NamedProxy {
@@ -224,6 +245,8 @@ impl Controller {
         }
         let providers: Providers = self.get(self.endpoint(&["providers", "proxies"]))?;
         for (provider, value) in providers.providers {
+            // Even a provider with no proxies yet has an independent status.
+            inventory.providers.insert(provider.clone(), value.status);
             // Meow exposes membership by name, not by provider-qualified identity.
             inventory
                 .nodes
@@ -234,6 +257,26 @@ impl Controller {
                 }));
         }
         Ok(inventory)
+    }
+
+    /// Refresh one running proxy provider without applying the profile again.
+    /// A timeout is not proof the refresh failed; read inventory before retrying.
+    pub fn refresh_provider(&self, provider: &str) -> Result<(), ControllerError> {
+        let url = self.endpoint(&["providers", "proxies", provider]);
+        let mut request = self.agent.put(url.as_str());
+        if !self.secret.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", self.secret));
+        }
+        let reply = request
+            .config()
+            .timeout_global(Some(Duration::from_secs(20)))
+            .build()
+            .send_empty()
+            .map_err(http_error)?;
+        if reply.status().as_u16() != 204 {
+            return Err(ControllerError::Status(reply.status().as_u16()));
+        }
+        Ok(())
     }
 
     pub fn select(&self, group: &str, member: &str) -> Result<(), ControllerError> {
@@ -437,6 +480,11 @@ mod tests {
             Controller::new(listener.local_addr().unwrap(), "fake-secret".into()).unwrap();
         let worker = thread::spawn(move || {
             for (expected, body) in responses {
+                let (status, body) = match body {
+                    "!" => ("204 No Content", ""),
+                    "x" => ("503 Service Unavailable", ""),
+                    body => ("200 OK", body),
+                };
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
@@ -456,7 +504,7 @@ mod tests {
                         .eq_ignore_ascii_case("authorization: Bearer fake-secret");
                 }
                 assert!(authorized);
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
             }
         });
         (controller, worker)
@@ -503,6 +551,39 @@ mod tests {
             c.endpoint(&["proxies", "HK #1 / test"]).path(),
             "/proxies/HK%20%231%20%2F%20test"
         );
+    }
+
+    #[test]
+    fn keeps_provider_status_without_nodes_and_refreshes_only_that_provider() {
+        let (c, worker) = fixture(vec![
+            ("GET /proxies HTTP/", r#"{"proxies":{}}"#),
+            (
+                "GET /providers/proxies HTTP/",
+                r#"{"providers":{"A / #":{"vehicleType":"HTTP","proxies":[],"updatedAt":"2026-11-26T04:00:00Z","subscriptionInfo":{"Upload":1,"Download":2,"Total":3,"Expire":4}}}}"#,
+            ),
+            ("PUT /providers/proxies/A%20%2F%20%23 HTTP/", "!"),
+            ("PUT /providers/proxies/A%20%2F%20%23 HTTP/", "x"),
+        ]);
+        let inventory = c.inventory().unwrap();
+        assert!(inventory.nodes.is_empty());
+        let status = &inventory.providers["A / #"];
+        assert_eq!(status.vehicle_type, "HTTP");
+        assert_eq!(status.updated_at.as_deref(), Some("2026-11-26T04:00:00Z"));
+        assert_eq!(
+            status.subscription_info,
+            Some(ProviderUsage {
+                upload: 1,
+                download: 2,
+                total: 3,
+                expire: 4
+            })
+        );
+        c.refresh_provider("A / #").unwrap();
+        assert!(matches!(
+            c.refresh_provider("A / #"),
+            Err(ControllerError::Status(503))
+        ));
+        worker.join().unwrap();
     }
 
     #[test]
