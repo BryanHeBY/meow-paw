@@ -51,6 +51,18 @@ pub struct RefreshPolicy {
     pub interval_override_minutes: Option<u32>,
 }
 
+/// Non-sensitive metadata for display. The interval is informational only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisplayInterval {
+    Local(u32),
+    Provider(u32),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SubscriptionMetadata {
+    pub interval: Option<DisplayInterval>,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavedSubscription {
@@ -74,6 +86,19 @@ impl SavedSubscription {
         self.policy
             .interval_override_minutes
             .or(self.provider_interval_minutes)
+    }
+
+    pub fn metadata(&self) -> SubscriptionMetadata {
+        SubscriptionMetadata {
+            interval: self
+                .policy
+                .interval_override_minutes
+                .map(DisplayInterval::Local)
+                .or_else(|| {
+                    self.provider_interval_minutes
+                        .map(DisplayInterval::Provider)
+                }),
+        }
     }
 
     pub fn fetch_latest(&self) -> Result<Download, crate::subscription::DownloadError> {
@@ -138,6 +163,11 @@ impl SubscriptionStore {
             return Err(invalid("Invalid subscription record"));
         }
         Ok(record)
+    }
+
+    /// Read a bounded record and return only metadata safe for display.
+    pub fn metadata(&self, id: SubscriptionId) -> io::Result<SubscriptionMetadata> {
+        self.read(id).map(|record| record.metadata())
     }
 
     /// A manual refresh retains the local policy and never applies a profile.
@@ -261,6 +291,63 @@ mod tests {
         assert!(!reopened.policy().automatic);
         assert_eq!(reopened.interval_minutes(), Some(45));
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn metadata_tracks_missing_and_replaced_hints_and_local_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SubscriptionStore::new(dir.path().into());
+        let missing = Download {
+            yaml: OLD.into(),
+            suggested_interval_minutes: None,
+        };
+        let id = store
+            .import(
+                "https://example.test/sub",
+                missing,
+                RefreshPolicy {
+                    automatic: true,
+                    interval_override_minutes: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(store.metadata(id).unwrap().interval, None);
+        store.refresh(id, download(NEW, 120)).unwrap();
+        assert_eq!(
+            store.metadata(id).unwrap().interval,
+            Some(DisplayInterval::Provider(120))
+        );
+        store.refresh(id, download(NEW, 180)).unwrap();
+        assert_eq!(
+            store.metadata(id).unwrap().interval,
+            Some(DisplayInterval::Provider(180))
+        );
+        store
+            .refresh(
+                id,
+                Download {
+                    yaml: NEW.into(),
+                    suggested_interval_minutes: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(store.metadata(id).unwrap().interval, None);
+
+        let overridden = store
+            .import(
+                "https://example.test/sub",
+                download(OLD, 60),
+                RefreshPolicy {
+                    automatic: true,
+                    interval_override_minutes: Some(45),
+                },
+            )
+            .unwrap();
+        store.refresh(overridden, download(NEW, 120)).unwrap();
+        assert_eq!(
+            store.metadata(overridden).unwrap().interval,
+            Some(DisplayInterval::Local(45))
+        );
     }
 
     #[test]

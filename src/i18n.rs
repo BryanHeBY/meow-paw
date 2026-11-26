@@ -120,6 +120,9 @@ pub enum Message {
     NoLocalProfiles,
     ImportYamlDetail,
     SubscriptionDetail,
+    SubscriptionManualOnly,
+    SubscriptionLocalInterval,
+    SubscriptionProviderInterval,
     Running,
     NextSession,
     Applying,
@@ -166,6 +169,13 @@ pub enum Message {
 }
 
 impl Locale {
+    pub fn subscription_interval(self, label: Message, minutes: u32) -> String {
+        match self {
+            Self::En => format!("{}: {} min", self.message(label), minutes),
+            Self::ZhCn => format!("{}：{} 分钟", self.message(label), minutes),
+        }
+    }
+
     /// An explicit selection takes precedence even when it is unsupported.
     pub fn select(explicit: Option<&str>, system: Option<&str>) -> Self {
         explicit.or(system).map(Self::parse).unwrap_or(Self::En)
@@ -370,6 +380,9 @@ fn english(key: Message) -> &'static str {
         Message::ImportYamlDetail => {
             "Import a YAML file. Paw prepares a separate session copy and leaves your file unchanged."
         }
+        Message::SubscriptionManualOnly => "Manual refresh only",
+        Message::SubscriptionLocalInterval => "Local override",
+        Message::SubscriptionProviderInterval => "Provider suggests",
         Message::SubscriptionDetail => {
             "HTTPS subscription · Refresh does not change the running profile"
         }
@@ -544,6 +557,9 @@ fn chinese(key: Message) -> &'static str {
         Message::LiveApplyWarning => "实时应用和重新加载会保持 Meow 运行，但可能断开活动连接。",
         Message::NoLocalProfiles => "暂无本地配置",
         Message::ImportYamlDetail => "导入 YAML 文件。Paw 会为会话准备单独的副本，不会更改原文件。",
+        Message::SubscriptionManualOnly => "仅手动刷新",
+        Message::SubscriptionLocalInterval => "本地覆盖",
+        Message::SubscriptionProviderInterval => "提供者建议",
         Message::SubscriptionDetail => "HTTPS 订阅 · 刷新不会更改正在运行的配置",
         Message::Running => "运行中",
         Message::NextSession => "下次会话",
@@ -870,6 +886,34 @@ mod tests {
                 format!("保留 {count} 条日志")
             );
         }
+    }
+
+    #[test]
+    fn subscription_metadata_labels_are_localized() {
+        assert_eq!(
+            Locale::En.message(Message::SubscriptionManualOnly),
+            "Manual refresh only"
+        );
+        assert_eq!(
+            Locale::ZhCn.message(Message::SubscriptionManualOnly),
+            "仅手动刷新"
+        );
+        assert_eq!(
+            Locale::En.subscription_interval(Message::SubscriptionLocalInterval, 45),
+            "Local override: 45 min"
+        );
+        assert_eq!(
+            Locale::ZhCn.subscription_interval(Message::SubscriptionLocalInterval, 45),
+            "本地覆盖：45 分钟"
+        );
+        assert_eq!(
+            Locale::En.subscription_interval(Message::SubscriptionProviderInterval, 120),
+            "Provider suggests: 120 min"
+        );
+        assert_eq!(
+            Locale::ZhCn.subscription_interval(Message::SubscriptionProviderInterval, 120),
+            "提供者建议：120 分钟"
+        );
     }
 
     #[test]

@@ -6,7 +6,10 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use meow_paw::i18n::{Locale, Message};
 use meow_paw::subscription;
-use meow_paw::subscription_store::{RefreshPolicy, SubscriptionId, SubscriptionStore};
+use meow_paw::subscription_store::{
+    DisplayInterval, RefreshPolicy, SubscriptionId, SubscriptionMetadata, SubscriptionStore,
+};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -127,6 +130,18 @@ fn subscription_paths(dir: PathBuf) -> std::io::Result<Vec<PathBuf>> {
         .collect())
 }
 
+const METADATA_BATCH_SIZE: usize = 8;
+
+// A manual result, including a failed metadata read, wins over an older batch.
+fn merge_subscription_metadata(
+    current: &mut HashMap<PathBuf, Option<SubscriptionMetadata>>,
+    batch: Vec<(PathBuf, Option<SubscriptionMetadata>)>,
+) {
+    for (path, metadata) in batch {
+        current.entry(path).or_insert(metadata);
+    }
+}
+
 pub struct Paw {
     page: Page,
     locale: Locale,
@@ -138,6 +153,8 @@ pub struct Paw {
     show_usage: bool,
     preferences: Preferences,
     subscription_paths: Vec<PathBuf>,
+    subscription_metadata: HashMap<PathBuf, Option<SubscriptionMetadata>>,
+    subscription_metadata_started: bool,
     subscription_busy: bool,
     subscription_notice: Option<Message>,
     subscription_entry_open: bool,
@@ -263,6 +280,8 @@ pub fn open(
             show_usage: false,
             preferences,
             subscription_paths,
+            subscription_metadata: HashMap::new(),
+            subscription_metadata_started: false,
             subscription_busy: false,
             subscription_notice,
             subscription_entry_open: false,
@@ -280,6 +299,9 @@ pub fn open(
             #[cfg(any(target_os = "linux", windows))]
             snapshot: Default::default(),
         };
+        if page == Page::Profiles {
+            paw.load_subscription_metadata(cx);
+        }
         if start {
             paw.start();
         }
@@ -474,6 +496,9 @@ impl Paw {
                     .hover(|s| s.bg(rgb(SOFT_BLUE)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.page = page;
+                        if page == Page::Profiles {
+                            this.load_subscription_metadata(cx);
+                        }
                         if page == Page::Rules {
                             this.read_rules();
                         }
@@ -533,6 +558,7 @@ impl Paw {
                             this.page = Page::Settings;
                         } else if this.profile.is_none() {
                             this.page = Page::Profiles;
+                            this.load_subscription_metadata(cx);
                         } else {
                             this.start();
                         }
@@ -811,6 +837,7 @@ impl Paw {
                 secondary_button("home-profiles", self.locale.message(Message::Profiles)).on_click(
                     cx.listener(|this, _, _, cx| {
                         this.page = Page::Profiles;
+                        this.load_subscription_metadata(cx);
                         cx.notify();
                     }),
                 ),
@@ -1290,6 +1317,23 @@ impl Paw {
                 } else {
                     profile.display().to_string()
                 };
+                let interval = self
+                    .subscription_metadata
+                    .get(profile)
+                    .and_then(|metadata| *metadata)
+                    .and_then(|metadata| {
+                        metadata.interval.map(|interval| {
+                            let (label, minutes) = match interval {
+                                DisplayInterval::Local(minutes) => {
+                                    (Message::SubscriptionLocalInterval, minutes)
+                                }
+                                DisplayInterval::Provider(minutes) => {
+                                    (Message::SubscriptionProviderInterval, minutes)
+                                }
+                            };
+                            self.locale.subscription_interval(label, minutes)
+                        })
+                    });
                 card()
                     .flex_basis(px(300.))
                     .flex_grow(1.)
@@ -1312,6 +1356,17 @@ impl Paw {
                                     .child(details),
                             ),
                     )
+                    .when(subscription.is_some(), |card| {
+                        card.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(FAINT))
+                                .child(self.locale.message(Message::SubscriptionManualOnly)),
+                        )
+                        .when_some(interval, |card, interval| {
+                            card.child(div().text_xs().text_color(rgb(FAINT)).child(interval))
+                        })
+                    })
                     .child(
                         div()
                             .flex()
@@ -1492,6 +1547,48 @@ impl Paw {
         Some((store, id))
     }
 
+    fn load_subscription_metadata(&mut self, cx: &mut Context<Self>) {
+        if self.subscription_metadata_started {
+            return;
+        }
+        self.subscription_metadata_started = true;
+        let Some(dir) = self.preferences.subscription_dir() else {
+            return;
+        };
+        let paths = self.subscription_paths.clone();
+        cx.spawn(async move |weak, cx| {
+            for chunk in paths.chunks(METADATA_BATCH_SIZE) {
+                let chunk = chunk.to_vec();
+                let dir = dir.clone();
+                let batch = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let store = SubscriptionStore::new(dir);
+                        chunk
+                            .into_iter()
+                            .map(|path| {
+                                let metadata = store
+                                    .id_for_record(&path)
+                                    .and_then(|id| store.metadata(id).ok());
+                                (path, metadata)
+                            })
+                            .collect()
+                    })
+                    .await;
+                if weak
+                    .update(cx, |paw, cx| {
+                        merge_subscription_metadata(&mut paw.subscription_metadata, batch);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn cancel_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.subscription_url
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -1526,7 +1623,7 @@ impl Paw {
             let id = store
                 .import(&url, candidate, RefreshPolicy::default())
                 .map_err(|_| locale.message(Message::SubscriptionSaveFailed).to_owned())?;
-            Ok(Some(store.record_path(id)))
+            Ok((store.record_path(id), store.metadata(id).ok(), true))
         });
     }
 
@@ -1544,14 +1641,18 @@ impl Paw {
                     .message(Message::SubscriptionRefreshSaveFailed)
                     .to_owned()
             })?;
-            Ok(None)
+            Ok((store.record_path(id), store.metadata(id).ok(), false))
         });
     }
 
     fn subscription_job(
         &mut self,
         cx: &mut Context<Self>,
-        job: impl FnOnce(&mut SubscriptionStore) -> Result<Option<PathBuf>, String> + Send + 'static,
+        job: impl FnOnce(
+            &mut SubscriptionStore,
+        ) -> Result<(PathBuf, Option<SubscriptionMetadata>, bool), String>
+        + Send
+        + 'static,
     ) {
         let Some(dir) = self.preferences.subscription_dir() else {
             return;
@@ -1571,13 +1672,17 @@ impl Paw {
             let _ = weak.update(cx, |paw, cx| {
                 paw.subscription_busy = false;
                 match result {
-                    Ok(Some(path)) => {
+                    Ok((path, metadata, imported)) => {
                         if !paw.subscription_paths.contains(&path) {
-                            paw.subscription_paths.push(path);
+                            paw.subscription_paths.push(path.clone());
                         }
-                        paw.subscription_notice = Some(Message::SubscriptionSaved);
+                        paw.subscription_metadata.insert(path, metadata);
+                        paw.subscription_notice = Some(if imported {
+                            Message::SubscriptionSaved
+                        } else {
+                            Message::SubscriptionRefreshed
+                        });
                     }
-                    Ok(None) => paw.subscription_notice = Some(Message::SubscriptionRefreshed),
                     Err(error) => paw.error = Some(error),
                 }
                 cx.notify();
@@ -3239,6 +3344,46 @@ fn paw_badge(size: f32) -> Div {
 #[cfg(test)]
 mod tests {
     use super::Page;
+
+    #[test]
+    fn subscription_path_enumeration_does_not_read_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("0123456789abcdef0123456789abcdef.json");
+        // This is deliberately not a valid subscription record.
+        std::fs::write(&path, b"invalid").unwrap();
+        assert_eq!(
+            super::subscription_paths(dir.path().into()).unwrap(),
+            vec![path]
+        );
+    }
+
+    #[test]
+    fn older_metadata_batches_cannot_replace_manual_results() {
+        use super::{DisplayInterval, SubscriptionMetadata, merge_subscription_metadata};
+        use std::{collections::HashMap, path::PathBuf};
+
+        let refreshed = PathBuf::from("refreshed.json");
+        let failed = PathBuf::from("failed.json");
+        let untouched = PathBuf::from("untouched.json");
+        let old = Some(SubscriptionMetadata {
+            interval: Some(DisplayInterval::Provider(60)),
+        });
+        let new = Some(SubscriptionMetadata {
+            interval: Some(DisplayInterval::Provider(120)),
+        });
+        let mut current = HashMap::from([(refreshed.clone(), new), (failed.clone(), None)]);
+        merge_subscription_metadata(
+            &mut current,
+            vec![
+                (refreshed.clone(), old),
+                (failed.clone(), old),
+                (untouched.clone(), old),
+            ],
+        );
+        assert_eq!(current[&refreshed], new);
+        assert_eq!(current[&failed], None);
+        assert_eq!(current[&untouched], old);
+    }
 
     #[test]
     fn overview_current_profile_requires_a_confirmed_running_identity() {
