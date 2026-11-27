@@ -5708,17 +5708,20 @@ impl Render for ProviderPanel {
             content = content.child(div().text_sm().text_color(rgb(FAINT)).child(error.clone()));
         }
         if stale || unavailable {
+            let warning = locale.message(if stale {
+                Message::ProviderDataStale
+            } else if inventory.is_some() {
+                Message::ProviderReadRetrying
+            } else {
+                Message::ProviderDataUnavailable
+            });
             content = content.child(
                 div()
                     .id("provider-panel-warning")
                     .test_support()
                     .text_sm()
                     .text_color(rgb(FAINT))
-                    .child(locale.message(if stale {
-                        Message::ProviderDataStale
-                    } else {
-                        Message::ProviderDataUnavailable
-                    })),
+                    .child(warning.test_text(warning)),
             );
         }
         if let Some(inventory) = inventory {

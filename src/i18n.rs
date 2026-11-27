@@ -80,6 +80,7 @@ pub enum Message {
     ProviderEmpty,
     ProviderDataStale,
     ProviderDataUnavailable,
+    ProviderReadRetrying,
     ProviderCountUnavailable,
     NoCandidateRoutes,
     SortDefault,
@@ -517,6 +518,9 @@ fn english(key: Message) -> &'static str {
         Message::ProviderEmpty => "No proxy providers in this inventory.",
         Message::ProviderDataStale => "Provider data may be stale. Refresh is disabled.",
         Message::ProviderDataUnavailable => "Provider data is unavailable. Refresh is disabled.",
+        Message::ProviderReadRetrying => {
+            "Could not read providers. This panel updates automatically when provider data is available again."
+        }
         Message::ProviderCountUnavailable => "Node count unavailable",
         Message::NoCandidateRoutes => "This group has no candidate routes.",
         Message::SortDefault => "Sort: Default",
@@ -885,6 +889,7 @@ fn chinese(key: Message) -> &'static str {
         Message::ProviderEmpty => "当前清单中没有代理提供者。",
         Message::ProviderDataStale => "提供者数据可能已过期，刷新已停用。",
         Message::ProviderDataUnavailable => "提供者数据不可用，刷新已停用。",
+        Message::ProviderReadRetrying => "无法读取提供者。数据恢复后，此面板会自动更新。",
         Message::ProviderCountUnavailable => "节点数量不可用",
         Message::NoCandidateRoutes => "此组没有候选路线。",
         Message::SortDefault => "排序：默认",

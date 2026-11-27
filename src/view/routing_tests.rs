@@ -313,17 +313,50 @@ fn provider_panel_tracks_stale_empty_and_busy_inventory(cx: &mut TestAppContext)
         assert_eq!(window.find(bulk).disabled(), Some(true));
         assert_eq!(window.find(id).disabled(), Some(true));
         assert_eq!(window.find(id).label(), Some("刷新不可用: 示例供应商"));
+        let texts = gpui_kit::base::test_support::texts(window);
+        assert!(texts.iter().any(|text| text.text().contains("可能已过期")));
+        assert!(!texts.iter().any(|text| text.text().contains("自动更新")));
         paw.update(cx, |paw, cx| {
             paw.snapshot.inventory_stale = false;
             let inventory = Arc::make_mut(paw.snapshot.inventory.as_mut().unwrap());
-            inventory.provider_error = Some("failed".into());
+            inventory.provider_error = Some("private diagnostic sentinel".into());
             inventory.providers.clear();
             cx.notify();
         });
         window.render_frame(cx);
         assert!(window.try_find("provider-panel-warning").is_some());
         assert!(window.try_find("provider-panel-empty").is_none());
+        assert_eq!(window.find(bulk).disabled(), Some(true));
+        for (locale, copy) in [
+            (
+                Locale::ZhCn,
+                "无法读取提供者。数据恢复后，此面板会自动更新。",
+            ),
+            (
+                Locale::En,
+                "Could not read providers. This panel updates automatically",
+            ),
+        ] {
+            paw.update(cx, |paw, cx| {
+                paw.locale = locale;
+                paw.snapshot.mode = Some(meow_paw::engine::controller::RoutingMode::Direct);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let texts = gpui_kit::base::test_support::texts(window);
+            assert!(texts.iter().any(|text| text.text().contains(copy)));
+            assert!(!texts.iter().any(|text| {
+                text.text().contains("Proxy groups are still available")
+                    || text.text().contains("代理组仍可使用")
+            }));
+            assert!(
+                !texts
+                    .iter()
+                    .any(|text| text.text().contains("private diagnostic sentinel"))
+            );
+        }
         paw.update(cx, |paw, cx| {
+            paw.locale = Locale::ZhCn;
             Arc::make_mut(paw.snapshot.inventory.as_mut().unwrap()).provider_error = None;
             cx.notify();
         });
