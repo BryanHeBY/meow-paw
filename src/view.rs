@@ -189,6 +189,22 @@ fn valid_subscription_url(input: &str) -> bool {
     })
 }
 
+fn subscription_name_valid(input: &str) -> bool {
+    input.chars().count() <= 80
+}
+
+fn subscription_form_status(
+    busy: bool,
+    pending: Message,
+    notice: Option<Message>,
+) -> Option<Message> {
+    if busy { Some(pending) } else { notice }
+}
+
+#[cfg(test)]
+#[path = "view/profile_form_tests.rs"]
+mod profile_form_tests;
+
 fn subscription_paths(dir: PathBuf) -> std::io::Result<Vec<PathBuf>> {
     let store = SubscriptionStore::new(dir);
     Ok(store
@@ -2032,7 +2048,7 @@ impl Paw {
             if self.subscription_entry_open {
                 page =
                     page.child(
-                        div()
+                        card()
                             .id("subscription-entry")
                             .on_key_down(cx.listener(|paw, event: &KeyDownEvent, window, cx| {
                                 // Leave input keystrokes to the input's IME and editing handlers.
@@ -2098,6 +2114,29 @@ impl Paw {
                                                 })),
                                             ),
                                     ),
+                            )
+                            .when_some(
+                                subscription_form_status(
+                                    self.subscription_busy,
+                                    self.subscription_busy_message,
+                                    self.subscription_notice,
+                                ),
+                                |form, message| {
+                                    form.child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(
+                                                if self.subscription_busy
+                                                    || message == Message::SubscriptionSaved
+                                                {
+                                                    FAINT
+                                                } else {
+                                                    0xb42318
+                                                },
+                                            ))
+                                            .child(self.locale.message(message)),
+                                    )
+                                },
                             ),
                     );
             } else if !self.subscription_busy && self.subscription_rename.is_none() {
@@ -2122,7 +2161,10 @@ impl Paw {
                 );
             }
         }
-        if self.subscription_busy || self.subscription_notice.is_some() {
+        if !self.subscription_entry_open
+            && self.subscription_rename.is_none()
+            && (self.subscription_busy || self.subscription_notice.is_some())
+        {
             page = page.child(div().text_sm().text_color(rgb(FAINT)).child(
                 if self.subscription_busy {
                     self.locale.message(self.subscription_busy_message)
@@ -2277,69 +2319,89 @@ impl Paw {
                             card.child(div().text_xs().text_color(rgb(FAINT)).child(interval))
                         })
                     })
-                    .when(
-                        self.subscription_rename.as_ref() == Some(profile)
-                            && !self.subscription_busy,
-                        |card| {
-                            card.child(
-                                div()
-                                    .id(action_id("rename-editor"))
-                                    .on_key_down(cx.listener(
-                                        |paw, event: &KeyDownEvent, window, cx| {
-                                            // Keep input keystrokes with its IME and editing handlers.
-                                            if event.keystroke.key == "escape"
-                                                && !event.keystroke.modifiers.modified()
-                                                && !paw
-                                                    .subscription_name
-                                                    .focus_handle(cx)
-                                                    .is_focused(window)
-                                            {
-                                                paw.cancel_rename(window, cx);
-                                                cx.stop_propagation();
-                                            }
-                                        },
-                                    ))
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(section_label(
-                                        self.locale.message(Message::SubscriptionName),
-                                    ))
-                                    .child(Input::new(&self.subscription_name).cleanable(true))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .gap_2()
-                                            .child(
-                                                subscription_button(
-                                                    action_id("rename-save"),
-                                                    self.locale
-                                                        .message(Message::SaveSubscriptionName),
-                                                    true,
-                                                    cx,
-                                                )
-                                                .on_click(
-                                                    cx.listener(|paw, _, _, cx| {
-                                                        paw.save_rename(cx)
-                                                    }),
-                                                ),
-                                            )
-                                            .child(
-                                                subscription_button(
-                                                    action_id("rename-cancel"),
-                                                    self.locale
-                                                        .message(Message::CancelSubscription),
-                                                    false,
-                                                    cx,
-                                                )
-                                                .on_click(cx.listener(|paw, _, window, cx| {
-                                                    paw.cancel_rename(window, cx)
-                                                })),
-                                            ),
+                    .when(self.subscription_rename.as_ref() == Some(profile), |card| {
+                        card.child(
+                            div()
+                                .id(action_id("rename-editor"))
+                                .on_key_down(cx.listener(
+                                    |paw, event: &KeyDownEvent, window, cx| {
+                                        // Keep input keystrokes with its IME and editing handlers.
+                                        if event.keystroke.key == "escape"
+                                            && !paw.subscription_busy
+                                            && !event.keystroke.modifiers.modified()
+                                            && !paw
+                                                .subscription_name
+                                                .focus_handle(cx)
+                                                .is_focused(window)
+                                        {
+                                            paw.cancel_rename(window, cx);
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                ))
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(section_label(
+                                    self.locale.message(Message::SubscriptionName),
+                                ))
+                                .child(
+                                    Input::new(&self.subscription_name)
+                                        .cleanable(true)
+                                        .disabled(self.subscription_busy),
+                                )
+                                .when_some(
+                                    subscription_form_status(
+                                        self.subscription_busy,
+                                        self.subscription_busy_message,
+                                        self.subscription_notice,
                                     ),
-                            )
-                        },
-                    )
+                                    |form, message| {
+                                        form.child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(if self.subscription_busy {
+                                                    FAINT
+                                                } else {
+                                                    0xb42318
+                                                }))
+                                                .child(self.locale.message(message)),
+                                        )
+                                    },
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            subscription_button(
+                                                action_id("rename-save"),
+                                                self.locale.message(Message::SaveSubscriptionName),
+                                                true,
+                                                cx,
+                                            )
+                                            .disabled(self.subscription_busy)
+                                            .on_click(
+                                                cx.listener(|paw, _, _, cx| paw.save_rename(cx)),
+                                            ),
+                                        )
+                                        .child(
+                                            subscription_button(
+                                                action_id("rename-cancel"),
+                                                self.locale.message(Message::CancelSubscription),
+                                                false,
+                                                cx,
+                                            )
+                                            .disabled(self.subscription_busy)
+                                            .on_click(
+                                                cx.listener(|paw, _, window, cx| {
+                                                    paw.cancel_rename(window, cx)
+                                                }),
+                                            ),
+                                        ),
+                                ),
+                        )
+                    })
                     .child(
                         div()
                             .flex()
@@ -2389,7 +2451,9 @@ impl Paw {
                             })
                             .when_some(
                                 subscription.filter(|_| {
-                                    !self.subscription_busy && self.subscription_rename.is_none()
+                                    !self.subscription_busy
+                                        && self.subscription_rename.is_none()
+                                        && !self.subscription_entry_open
                                 }),
                                 |el, id| {
                                     el.child(
@@ -2643,9 +2707,13 @@ impl Paw {
     }
 
     fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.subscription_busy {
+            return;
+        }
         self.subscription_name
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.subscription_rename = None;
+        self.subscription_notice = None;
         if self.page == Page::Profiles && !self.subscription_busy {
             self.subscription_add_focus.focus(window, cx);
         }
@@ -2663,6 +2731,11 @@ impl Paw {
             return;
         };
         let name = self.subscription_name.read(cx).value().to_string();
+        if !subscription_name_valid(&name) {
+            self.subscription_notice = Some(Message::SubscriptionNameTooLong);
+            cx.notify();
+            return;
+        }
         self.subscription_busy = true;
         self.subscription_busy_message = Message::SavingSubscriptionName;
         self.subscription_notice = None;
