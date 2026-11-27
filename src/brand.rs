@@ -33,7 +33,7 @@ gpui_kit::assets::icon_assets!(
     ]
 );
 
-pub(crate) const MARK: &str = "brand/paw-mark.png";
+pub(crate) const MARK: &str = "brand/paw-mark.svg";
 
 pub(crate) struct PawAssets;
 
@@ -41,7 +41,7 @@ impl AssetSource for PawAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         if path == MARK {
             return Ok(Some(Cow::Borrowed(include_bytes!(
-                "../assets/paw-mark.png"
+                "../assets/paw-mark.svg"
             ))));
         }
         NavAssets.load(path)

@@ -1,12 +1,17 @@
-The Paw mark is an original SVG using Meow's blue, ivory, and warm yellow
-palette as visual reference; no upstream app artwork is embedded.
+The Paw mark is an original vector drawing of the underside of a cat paw,
+with four toe pads and a large central pad in the Meow palette.
 
-`paw-mark.svg` is the source. Rasterize at 256 × 256 using resvg, then generate
-the straight-alpha RGBA tray variants with:
+The window loads `paw-mark.svg` directly. Linux StatusNotifier and the Windows
+tray use straight-alpha RGBA buffers generated from the same SVG. With resvg
+and ImageMagick installed, regenerate them from this directory:
 
 ```sh
-resvg paw-mark.svg paw-mark.png
+preview_dir=$(mktemp -d)
+resvg paw-mark.svg "$preview_dir/paw-mark.png"
 for size in 16 24 32; do
-  magick paw-mark.png -filter Lanczos -resize "${size}x${size}" -depth 8 "RGBA:paw-mark-$size.rgba"
+  magick "$preview_dir/paw-mark.png" -filter Lanczos \
+    -resize "${size}x${size}" -alpha on -depth 8 "RGBA:paw-mark-$size.rgba"
 done
+rm "$preview_dir/paw-mark.png"
+rmdir "$preview_dir"
 ```

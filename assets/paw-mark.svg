@@ -1,47 +1,52 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">Meow Paw — a golden cat paw with plush toe beans</title>
   <defs>
     <clipPath id="tile"><rect x="3" y="3" width="250" height="250" rx="59"/></clipPath>
-    <linearGradient id="ocean" x1="0.16" y1="0" x2="0.75" y2="1">
-      <stop stop-color="#4fe2ff"/><stop offset=".29" stop-color="#13aff2"/><stop offset=".73" stop-color="#086bdb"/><stop offset="1" stop-color="#1147b8"/>
+    <linearGradient id="sky" x1=".20" y1="0" x2=".7" y2="1">
+      <stop stop-color="#50DFFF"/><stop offset=".35" stop-color="#12BDF6"/><stop offset=".84" stop-color="#047EE2"/><stop offset="1" stop-color="#1856BF"/>
     </linearGradient>
-    <linearGradient id="ceramic" x1=".2" y1="0" x2=".67" y2="1">
-      <stop stop-color="#fffdfa"/><stop offset=".25" stop-color="#f8fbff"/><stop offset=".67" stop-color="#eef1f9"/><stop offset="1" stop-color="#bdc9df"/>
-    </linearGradient>
-    <linearGradient id="paw" x1=".2" y1=".02" x2=".79" y2=".94">
-      <stop stop-color="#fff7a0"/><stop offset=".22" stop-color="#ffe45e"/><stop offset=".47" stop-color="#ffc327"/><stop offset=".76" stop-color="#ff9a0a"/><stop offset=".94" stop-color="#ea7200"/><stop offset="1" stop-color="#cb4b00"/>
-    </linearGradient>
-    <radialGradient id="shine" cx=".4" cy=".3" r=".62">
-      <stop stop-color="#fffacb" stop-opacity=".96"/><stop offset=".62" stop-color="#ffe36b" stop-opacity=".28"/><stop offset="1" stop-color="#ffbc29" stop-opacity="0"/>
+    <radialGradient id="body" cx=".32" cy=".19" r=".92">
+      <stop stop-color="#FFF9B4"/><stop offset=".30" stop-color="#FFE77A"/><stop offset=".61" stop-color="#FFC432"/><stop offset=".83" stop-color="#FFA018"/><stop offset="1" stop-color="#DC690D"/>
     </radialGradient>
-    <linearGradient id="seam" x1=".4" y1="0" x2=".4" y2="1">
-      <stop stop-color="#8f3109" stop-opacity="0"/><stop offset=".64" stop-color="#b94e09" stop-opacity=".81"/><stop offset="1" stop-color="#e67100" stop-opacity="0"/>
-    </linearGradient>
-    <radialGradient id="shade" cx=".5" cy=".5" r=".5">
-      <stop stop-color="#413334" stop-opacity=".53"/><stop offset=".65" stop-color="#5e483b" stop-opacity=".24"/><stop offset="1" stop-color="#5e483b" stop-opacity="0"/>
+    <radialGradient id="bean" cx=".32" cy=".21" r=".85">
+      <stop stop-color="#FFF1A4"/><stop offset=".25" stop-color="#FFCB69"/><stop offset=".58" stop-color="#FF9D33"/><stop offset=".82" stop-color="#EC7015"/><stop offset="1" stop-color="#BB4709"/>
     </radialGradient>
-    <linearGradient id="rim" x1=".21" y1="0" x2=".73" y2="1">
-      <stop stop-color="#efffff" stop-opacity=".88"/><stop offset=".42" stop-color="#fff" stop-opacity=".22"/><stop offset=".68" stop-color="#1847a1" stop-opacity=".15"/><stop offset="1" stop-color="#233d68" stop-opacity=".31"/>
+    <linearGradient id="edge" x1=".18" y1="0" x2=".79" y2="1">
+      <stop stop-color="#FFFFE6"/><stop offset=".38" stop-color="#FFE69A"/><stop offset=".75" stop-color="#D67E25"/><stop offset="1" stop-color="#A44911"/>
     </linearGradient>
+    <radialGradient id="occlusion">
+      <stop stop-color="#09296E" stop-opacity=".61"/><stop offset=".5" stop-color="#13488B" stop-opacity=".34"/><stop offset="1" stop-color="#13488B" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1=".12" y1="0" x2=".82" y2="1">
+      <stop stop-color="#E5FFFF" stop-opacity=".94"/><stop offset=".45" stop-color="#B9EEFF" stop-opacity=".19"/><stop offset="1" stop-color="#5B5A70" stop-opacity=".38"/>
+    </linearGradient>
+    <path id="sole" d="M52 137C40 126 34 111 38 97C42 81 57 72 71 76C70 58 80 44 95 42C108 40 120 47 126 57C133 43 146 37 160 41C176 45 185 60 182 76C196 72 211 80 216 94C222 110 216 126 204 138C215 151 214 172 205 186C193 206 165 218 131 219C95 220 63 208 51 187C41 171 41 151 52 137Z"/>
+    <path id="main-pad" d="M129 114C142 113 147 125 157 131C167 137 180 140 185 152C191 168 181 185 163 189C152 192 142 186 130 186C117 186 109 193 95 190C78 186 67 171 73 154C78 141 92 137 104 131C113 126 118 115 129 114Z"/>
   </defs>
   <g clip-path="url(#tile)">
-    <rect x="3" y="3" width="250" height="250" fill="url(#ocean)"/>
-    <path d="M3 159 Q132 157 253 160 L253 256H3Z" fill="url(#ceramic)"/>
-    <path d="M3 160 Q130 157 253 160" fill="none" stroke="#fff" stroke-opacity=".8" stroke-width="3"/>
-    <ellipse cx="132" cy="194" rx="88" ry="29" fill="url(#shade)" transform="rotate(-7 132 194)"/>
-    <path d="M77 121 C71 93 83 72 106 60 C130 49 158 55 171 73
-             C183 89 179 102 187 114 C198 128 207 142 206 154
-             C205 166 198 174 185 178 C178 187 166 191 154 189
-             C146 198 131 201 118 197 C101 203 82 198 71 191
-             C51 180 49 163 54 149 C58 137 66 128 77 121Z"
-          fill="url(#paw)" stroke="#ffa92a" stroke-width="1.8"/>
-    <path d="M78 122 C75 101 89 77 108 68 C127 58 154 60 164 75 C172 84 168 96 178 113
-             C159 114 143 111 127 119 C111 126 91 132 73 146 C68 149 66 151 64 154 C66 139 73 129 78 122Z" fill="url(#shine)"/>
-    <path d="M185 178 C190 170 190 159 184 153 M154 189 C163 181 166 169 161 163 M118 197 C127 190 129 180 125 173"
-          fill="none" stroke="url(#seam)" stroke-width="4" stroke-linecap="round"/>
-    <path d="M77 120 C70 95 84 73 106 63 C128 53 150 55 162 67"
-          fill="none" stroke="#fff5af" stroke-opacity=".75" stroke-width="2.5" stroke-linecap="round"/>
-    <path d="M53 162 C58 146 71 138 86 133" fill="none" stroke="#ffed97" stroke-opacity=".64" stroke-width="2.3" stroke-linecap="round"/>
+    <rect x="3" y="3" width="250" height="250" fill="url(#sky)"/>
+    <ellipse cx="136" cy="209" rx="99" ry="31" fill="url(#occlusion)"/>
+    <g transform="rotate(-8 128 130)">
+      <use href="#sole" transform="translate(2 5)" fill="#81450E" opacity=".27"/>
+      <use href="#sole" fill="url(#body)" stroke="url(#edge)" stroke-width="2.6"/>
+      <g fill="#AF4C07" opacity=".32" transform="translate(1.6 3.5)">
+        <ellipse cx="62" cy="107" rx="18" ry="22" transform="rotate(-28 62 107)"/>
+        <ellipse cx="98" cy="76" rx="20" ry="25" transform="rotate(-12 98 76)"/>
+        <ellipse cx="149" cy="72" rx="20" ry="26" transform="rotate(12 149 72)"/>
+        <ellipse cx="192" cy="102" rx="18" ry="23" transform="rotate(24 192 102)"/>
+        <use href="#main-pad"/>
+      </g>
+      <g fill="url(#bean)" stroke="#E47A23" stroke-width="1.25">
+        <ellipse cx="62" cy="107" rx="18" ry="22" transform="rotate(-28 62 107)"/>
+        <ellipse cx="98" cy="76" rx="20" ry="25" transform="rotate(-12 98 76)"/>
+        <ellipse cx="149" cy="72" rx="20" ry="26" transform="rotate(12 149 72)"/>
+        <ellipse cx="192" cy="102" rx="18" ry="23" transform="rotate(24 192 102)"/>
+        <use href="#main-pad"/>
+      </g>
+      <path d="M82 157C86 147 101 146 112 136C119 129 122 124 130 124
+               M51 105Q52 95 58 92 M86 71Q88 60 97 59 M137 66Q140 54 149 54 M182 96Q185 87 192 87"
+            fill="none" stroke="#FFF2B0" stroke-opacity=".74" stroke-width="4" stroke-linecap="round"/>
+    </g>
     <rect x="5" y="5" width="246" height="246" rx="57" fill="none" stroke="url(#rim)" stroke-width="4"/>
-    <rect x="10" y="10" width="236" height="236" rx="51" fill="none" stroke="url(#rim)" stroke-opacity=".45" stroke-width="2"/>
   </g>
 </svg>
