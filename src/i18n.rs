@@ -245,6 +245,9 @@ pub enum Message {
     ListenerConnectionsDetail,
     NoMatchingConnections,
     ConnectionFilterDetail,
+    ConnectionSortOriginal,
+    ConnectionSortDestination,
+    ConnectionSortTotalData,
     StartToViewConnections,
     DestinationColumn,
     RouteColumn,
@@ -721,8 +724,11 @@ fn english(key: Message) -> &'static str {
         Message::ListenerConnectionsDetail => "Traffic handled by the Paw listener appears here.",
         Message::NoMatchingConnections => "No matching connections",
         Message::ConnectionFilterDetail => {
-            "Change or clear the filter. Search destination, policy chain, or matched rule."
+            "Change or clear the filter. Search destination, policy chain, matched rule, or transport."
         }
+        Message::ConnectionSortOriginal => "Sort: Original order",
+        Message::ConnectionSortDestination => "Sort: Destination",
+        Message::ConnectionSortTotalData => "Sort: Most data",
         Message::StartToViewConnections => "Start a profile to monitor its live connections.",
         Message::DestinationColumn => "DESTINATION",
         Message::RouteColumn => "ROUTE",
@@ -1033,7 +1039,12 @@ fn chinese(key: Message) -> &'static str {
         Message::NoActiveConnections => "暂无活动连接",
         Message::ListenerConnectionsDetail => "由 Paw 监听器处理的流量会显示在这里。",
         Message::NoMatchingConnections => "没有匹配的连接",
-        Message::ConnectionFilterDetail => "更改或清除筛选条件。可搜索目标地址、策略链或匹配规则。",
+        Message::ConnectionFilterDetail => {
+            "更改或清除筛选条件。可搜索目标地址、策略链、匹配规则或传输协议。"
+        }
+        Message::ConnectionSortOriginal => "排序：原始顺序",
+        Message::ConnectionSortDestination => "排序：目标地址",
+        Message::ConnectionSortTotalData => "排序：流量从高到低",
         Message::StartToViewConnections => "启动配置后即可监控实时连接。",
         Message::DestinationColumn => "目标地址",
         Message::RouteColumn => "路线",
@@ -1810,8 +1821,8 @@ mod tests {
             ),
             (
                 Message::ConnectionFilterDetail,
-                "Change or clear the filter. Search destination, policy chain, or matched rule.",
-                "更改或清除筛选条件。可搜索目标地址、策略链或匹配规则。",
+                "Change or clear the filter. Search destination, policy chain, matched rule, or transport.",
+                "更改或清除筛选条件。可搜索目标地址、策略链、匹配规则或传输协议。",
             ),
             (
                 Message::StartToViewConnections,

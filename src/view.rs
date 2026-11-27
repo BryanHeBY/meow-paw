@@ -21,6 +21,11 @@ use std::time::Duration;
 #[cfg(any(target_os = "linux", windows))]
 mod proxy_group_navigation;
 
+#[cfg(any(target_os = "linux", windows))]
+mod connection_order;
+#[cfg(any(target_os = "linux", windows))]
+use connection_order::{ConnectionOrder, matches_connection, matching_connections};
+
 const BG: u32 = 0xeff2f6;
 const CHROME: u32 = 0xf8faff;
 const SURFACE: u32 = 0xffffff;
@@ -538,6 +543,10 @@ pub struct Paw {
     closed_connections_tab_focus: FocusHandle,
     connection_filter: Entity<InputState>,
     _connection_filter_changes: Subscription,
+    #[cfg(any(target_os = "linux", windows))]
+    connection_order: ConnectionOrder,
+    #[cfg(any(target_os = "linux", windows))]
+    connection_order_focus: FocusHandle,
     log_filter: Entity<InputState>,
     _log_filter_changes: Subscription,
     #[cfg(any(target_os = "linux", windows))]
@@ -895,6 +904,10 @@ pub fn open(
             closed_connections_tab_focus: cx.focus_handle(),
             connection_filter,
             _connection_filter_changes: connection_filter_changes,
+            #[cfg(any(target_os = "linux", windows))]
+            connection_order: ConnectionOrder::default(),
+            #[cfg(any(target_os = "linux", windows))]
+            connection_order_focus: cx.focus_handle(),
             log_filter,
             _log_filter_changes: log_filter_changes,
             #[cfg(any(target_os = "linux", windows))]
@@ -4530,9 +4543,7 @@ impl Paw {
                         .value()
                         .trim()
                         .to_lowercase();
-                    row.is_some_and(|row| {
-                        !matching_connections(std::iter::once(row), &query).is_empty()
-                    })
+                    row.is_some_and(|row| matches_connection(row, &query))
                 });
         if !visible {
             self.connection_detail = None;
@@ -4594,9 +4605,13 @@ impl Paw {
                     ));
             }
             let rows: Vec<_> = if self.closed_connections_open {
-                self.snapshot.connection_history.recent().collect()
+                self.snapshot
+                    .connection_history
+                    .recent_keyed()
+                    .map(|(key, row)| (Some(key), row))
+                    .collect()
             } else if let Some(list) = &self.snapshot.connections {
-                list.iter().collect()
+                list.iter().map(|row| (None, row)).collect()
             } else {
                 return page.child(empty_state(
                     self.locale.message(Message::LiveConnectionsUnavailable),
@@ -4606,7 +4621,11 @@ impl Paw {
             };
             let value = self.connection_filter.read(cx).value();
             let query = value.trim().to_lowercase();
-            let results = matching_connections(rows.iter().copied(), &query);
+            let results = matching_connections(
+                rows.iter().map(|(_, row)| *row),
+                &query,
+                self.connection_order,
+            );
             let count = if self.closed_connections_open {
                 self.locale
                     .closed_connection_count(results.len(), rows.len(), !query.is_empty())
@@ -4620,8 +4639,23 @@ impl Paw {
                 self.locale
                     .connection_match_count(results.len(), rows.len())
             };
+            let order = semantic_secondary_button(
+                "connection-order",
+                self.locale.message(self.connection_order.message()),
+            )
+            .flex_shrink_0()
+            .track_focus(&self.connection_order_focus)
+            .on_click(cx.listener(|this, event, window, cx| {
+                if matches!(event, ClickEvent::Keyboard(_)) {
+                    cx.stop_propagation();
+                }
+                this.connection_order_focus.focus(window, cx);
+                this.connection_order = this.connection_order.next();
+                cx.notify();
+            }));
             let toolbar = div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap_3()
                 .child(
@@ -4636,7 +4670,8 @@ impl Paw {
                         .min_w_0()
                         .child(Input::new(&self.connection_filter).cleanable(true)),
                 )
-                .child(chip(count, BLUE, SOFT_BLUE));
+                .child(chip(count, BLUE, SOFT_BLUE))
+                .child(order);
             let selected_index = self.connection_detail.as_ref().and_then(|selection| {
                 detail_row_index(selection, &self.snapshot, self.closed_connections_open)
             });
@@ -4663,20 +4698,13 @@ impl Paw {
                         )
                         .bg(rgb(CHROME)),
                     )
-                    .children(results.into_iter().map(|(c, destination, route)| {
-                        let index = rows.iter().position(|row| std::ptr::eq(*row, c)).unwrap();
+                    .children(results.into_iter().map(|row| {
+                        let connection_order::ConnectionListRow { index, connection: c, destination, route } = row;
                         let selected = selected_index == Some(index);
                         let return_focus =
                             selected || (selected_index.is_none() && return_index == Some(index));
-                        let selection = if self.closed_connections_open {
-                            ConnectionDetailSelection::Closed(
-                                self.snapshot
-                                    .connection_history
-                                    .recent_keyed()
-                                    .nth(index)
-                                    .unwrap()
-                                    .0,
-                            )
+                        let selection = if let Some(closed_key) = rows[index].0 {
+                            ConnectionDetailSelection::Closed(closed_key)
                         } else {
                             ConnectionDetailSelection::Active {
                                 sample: self.snapshot.connections.as_ref().unwrap().clone(),
@@ -6710,28 +6738,6 @@ fn route_matches(name: &str, normalized_query: &str) -> bool {
 }
 
 #[cfg(any(target_os = "linux", windows))]
-fn matching_connections<'a>(
-    connections: impl Iterator<Item = &'a meow_paw::engine::controller::Connection>,
-    query: &str,
-) -> Vec<(&'a meow_paw::engine::controller::Connection, String, String)> {
-    connections
-        .filter_map(|c| {
-            let target = if c.metadata.host.is_empty() {
-                &c.metadata.destination_ip
-            } else {
-                &c.metadata.host
-            };
-            let destination = destination_label(target, &c.metadata.destination_port);
-            let route = c.chains.join(" / ");
-            (route_matches(&destination, query)
-                || route_matches(&route, query)
-                || route_matches(&c.rule, query))
-            .then_some((c, destination, route))
-        })
-        .collect()
-}
-
-#[cfg(any(target_os = "linux", windows))]
 fn detail_row_index(
     selection: &ConnectionDetailSelection,
     snapshot: &meow_paw::app::Snapshot,
@@ -7873,8 +7879,8 @@ mod tests {
 
     #[test]
     #[cfg(any(target_os = "linux", windows))]
-    fn connection_filter_matches_destination_route_and_rule_for_any_pane() {
-        use super::matching_connections;
+    fn connection_filter_matches_destination_route_rule_and_transport_for_any_pane() {
+        use super::{ConnectionOrder, matches_connection, matching_connections};
         use meow_paw::engine::controller::{Connection, Metadata};
         use serde_json::json;
 
@@ -7884,7 +7890,7 @@ mod tests {
                     host: "Example.Test".into(),
                     destination_ip: "192.0.2.1".into(),
                     destination_port: json!(443),
-                    ..Default::default()
+                    network: Some("TCP".into()),
                 },
                 chains: vec!["Proxy".into(), "出口".into()],
                 rule: "Domain-Suffix".into(),
@@ -7894,21 +7900,31 @@ mod tests {
                 metadata: Metadata {
                     destination_ip: "2001:db8::1".into(),
                     destination_port: json!(80),
+                    network: Some("UDP".into()),
                     ..Default::default()
                 },
                 ..Default::default()
             },
         ];
-        for query in ["example.test:443", "proxy / 出口", "domain-suffix"] {
-            assert_eq!(matching_connections(rows.iter(), query).len(), 1);
+        let search = |query| matching_connections(rows.iter(), query, ConnectionOrder::Original);
+        for query in ["example.test:443", "proxy / 出口", "domain-suffix", "tcp"] {
+            let results = search(query);
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].index, 0);
+            assert!(matches_connection(&rows[0], query));
         }
-        assert_eq!(
-            matching_connections(rows.iter(), "[2001:db8::1]:80").len(),
-            1
-        );
-        assert!(matching_connections(rows.iter(), "192.0.2.1").is_empty());
-        assert!(matching_connections(rows.iter(), "missing").is_empty());
-        assert_eq!(matching_connections(rows.iter(), "").len(), 2);
+        for query in ["[2001:db8::1]:80", "udp"] {
+            assert_eq!(search(query)[0].index, 1);
+            assert!(matches_connection(&rows[1], query));
+        }
+        assert!(search("192.0.2.1").is_empty());
+        assert!(search("missing").is_empty());
+        assert_eq!(search("").len(), 2);
+        let mut invalid = rows[1].clone();
+        invalid.metadata.network = Some("UDP\nsecret".into());
+        assert!(!matches_connection(&invalid, "udp"));
+        invalid.metadata.network = None;
+        assert!(!matches_connection(&invalid, "unknown"));
     }
 
     #[test]
