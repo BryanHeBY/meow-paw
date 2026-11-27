@@ -8,7 +8,7 @@ url='https://github.com/BryanHeBY/meow-paw'
 license=('MIT')
 depends=('ca-certificates' 'dbus' 'fontconfig' 'glibc' 'libgcc' 'libstdc++'
          'libx11' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'vulkan-icd-loader' 'wayland')
-makedepends=('clang' 'cmake' 'rustup' 'vulkan-headers')
+makedepends=('clang' 'cmake' 'git' 'rustup' 'vulkan-headers')
 checkdepends=('desktop-file-utils')
 optdepends=('vulkan-driver: Vulkan driver for your GPU (provided by your desktop)'
             'xdg-desktop-portal: native file picker (requires a desktop-specific backend)')
