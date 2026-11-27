@@ -43,11 +43,23 @@ impl Render for ProviderControls {
             .size_full()
             .tab_group()
             .child(
-                provider_refresh_button(Locale::En, "ready", false, false)
+                provider_refresh_button(Locale::En, "ready", false, false, false)
                     .on_click(move |_, _, _| *activations.borrow_mut() += 1),
             )
-            .child(provider_refresh_button(Locale::ZhCn, "current", true, true))
-            .child(provider_refresh_button(Locale::ZhCn, "queued", false, true))
+            .child(provider_refresh_button(
+                Locale::ZhCn,
+                "current",
+                true,
+                true,
+                false,
+            ))
+            .child(provider_refresh_button(
+                Locale::ZhCn,
+                "queued",
+                false,
+                true,
+                false,
+            ))
     }
 }
 
@@ -89,8 +101,11 @@ fn provider_refresh_exposes_keyboard_action_and_busy_labels(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
-fn proxy_disclosures_preserve_settings_and_do_not_refresh_or_probe(cx: &mut TestAppContext) {
-    cx.update(gpui_kit::init);
+fn proxy_panel_preserves_settings_and_does_not_refresh_or_probe(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.set_reduce_motion(true);
+    });
     let holder = Rc::new(RefCell::new(None));
     let holder2 = holder.clone();
     let (_, ui) = cx.add_window_view(move |window, cx| {
@@ -142,15 +157,33 @@ fn proxy_disclosures_preserve_settings_and_do_not_refresh_or_probe(cx: &mut Test
         window.render_frame(cx);
         let control = window.find("proxy-providers-toggle");
         assert_eq!(control.role(), Some(gpui_kit::Role::Button));
-        assert_eq!(control.label().unwrap(), "Show providers (1)");
-        assert!(!paw.read(cx).proxy_providers_open);
-        window.click("proxy-providers-toggle", cx);
+        assert_eq!(control.label().unwrap(), "Manage providers (1)");
+        paw.update(cx, |paw, cx| {
+            let inventory = Arc::make_mut(paw.snapshot.inventory.as_mut().unwrap());
+            let group = inventory.groups["Work"].clone();
+            for index in 0..20 {
+                inventory
+                    .groups
+                    .insert(format!("Extra {index:02}"), group.clone());
+            }
+            cx.notify();
+        });
         window.render_frame(cx);
-        assert!(paw.read(cx).proxy_providers_open);
-        assert_eq!(
-            window.find("proxy-providers-toggle").label().unwrap(),
-            "Hide providers (1)"
-        );
+        let handle = paw.read(cx).proxy_group_scroll.clone();
+        handle.set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(-120.)));
+        window.render_frame(cx);
+        assert!(handle.offset().y < gpui_kit::px(0.));
+        let selection = paw.read(cx).snapshot.inventory.as_ref().unwrap().groups["Daily Proxy"]
+            .now
+            .clone();
+        let expanded = paw.read(cx).expanded_groups.clone();
+        let scroll = paw.read(cx).proxy_group_scroll.offset();
+        let trigger_focus = paw.read(cx).proxy_providers_focus.clone();
+        trigger_focus.focus(window, cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("provider-panel-content").is_some());
+        assert_eq!(handle.offset(), scroll);
         assert_eq!(
             window
                 .find("provider-refresh:Sample Provider")
@@ -158,11 +191,129 @@ fn proxy_disclosures_preserve_settings_and_do_not_refresh_or_probe(cx: &mut Test
                 .unwrap(),
             "Refresh: Sample Provider"
         );
-        window.click("proxy-providers-toggle", cx);
-        assert!(!paw.read(cx).proxy_providers_open);
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert!(window.find("proxy-providers-toggle").focused().unwrap());
+        window.press("space", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("provider-panel-content").is_some());
+        window.click("provider-panel-close", cx);
+        window.render_frame(cx);
+        assert!(window.find("proxy-providers-toggle").focused().unwrap());
+        assert_eq!(
+            paw.read(cx).snapshot.inventory.as_ref().unwrap().groups["Daily Proxy"].now,
+            selection
+        );
+        assert_eq!(paw.read(cx).expanded_groups, expanded);
+        assert_eq!(paw.read(cx).proxy_group_scroll.offset(), scroll);
         assert_eq!(paw.read(cx).error.as_deref(), Some("unchanged"));
         assert!(paw.read(cx).snapshot.refreshing_provider.is_none());
         assert!(paw.read(cx).snapshot.group_probe.is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn provider_panel_tracks_stale_empty_and_busy_inventory(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.set_reduce_motion(true);
+    });
+    let holder = Rc::new(RefCell::new(None));
+    let result = holder.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let paw = open(
+            None,
+            None,
+            (Page::Proxies, Locale::ZhCn),
+            false,
+            (Preferences::discover(false).0, None),
+            window,
+            cx,
+        );
+        super::seed_proxy_fixture(&paw, cx);
+        paw.update(cx, |paw, _| {
+            use meow_paw::engine::controller::{ProviderStatus, ProviderUsage};
+            let inventory = Arc::make_mut(paw.snapshot.inventory.as_mut().unwrap());
+            let provider = inventory.providers.get_mut("示例供应商").unwrap();
+            provider.updated_at = Some("2026-11-27".into());
+            provider.subscription_info = Some(ProviderUsage {
+                upload: 10,
+                download: 20,
+                total: 100,
+                expire: 0,
+            });
+            inventory.providers.insert(
+                "本地".into(),
+                ProviderStatus {
+                    vehicle_type: "File".into(),
+                    updated_at: None,
+                    subscription_info: None,
+                },
+            );
+        });
+        *result.borrow_mut() = Some(paw.clone());
+        gpui_kit::base::Root::new(paw, window, cx)
+    });
+    let paw = holder.borrow_mut().take().unwrap();
+    ui.update(|window, cx| {
+        window.activate_window();
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("proxy-providers-toggle").label(),
+            Some("管理提供者 (2)")
+        );
+        window.click("proxy-providers-toggle", cx);
+        window.render_frame(cx);
+        let id = "provider-refresh:示例供应商";
+        assert_ne!(window.find(id).disabled(), Some(true));
+        assert!(window.try_find("provider-refresh:本地").is_none());
+        let texts = gpui_kit::base::test_support::texts(window);
+        assert!(texts.iter().any(|text| text.text().contains("2026-11-27")));
+        assert!(texts.iter().any(|text| text.text().contains("10 B")
+            && text.text().contains("20 B")
+            && text.text().contains("100 B")));
+        paw.update(cx, |paw, _| paw.error = Some("sentinel".into()));
+        window.press("tab", cx);
+        assert_eq!(window.find(id).focused(), Some(true));
+        window.press("enter", cx);
+        assert_eq!(paw.read(cx).error, None);
+        paw.update(cx, |paw, cx| {
+            paw.snapshot.refreshing_provider = Some("示例供应商".into());
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert_eq!(window.find(id).disabled(), Some(true));
+        assert_eq!(window.find(id).label(), Some("正在刷新…: 示例供应商"));
+        paw.update(cx, |paw, cx| {
+            paw.snapshot.refreshing_provider = None;
+            paw.snapshot.inventory_stale = true;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("provider-panel-warning").is_some());
+        assert_eq!(window.find(id).disabled(), Some(true));
+        assert_eq!(window.find(id).label(), Some("刷新不可用: 示例供应商"));
+        paw.update(cx, |paw, cx| {
+            paw.snapshot.inventory_stale = false;
+            let inventory = Arc::make_mut(paw.snapshot.inventory.as_mut().unwrap());
+            inventory.provider_error = Some("failed".into());
+            inventory.providers.clear();
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("provider-panel-warning").is_some());
+        assert!(window.try_find("provider-panel-empty").is_none());
+        paw.update(cx, |paw, cx| {
+            Arc::make_mut(paw.snapshot.inventory.as_mut().unwrap()).provider_error = None;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("provider-panel-warning").is_none());
+        assert!(window.try_find("provider-panel-empty").is_some());
+        assert_eq!(window.find("provider-panel-close").focused(), Some(true));
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert!(window.find("proxy-providers-toggle").focused().unwrap());
     });
 }
 

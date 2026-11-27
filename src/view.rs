@@ -501,7 +501,7 @@ pub struct Paw {
     #[cfg(any(target_os = "linux", windows))]
     proxy_group_scroll: ScrollHandle,
     #[cfg(any(target_os = "linux", windows))]
-    proxy_providers_open: bool,
+    proxy_providers_focus: FocusHandle,
     #[cfg(any(target_os = "linux", windows))]
     proxy_probe_settings_open: bool,
     #[cfg(any(target_os = "linux", windows))]
@@ -711,6 +711,8 @@ pub fn open(
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<Paw> {
+    #[cfg(any(target_os = "linux", windows))]
+    install_provider_panel_keys(cx);
     let search = cx.new(|cx| InputState::new(window, cx));
     let profile_filter = cx.new(|cx| InputState::new(window, cx));
     let rule_filter = cx.new(|cx| InputState::new(window, cx));
@@ -754,7 +756,7 @@ pub fn open(
             #[cfg(any(target_os = "linux", windows))]
             proxy_group_scroll: ScrollHandle::new(),
             #[cfg(any(target_os = "linux", windows))]
-            proxy_providers_open: false,
+            proxy_providers_focus: cx.focus_handle(),
             #[cfg(any(target_os = "linux", windows))]
             proxy_probe_settings_open: false,
             #[cfg(any(target_os = "linux", windows))]
@@ -3784,132 +3786,6 @@ impl Paw {
                     )
                 })
                 .collect::<Vec<_>>();
-            let mut node_counts = std::collections::HashMap::new();
-            if self.proxy_providers_open && ownership_available {
-                for node in &inventory.nodes {
-                    if let meow_paw::engine::controller::Origin::Provider(origin) = &node.origin {
-                        *node_counts.entry(origin.as_str()).or_insert(0_usize) += 1;
-                    }
-                }
-            }
-            let providers = inventory
-                .providers
-                .iter()
-                .filter(|_| ownership_available && self.proxy_providers_open)
-                .map(|(name, status)| {
-                    let label = name.clone();
-                    let pending =
-                        self.snapshot.refreshing_provider.as_deref() == Some(name.as_str());
-                    let busy = self.snapshot.refreshing_provider.is_some();
-                    let count = node_counts.get(name.as_str()).copied().unwrap_or(0);
-                    let usage = status
-                        .subscription_info
-                        .as_ref()
-                        .map(|usage| {
-                            let transfer =
-                                format!("↑ {}  ↓ {}", bytes(usage.upload), bytes(usage.download));
-                            if usage.total == 0 {
-                                transfer
-                            } else {
-                                format!("{transfer}  / {}", bytes(usage.total))
-                            }
-                        })
-                        .unwrap_or_else(|| self.locale.message(Message::ProviderNoUsage).into());
-                    let quota = status.subscription_info.as_ref().and_then(|usage| {
-                        provider_quota_fraction(usage.upload, usage.download, usage.total)
-                    });
-                    let updated = status.updated_at.clone().unwrap_or_else(|| {
-                        self.locale.message(Message::ProviderAwaitingUpdate).into()
-                    });
-                    card()
-                        .px_3()
-                        .py_2()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .font_weight(FontWeight::BOLD)
-                                                .child(name.clone()),
-                                        )
-                                        .child(compact_chip(
-                                            status.vehicle_type.clone(),
-                                            BLUE,
-                                            SOFT_BLUE,
-                                        ))
-                                        .child(compact_chip(
-                                            format!(
-                                                "{count} {}",
-                                                self.locale.message(if count == 1 {
-                                                    Message::Node
-                                                } else {
-                                                    Message::Nodes
-                                                })
-                                            ),
-                                            FAINT,
-                                            BG,
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(FAINT))
-                                        .child(format!("{updated} · {usage}")),
-                                )
-                                .when_some(quota, |details, fraction| {
-                                    details.child(
-                                        div()
-                                            .mt_2()
-                                            .w_full()
-                                            .h(px(4.))
-                                            .overflow_hidden()
-                                            .rounded_full()
-                                            .bg(rgb(SOFT_BLUE))
-                                            .child(
-                                                div()
-                                                    .h_full()
-                                                    .w(relative(fraction))
-                                                    .rounded_full()
-                                                    .bg(rgb(BLUE)),
-                                            ),
-                                    )
-                                }),
-                        )
-                        .when(status.vehicle_type.eq_ignore_ascii_case("http"), |row| {
-                            row.child(
-                                provider_refresh_button(self.locale, &label, pending, busy).when(
-                                    !busy,
-                                    |button| {
-                                        button.on_click(cx.listener(move |paw, event, _, cx| {
-                                            if matches!(event, ClickEvent::Keyboard(_)) {
-                                                cx.stop_propagation();
-                                            }
-                                            paw.error = paw.desktop.as_ref().and_then(|desktop| {
-                                                desktop
-                                                    .refresh_provider(label.clone())
-                                                    .err()
-                                                    .map(|e| e.to_string())
-                                            });
-                                            cx.notify();
-                                        }))
-                                    },
-                                ),
-                            )
-                        })
-                })
-                .collect::<Vec<_>>();
             let probe_settings = || {
                 div()
                 .flex()
@@ -3989,47 +3865,70 @@ impl Paw {
                     BLUE,
                     SOFT_BLUE,
                 ));
-            let controls = {
-                let controls = div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(probe_control)
-                    .children(jump_menu);
-                controls.when(
-                    ownership_available && !inventory.providers.is_empty(),
-                    |row| {
-                        let label = match (self.proxy_providers_open, self.locale) {
-                            (false, Locale::En) => "Show providers",
-                            (true, Locale::En) => "Hide providers",
-                            (false, Locale::ZhCn) => "展开提供者",
-                            (true, Locale::ZhCn) => "收起提供者",
-                        };
-                        let caption = format!("{label} ({})", inventory.providers.len());
-                        row.child(
-                            semantic_secondary_button("proxy-providers-toggle", caption).on_click(
-                                cx.listener(|paw, event, _, cx| {
-                                    if matches!(event, ClickEvent::Keyboard(_)) {
-                                        cx.stop_propagation();
-                                    }
-                                    paw.proxy_providers_open = !paw.proxy_providers_open;
-                                    cx.notify();
-                                }),
-                            ),
-                        )
-                        .when_some(
-                            self.snapshot.refreshing_provider.as_ref(),
-                            |row, name| {
-                                row.child(div().text_sm().text_color(rgb(FAINT)).child(format!(
-                                    "{} {name}",
-                                    self.locale.message(Message::ProviderRefreshing),
-                                )))
-                            },
-                        )
-                    },
+            let caption = if ownership_available {
+                format!(
+                    "{} ({})",
+                    self.locale.message(Message::ManageProviders),
+                    inventory.providers.len()
                 )
+            } else {
+                self.locale.message(Message::ManageProviders).to_owned()
             };
+            let controls = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(probe_control)
+                .children(jump_menu)
+                .child(
+                    semantic_secondary_button("proxy-providers-toggle", caption)
+                        .track_focus(&self.proxy_providers_focus)
+                        .on_click(cx.listener(|paw, event, window, cx| {
+                            if matches!(event, ClickEvent::Keyboard(_)) {
+                                cx.stop_propagation();
+                            }
+                            paw.proxy_providers_focus.focus(window, cx);
+                            let owner = cx.entity();
+                            let close_focus = cx.focus_handle();
+                            let content_close_focus = close_focus.clone();
+                            let panel = cx.new(|cx| {
+                                cx.observe(&owner, |_: &mut ProviderPanel, _, cx| cx.notify())
+                                    .detach();
+                                ProviderPanel {
+                                    owner: owner.clone(),
+                                    close_focus: content_close_focus,
+                                    refresh_focus: HashMap::new(),
+                                }
+                            });
+                            let locale = paw.locale;
+                            window.open_dialog(cx, move |dialog, _, _| {
+                                dialog
+                                    .title(locale.message(Message::Providers))
+                                    .w(px(640.))
+                                    .bg(rgb(SURFACE))
+                                    .text_color(rgb(INK))
+                                    .close_button(false)
+                                    .child(panel.clone())
+                                    .footer(
+                                        div().key_context(PROVIDER_PANEL_CONTEXT).child(
+                                            semantic_secondary_button(
+                                                "provider-panel-close",
+                                                locale.message(Message::CloseConnection),
+                                            )
+                                            .track_focus(&close_focus)
+                                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                                        ),
+                                    )
+                            });
+                        })),
+                )
+                .when_some(self.snapshot.refreshing_provider.as_ref(), |row, name| {
+                    row.child(div().text_sm().text_color(rgb(FAINT)).child(format!(
+                        "{} {name}",
+                        self.locale.message(Message::ProviderRefreshing),
+                    )))
+                });
             let toolbar = div()
                 .flex()
                 .gap_2()
@@ -4052,8 +3951,7 @@ impl Paw {
                         },
                     ))
                 })
-                .when(self.proxy_probe_settings_open, |page| page.child(probe_settings()))
-                .children(providers);
+                .when(self.proxy_probe_settings_open, |page| page.child(probe_settings()));
             return if groups.is_empty() {
                 page.child(empty_state(
                     self.locale.message(Message::NoMatchingGroups),
@@ -4917,6 +4815,267 @@ impl Paw {
     }
 }
 
+#[cfg(any(target_os = "linux", windows))]
+const PROVIDER_PANEL_CONTEXT: &str = "PawProviderPanel";
+
+#[cfg(any(target_os = "linux", windows))]
+struct ProviderPanelKeys;
+
+#[cfg(any(target_os = "linux", windows))]
+impl Global for ProviderPanelKeys {}
+
+#[cfg(any(target_os = "linux", windows))]
+fn install_provider_panel_keys(cx: &mut App) {
+    if cx.try_global::<ProviderPanelKeys>().is_none() {
+        // The dialog's default Enter confirms/dismisses before a focused
+        // native Button can activate. Scope the unbinding to this panel;
+        // Escape, the focus trap, and focus restoration remain toolkit-owned.
+        cx.bind_keys([KeyBinding::new(
+            "enter",
+            NoAction,
+            Some(PROVIDER_PANEL_CONTEXT),
+        )]);
+        cx.set_global(ProviderPanelKeys);
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+struct ProviderPanel {
+    owner: Entity<Paw>,
+    close_focus: FocusHandle,
+    refresh_focus: HashMap<String, FocusHandle>,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl Render for ProviderPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::base::{TestSupportExt, TestTextExt};
+
+        let mut refocus_close = false;
+        let inventory = self.owner.read(cx).snapshot.inventory.as_deref();
+        self.refresh_focus.retain(|name, focus| {
+            let keep = inventory
+                .and_then(|inventory| inventory.providers.get(name))
+                .is_some_and(|status| status.vehicle_type.eq_ignore_ascii_case("http"));
+            refocus_close |= !keep && focus.is_focused(window);
+            keep
+        });
+        if refocus_close {
+            // A live replacement can remove the focused Refresh button.
+            // Keep keyboard input (especially Escape) inside this dialog.
+            self.close_focus.focus(window, cx);
+        }
+        let names: Vec<_> = self
+            .owner
+            .read(cx)
+            .snapshot
+            .inventory
+            .iter()
+            .flat_map(|inventory| {
+                inventory
+                    .providers
+                    .iter()
+                    .filter(|(_, status)| status.vehicle_type.eq_ignore_ascii_case("http"))
+                    .map(|(name, _)| name.clone())
+            })
+            .collect();
+        for name in names {
+            self.refresh_focus
+                .entry(name)
+                .or_insert_with(|| cx.focus_handle());
+        }
+        let paw = self.owner.read(cx);
+        let locale = paw.locale;
+        let stale = paw.snapshot.inventory_stale;
+        let inventory = paw.snapshot.inventory.as_deref();
+        let unavailable = inventory.is_none_or(|inventory| inventory.provider_error.is_some());
+        let busy = paw.snapshot.refreshing_provider.is_some();
+        let mut counts = HashMap::new();
+        if let Some(inventory) = inventory {
+            for node in &inventory.nodes {
+                if let meow_paw::engine::controller::Origin::Provider(origin) = &node.origin {
+                    *counts.entry(origin.as_str()).or_insert(0_usize) += 1;
+                }
+            }
+        }
+        let mut content = div()
+            .id("provider-panel-content")
+            .test_support()
+            .flex()
+            .flex_col()
+            .gap_3();
+        if stale || unavailable {
+            content = content.child(
+                div()
+                    .id("provider-panel-warning")
+                    .test_support()
+                    .text_sm()
+                    .text_color(rgb(FAINT))
+                    .child(locale.message(if stale {
+                        Message::ProviderDataStale
+                    } else {
+                        Message::ProviderDataUnavailable
+                    })),
+            );
+        }
+        if let Some(inventory) = inventory {
+            if inventory.providers.is_empty() && !unavailable {
+                content = content.child(
+                    div()
+                        .id("provider-panel-empty")
+                        .test_support()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child(locale.message(Message::ProviderEmpty)),
+                );
+            }
+            for (name, status) in &inventory.providers {
+                let pending = paw.snapshot.refreshing_provider.as_deref() == Some(name.as_str());
+                let count = counts.get(name.as_str()).copied().unwrap_or(0);
+                let count_label = if unavailable {
+                    locale.message(Message::ProviderCountUnavailable).to_owned()
+                } else {
+                    format!(
+                        "{count} {}",
+                        locale.message(if count == 1 {
+                            Message::Node
+                        } else {
+                            Message::Nodes
+                        })
+                    )
+                };
+                let usage = status
+                    .subscription_info
+                    .as_ref()
+                    .map(|usage| {
+                        let mut text = format!(
+                            "{}: {} · {}: {}",
+                            locale.message(Message::Upload),
+                            bytes(usage.upload),
+                            locale.message(Message::Download),
+                            bytes(usage.download)
+                        );
+                        text.push_str(&format!(
+                            " · {}: {}",
+                            locale.message(Message::ProviderQuota),
+                            if usage.total > 0 {
+                                bytes(usage.total)
+                            } else {
+                                locale.message(Message::ProviderQuotaUnknown).into()
+                            }
+                        ));
+                        text
+                    })
+                    .unwrap_or_else(|| locale.message(Message::ProviderNoUsage).into());
+                let quota = status.subscription_info.as_ref().and_then(|usage| {
+                    provider_quota_fraction(usage.upload, usage.download, usage.total)
+                });
+                let updated = status
+                    .updated_at
+                    .clone()
+                    .unwrap_or_else(|| locale.message(Message::ProviderAwaitingUpdate).into());
+                let updated: SharedString =
+                    format!("{}: {updated}", locale.message(Message::ProviderLastUpdate)).into();
+                let usage = SharedString::from(usage);
+                let label = name.clone();
+                let owner = self.owner.clone();
+                let disabled = busy || stale || unavailable;
+                let row = card().px_3().py_3().flex().items_center().gap_3().child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(div().font_weight(FontWeight::BOLD).child(name.clone()))
+                                .child(compact_chip(
+                                    if status.vehicle_type.is_empty() {
+                                        locale.message(Message::ProviderTypeUnknown).to_owned()
+                                    } else {
+                                        status.vehicle_type.clone()
+                                    },
+                                    BLUE,
+                                    SOFT_BLUE,
+                                ))
+                                .child(compact_chip(count_label, FAINT, BG)),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(rgb(FAINT))
+                                .child(updated.clone().test_text(updated)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(FAINT))
+                                .child(usage.clone().test_text(usage)),
+                        )
+                        .when_some(quota, |details, fraction| {
+                            details.child(
+                                div()
+                                    .mt_2()
+                                    .w_full()
+                                    .h(px(4.))
+                                    .overflow_hidden()
+                                    .rounded_full()
+                                    .bg(rgb(SOFT_BLUE))
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(fraction))
+                                            .rounded_full()
+                                            .bg(rgb(BLUE)),
+                                    ),
+                            )
+                        }),
+                );
+                content = content.child(row.when(
+                    status.vehicle_type.eq_ignore_ascii_case("http"),
+                    |row| {
+                        row.child(
+                            provider_refresh_button(
+                                locale,
+                                &label,
+                                pending,
+                                busy,
+                                stale || unavailable,
+                            )
+                            .track_focus(&self.refresh_focus[name])
+                            .when(!disabled, |button| {
+                                button.on_click(move |event, _, cx| {
+                                    if matches!(event, ClickEvent::Keyboard(_)) {
+                                        cx.stop_propagation();
+                                    }
+                                    owner.update(cx, |paw, cx| {
+                                        paw.error = paw.desktop.as_ref().and_then(|desktop| {
+                                            desktop
+                                                .refresh_provider(label.clone())
+                                                .err()
+                                                .map(|e| e.to_string())
+                                        });
+                                        cx.notify();
+                                    });
+                                })
+                            }),
+                        )
+                    },
+                ));
+            }
+        }
+        div()
+            .id("provider-panel-scroll")
+            .key_context(PROVIDER_PANEL_CONTEXT)
+            .max_h(window.viewport_size().height * 0.6)
+            .overflow_y_scroll()
+            .child(content)
+    }
+}
+
 impl Render for Paw {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(target_os = "linux", windows))]
@@ -5287,27 +5446,31 @@ fn provider_refresh_button(
     name: &str,
     pending: bool,
     busy: bool,
+    unavailable: bool,
 ) -> SemanticButton {
+    let disabled = busy || unavailable;
     let label = locale.message(if pending {
         Message::ProviderRefreshing
     } else if busy {
         Message::ProviderRefreshBusy
+    } else if unavailable {
+        Message::ProviderRefreshUnavailable
     } else {
         Message::Refresh
     });
     SemanticButton::new(SharedString::from(format!("provider-refresh:{name}")))
         .accessibility_label(format!("{label}: {name}"))
-        .disabled(busy)
+        .disabled(disabled)
         .rounded_md()
         .px_4()
         .py_2()
         .font_weight(FontWeight::SEMIBOLD)
         .border_1()
         .border_color(rgb(0xb5cafa))
-        .bg(rgb(if busy { BG } else { SOFT_BLUE }))
-        .text_color(rgb(if busy { FAINT } else { BLUE }))
+        .bg(rgb(if disabled { BG } else { SOFT_BLUE }))
+        .text_color(rgb(if disabled { FAINT } else { BLUE }))
         .child(label)
-        .when(!busy, |button| {
+        .when(!disabled, |button| {
             button
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(0xd8e7ff)))
