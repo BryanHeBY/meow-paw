@@ -5570,6 +5570,10 @@ impl Render for ProviderPanel {
         let inventory = paw.snapshot.inventory.as_deref();
         let unavailable = inventory.is_none_or(|inventory| inventory.provider_error.is_some());
         let busy = paw.snapshot.refreshing_provider.is_some();
+        let now = std::time::UNIX_EPOCH
+            .elapsed()
+            .ok()
+            .map(|time| time.as_secs());
         let mut counts = HashMap::new();
         if let Some(inventory) = inventory {
             for node in &inventory.nodes {
@@ -5650,6 +5654,11 @@ impl Render for ProviderPanel {
                 let quota = status.subscription_info.as_ref().and_then(|usage| {
                     provider_quota_fraction(usage.upload, usage.download, usage.total)
                 });
+                let expiry = (!stale && !unavailable)
+                    .then_some(status.subscription_info.as_ref())
+                    .flatten()
+                    .and_then(|usage| provider_expiry_label(locale, usage.expire, now))
+                    .map(SharedString::from);
                 let updated = status
                     .updated_at
                     .clone()
@@ -5695,6 +5704,14 @@ impl Render for ProviderPanel {
                                 .text_color(rgb(FAINT))
                                 .child(usage.clone().test_text(usage)),
                         )
+                        .when_some(expiry, |details, label| {
+                            details.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(FAINT))
+                                    .child(label.clone().test_text(label)),
+                            )
+                        })
                         .when_some(quota, |details, fraction| {
                             details.child(
                                 div()
@@ -7033,6 +7050,30 @@ fn traffic_bars(samples: &[Option<meow_paw::app::TrafficRate>], height: f32) -> 
 }
 
 #[cfg(any(target_os = "linux", windows))]
+fn provider_expiry_label(locale: Locale, expiry: u64, now: Option<u64>) -> Option<String> {
+    const DAY: u64 = 86_400;
+    let label = if expiry == 0 {
+        match locale {
+            Locale::En => "No expiration",
+            Locale::ZhCn => "无到期时间",
+        }
+        .into()
+    } else {
+        let remaining = expiry.saturating_sub(now?);
+        match (remaining, locale) {
+            (0, Locale::En) => "Expired".into(),
+            (0, Locale::ZhCn) => "已到期".into(),
+            (1..DAY, Locale::En) => "Expires in less than 24 h".into(),
+            (1..DAY, Locale::ZhCn) => "不到 24 小时后到期".into(),
+            (DAY.., Locale::En) if remaining / DAY == 1 => "Expires in 1 day".into(),
+            (DAY.., Locale::En) => format!("Expires in {} days", remaining / DAY),
+            (DAY.., Locale::ZhCn) => format!("{} 天后到期", remaining / DAY),
+        }
+    };
+    Some(label)
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn provider_quota_fraction(upload: u64, download: u64, total: u64) -> Option<f32> {
     (total > 0).then(|| upload.saturating_add(download).min(total) as f32 / total as f32)
 }
@@ -7061,6 +7102,27 @@ fn paw_badge(size: f32) -> Div {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn provider_expiry_distinguishes_perpetual_expired_and_remaining_time() {
+        use super::{Locale, provider_expiry_label};
+        let en = |expiry, now| provider_expiry_label(Locale::En, expiry, now);
+        assert_eq!(en(0, None).as_deref(), Some("No expiration"));
+        assert_eq!(en(10, None), None);
+        assert_eq!(en(9, Some(10)).as_deref(), Some("Expired"));
+        assert_eq!(en(10, Some(10)).as_deref(), Some("Expired"));
+        assert_eq!(
+            en(11, Some(10)).as_deref(),
+            Some("Expires in less than 24 h")
+        );
+        assert_eq!(en(86_410, Some(10)).as_deref(), Some("Expires in 1 day"));
+        assert_eq!(en(172_810, Some(10)).as_deref(), Some("Expires in 2 days"));
+        assert_eq!(
+            provider_expiry_label(Locale::ZhCn, 9, Some(10)).as_deref(),
+            Some("已到期"),
+        );
+    }
+
     #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn provider_quota_keeps_unknown_zero_and_overage_distinct() {
