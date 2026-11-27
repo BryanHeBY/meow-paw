@@ -247,6 +247,86 @@ fn profile_forget_has_context_and_leaves_the_original_file(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+fn proxy_cards_keep_equal_tracks_and_expose_selected_protocol(cx: &mut TestAppContext) {
+    use meow_paw::engine::controller::{Inventory, Node, Origin, Proxy};
+    cx.update(gpui_kit::init);
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let paw = open(
+            None,
+            None,
+            (Page::Proxies, Locale::En),
+            false,
+            (Preferences::discover(false).0, None),
+            window,
+            cx,
+        );
+        paw.update(cx, |paw, _| {
+            let members = [
+                "Selected",
+                "A particularly long name that should not change its track width",
+                "Third",
+                "Tail",
+            ];
+            let group = Proxy {
+                kind: "Selector".into(),
+                now: Some(members[0].into()),
+                all: Some(members.into_iter().map(str::to_owned).collect()),
+                ..Proxy::default()
+            };
+            paw.snapshot.mode = Some(RoutingMode::Rule);
+            paw.expanded_groups.insert("Fixture".into());
+            paw.snapshot.inventory = Some(Arc::new(Inventory {
+                groups: [("Fixture".into(), group)].into(),
+                nodes: members
+                    .into_iter()
+                    .map(|name| Node {
+                        name: name.into(),
+                        origin: Origin::Local,
+                        proxy: Proxy {
+                            kind: "Socks5".into(),
+                            ..Proxy::default()
+                        },
+                    })
+                    .collect(),
+                ..Inventory::default()
+            }));
+        });
+        gpui_kit::base::Root::new(paw, window, cx)
+    });
+    let px = gpui_kit::px;
+    for (width, columns) in [(1120., 3), (760., 2), (560., 1)] {
+        ui.simulate_resize(gpui_kit::size(px(width), px(738.)));
+        ui.update(|window, cx| {
+            window.render_frame(cx);
+            let first = window.find("proxy:Fixture:0");
+            assert_eq!(first.checked(), Some(true));
+            assert_eq!(first.label(), Some("Selected · Socks5"));
+            let first_bounds = first.bounds();
+            let tail = window.find("proxy:Fixture:3").bounds();
+            for index in 1..=3 {
+                let id = gpui_kit::SharedString::from(format!("proxy:Fixture:{index}"));
+                let next = window.find(id);
+                assert_eq!(next.checked(), Some(false));
+                assert!(
+                    (next.bounds().size.width - first_bounds.size.width).abs() <= px(1.),
+                    "width {width}, card {index}: {next:?} versus {first_bounds:?}",
+                );
+            }
+            assert!(tail.origin.y > first_bounds.origin.y);
+            let expected_x = window
+                .find(gpui_kit::SharedString::from(format!(
+                    "proxy:Fixture:{}",
+                    3 % columns
+                )))
+                .bounds()
+                .origin
+                .x;
+            assert!((tail.origin.x - expected_x).abs() <= px(1.));
+        });
+    }
+}
+
+#[gpui_kit::test]
 fn locating_the_selected_route_expands_its_group_and_scrolls(cx: &mut TestAppContext) {
     use meow_paw::engine::controller::{Inventory, Proxy};
 

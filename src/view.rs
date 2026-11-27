@@ -3476,22 +3476,111 @@ impl Paw {
                                                             "Test unavailable".into()
                                                         }
                                                     });
-                                                card()
-                                                    .id(SharedString::from(format!(
-                                                        "proxy:{name}:{index}"
-                                                    )))
-                                                    .when(selected, |card| {
-                                                        card.anchor_scroll(route_anchor.clone())
+                                                let kind =
+                                                    route_kinds.get(member).copied().flatten();
+                                                let selection_label = match kind {
+                                                    Some(kind) => format!("{member} · {kind}"),
+                                                    None => member.to_owned(),
+                                                };
+                                                let selection =
+                                                    SemanticButton::new(SharedString::from(
+                                                        format!("proxy:{name}:{index}"),
+                                                    ))
+                                                    .accessibility_label(selection_label)
+                                                    .aria_toggled(if selected {
+                                                        gpui_kit::accesskit::Toggled::True
+                                                    } else {
+                                                        gpui_kit::accesskit::Toggled::False
                                                     })
+                                                    .disabled(!mutable)
                                                     .flex_1()
                                                     .min_w_0()
-                                                    .min_h(px(48.))
+                                                    .h_full()
                                                     .px_3()
                                                     .py_2()
+                                                    .rounded_l_md()
                                                     .flex()
                                                     .items_center()
                                                     .justify_between()
                                                     .gap_2()
+                                                    .focus_visible(|style| style.bg(rgb(0xd8e7ff)))
+                                                    .when(mutable && !selected, |button| {
+                                                        button
+                                                            .cursor_pointer()
+                                                            .hover(|style| style.bg(rgb(0xf0f5ff)))
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    this.error = this
+                                                                        .desktop
+                                                                        .as_ref()
+                                                                        .and_then(|d| {
+                                                                            d.select(
+                                                                                g.clone(),
+                                                                                n.clone(),
+                                                                            )
+                                                                            .err()
+                                                                            .map(|e| e.to_string())
+                                                                        });
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                    })
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .truncate()
+                                                                    .child(member.to_owned()),
+                                                            )
+                                                            .when_some(kind, |detail, kind| {
+                                                                detail.child(route_type_badge(kind))
+                                                            }),
+                                                    )
+                                                    .when_some(
+                                                        route_delay(&delays, member),
+                                                        |el, ms| {
+                                                            el.child(
+                                                                div()
+                                                                    .flex_shrink_0()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(FAINT))
+                                                                    .child(format!("{ms} ms")),
+                                                            )
+                                                        },
+                                                    )
+                                                    .when(selected, |el| {
+                                                        el.child(line_icon(
+                                                            "icons/circle-check.svg",
+                                                            BLUE,
+                                                            16.,
+                                                        ))
+                                                    })
+                                                    .when_some(status_text, |el, status| {
+                                                        el.child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .text_xs()
+                                                                .text_color(rgb(FAINT))
+                                                                .child(status),
+                                                        )
+                                                    });
+
+                                                let tile = div()
+                                                    .id(SharedString::from(format!(
+                                                        "proxy-tile:{name}:{index}"
+                                                    )))
+                                                    .w_full()
+                                                    .h(px(56.))
+                                                    .min_w_0()
+                                                    .rounded_md()
+                                                    .overflow_hidden()
+                                                    .flex()
+                                                    .items_center()
+                                                    .border_1()
                                                     .border_l(px(3.))
                                                     .border_color(rgb(if selected {
                                                         BLUE
@@ -3503,58 +3592,10 @@ impl Paw {
                                                     } else {
                                                         SURFACE
                                                     }))
-                                                    .child(
-                                                        div()
-                                                            .min_w_0()
-                                                            .text_sm()
-                                                            .child(
-                                                                div()
-                                                                    .truncate()
-                                                                    .child(member.to_owned()),
-                                                            )
-                                                            .when_some(
-                                                                route_kinds
-                                                                    .get(member)
-                                                                    .copied()
-                                                                    .flatten(),
-                                                                |detail, kind| {
-                                                                    detail.child(
-                                                                        div()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(FAINT))
-                                                                            .truncate()
-                                                                            .child(kind.to_owned()),
-                                                                    )
-                                                                },
-                                                            ),
-                                                    )
-                                                    .when_some(
-                                                        route_delay(&delays, member),
-                                                        |el, ms| {
-                                                            el.child(
-                                                                div()
-                                                                    .flex_shrink_0()
-                                                                    .text_sm()
-                                                                    .text_color(rgb(FAINT))
-                                                                    .child(format!("{ms} ms")),
-                                                            )
-                                                        },
-                                                    )
-                                                    .when(selected, |el| {
-                                                        el.child(line_icon(
-                                                            "icons/circle-check.svg",
-                                                            BLUE,
-                                                            17.,
-                                                        ))
+                                                    .when(selected, |card| {
+                                                        card.anchor_scroll(route_anchor.clone())
                                                     })
-                                                    .when_some(status_text, |el, status| {
-                                                        el.child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(rgb(FAINT))
-                                                                .child(status),
-                                                        )
-                                                    })
+                                                    .child(selection)
                                                     .when_some(
                                                         target.filter(|_| probe_ready),
                                                         |el, target| {
@@ -3594,33 +3635,19 @@ impl Paw {
                                                                     }
                                                                 },
                                                             ));
-                                                            el.child(test)
+                                                            el.child(
+                                                                div()
+                                                                    .mr_2()
+                                                                    .flex_shrink_0()
+                                                                    .child(test),
+                                                            )
                                                         },
-                                                    )
-                                                    .when(mutable && !selected, |el| {
-                                                        el.cursor_pointer()
-                                                            .hover(|style| style.bg(rgb(SOFT_BLUE)))
-                                                            .on_click(cx.listener(
-                                                                move |this, _, _, cx| {
-                                                                    this.error = this
-                                                                        .desktop
-                                                                        .as_ref()
-                                                                        .and_then(|d| {
-                                                                            d.select(
-                                                                                g.clone(),
-                                                                                n.clone(),
-                                                                            )
-                                                                            .err()
-                                                                            .map(|e| e.to_string())
-                                                                        });
-                                                                    cx.notify();
-                                                                },
-                                                            ))
-                                                    })
+                                                    );
+                                                route_grid_track().child(tile)
                                             },
                                         ));
                                         row.children(
-                                            (pair.len()..columns).map(|_| div().flex_1().min_w_0()),
+                                            (pair.len()..columns).map(|_| route_grid_track()),
                                         )
                                     }));
                                 if expandable
@@ -5256,6 +5283,30 @@ fn mode_groups(
         visible.extend(global);
     }
     visible
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn route_grid_track() -> Div {
+    // Keep intrinsic text, controls and card border/padding out of the flex basis.
+    // Empty tail tracks must use exactly the same outer geometry as the filled ones.
+    div().flex_1().min_w_0()
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn route_type_badge(kind: &str) -> Div {
+    div().flex().child(
+        div()
+            .min_w_0()
+            .truncate()
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(LINE))
+            .px_1()
+            .text_size(px(10.))
+            .line_height(px(14.))
+            .text_color(rgb(FAINT))
+            .child(kind.to_owned()),
+    )
 }
 
 #[cfg(any(target_os = "linux", windows))]
