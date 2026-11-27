@@ -42,6 +42,8 @@ struct Selections {
     profiles: Vec<PathBuf>,
     #[serde(skip_serializing_if = "LanguagePreference::is_system")]
     language: LanguagePreference,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    reduce_motion: bool,
 }
 
 #[derive(Default)]
@@ -148,6 +150,19 @@ impl Preferences {
     pub fn set_language(&mut self, language: LanguagePreference) -> io::Result<()> {
         self.persist(|next| {
             next.language = language;
+            Ok(())
+        })
+    }
+
+    /// Whether optional in-app transitions are disabled.
+    pub fn reduce_motion(&self) -> bool {
+        self.selected.reduce_motion
+    }
+
+    /// Apply the motion preference without restarting Paw.
+    pub fn set_reduce_motion(&mut self, enabled: bool) -> io::Result<()> {
+        self.persist(|next| {
+            next.reduce_motion = enabled;
             Ok(())
         })
     }
@@ -296,6 +311,23 @@ fn default_file() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reduced_motion_defaults_off_and_round_trips_without_changing_language() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        assert!(!prefs.reduce_motion());
+        prefs.set_language(LanguagePreference::ZhCn).unwrap();
+        prefs.set_reduce_motion(true).unwrap();
+        assert!(prefs.reduce_motion());
+        let mut restored = Preferences::open(file.clone()).unwrap();
+        assert!(restored.reduce_motion());
+        assert_eq!(restored.language(), LanguagePreference::ZhCn);
+        restored.set_reduce_motion(false).unwrap();
+        assert!(!Preferences::open(file.clone()).unwrap().reduce_motion());
+        assert!(!fs::read_to_string(file).unwrap().contains("reduce_motion"));
+    }
 
     #[test]
     fn restart_restores_both_paths_but_overrides_are_transient() {

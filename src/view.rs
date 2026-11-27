@@ -449,6 +449,7 @@ pub struct Paw {
     _subscription_url_changes: Subscription,
     preference_warning: Option<String>,
     language_save_failed: bool,
+    motion_save_failed: bool,
     language_choice_focus: [FocusHandle; 3],
     engine_browse_focus: FocusHandle,
     engine_reveal_focus: FocusHandle,
@@ -684,6 +685,7 @@ pub fn open(
             _subscription_url_changes: subscription_url_changes,
             preference_warning: warning.map(str::to_owned),
             language_save_failed: false,
+            motion_save_failed: false,
             language_choice_focus: std::array::from_fn(|_| cx.focus_handle()),
             engine_browse_focus: cx.focus_handle(),
             engine_reveal_focus: cx.focus_handle(),
@@ -3450,7 +3452,10 @@ impl Paw {
                                             (pair.len()..columns).map(|_| div().flex_1().min_w_0()),
                                         )
                                     }));
-                                if expandable && query.is_empty() {
+                                if expandable
+                                    && query.is_empty()
+                                    && !self.preferences.reduce_motion()
+                                {
                                     panel.child(
                                         candidates.with_animation(
                                             SharedString::from(format!("expand:{name}")),
@@ -4445,7 +4450,39 @@ impl Paw {
                         }),
                 )
             });
+        let reduce_motion = self.preferences.reduce_motion();
         let app = settings_card("Meow Paw", "icons/house.svg")
+            .child(form_row(
+                self.locale.message(Message::ReduceMotion),
+                self.locale.message(Message::ReduceMotionDescription),
+                subscription_button(
+                    "reduce-motion",
+                    self.locale.message(if reduce_motion {
+                        Message::ReduceMotionEnabled
+                    } else {
+                        Message::ReduceMotionDisabled
+                    }),
+                    reduce_motion,
+                    cx,
+                )
+                .accessibility_label(self.locale.message(Message::ReduceMotion))
+                .toggled(reduce_motion)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let next = !this.preferences.reduce_motion();
+                    this.motion_save_failed = this.preferences.set_reduce_motion(next).is_err();
+                    cx.notify();
+                })),
+            ))
+            .when(self.motion_save_failed, |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .pb_3()
+                        .text_sm()
+                        .text_color(rgb(0xb42318))
+                        .child(self.locale.message(Message::ReduceMotionSaveFailed)),
+                )
+            })
             .child(form_row(
                 self.locale.message(Message::TrayBehavior),
                 self.locale.message(Message::TrayDescription),
