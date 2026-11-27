@@ -198,9 +198,7 @@ impl SubscriptionStore {
     /// whether the record changed while the caller fetched the download; use
     /// `refresh_if_unchanged` when the fetch is based on a saved snapshot.
     pub fn refresh(&mut self, id: SubscriptionId, download: Download) -> io::Result<()> {
-        self.refresh_with(id, download, |staged, path| {
-            staged.persist(path).map(|_| ()).map_err(|e| e.error)
-        })
+        self.refresh_with(id, download, replace_record)
     }
 
     /// Publish a download only if its source, remote content and refresh policy
@@ -213,9 +211,7 @@ impl SubscriptionStore {
         expected: &SavedSubscription,
         download: Download,
     ) -> io::Result<()> {
-        self.refresh_checked_with(id, Some(expected), download, |staged, path| {
-            staged.persist(path).map(|_| ()).map_err(|e| e.error)
-        })
+        self.refresh_checked_with(id, Some(expected), download, replace_record)
     }
 
     fn refresh_with(
@@ -256,9 +252,7 @@ impl SubscriptionStore {
 
     /// Update only the local display name, retaining the rest of the record.
     pub fn rename(&mut self, id: SubscriptionId, name: &str) -> io::Result<SubscriptionMetadata> {
-        self.rename_with(id, name, |staged, path| {
-            staged.persist(path).map(|_| ()).map_err(|e| e.error)
-        })
+        self.rename_with(id, name, replace_record)
     }
 
     fn rename_with(
@@ -463,6 +457,26 @@ impl SubscriptionStore {
     }
 }
 
+#[cfg(not(windows))]
+fn replace_record(staged: NamedTempFile, path: &Path) -> io::Result<()> {
+    staged.persist(path).map(|_| ()).map_err(|e| e.error)
+}
+
+#[cfg(windows)]
+fn replace_record(staged: NamedTempFile, path: &Path) -> io::Result<()> {
+    // A read or removal snapshot retains a handle to the old record to pin its
+    // identity. tempfile's MoveFileExW cannot replace that open destination;
+    // std's rename supports atomic replacement of files opened with share-delete.
+    // Normalize the temporary attribute, as tempfile's persist normally does.
+    let (file, staged_path) = staged.keep().map_err(|e| e.error)?;
+    drop(file);
+    let result = fs::rename(&staged_path, path);
+    if result.is_err() {
+        let _ = fs::remove_file(staged_path);
+    }
+    result
+}
+
 // Keep the observed file open so its identity cannot be recycled while a
 // confirmation or refresh is pending. Cooperating writes replace the file.
 #[cfg(unix)]
@@ -544,6 +558,51 @@ mod tests {
             yaml: yaml.to_owned(),
             suggested_interval_minutes: Some(minutes),
         }
+    }
+
+    #[test]
+    fn atomic_replacement_keeps_open_snapshot_on_the_old_record() {
+        use std::io::Seek;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SubscriptionStore::new(dir.path().into());
+        let id = store
+            .import(
+                "https://example.test/sub",
+                download(OLD, 60),
+                Default::default(),
+            )
+            .unwrap();
+        let confirmation = store.prepare_removal(id).unwrap();
+        let original = fs::read(store.record_path(id)).unwrap();
+
+        store.rename(id, "Updated").unwrap();
+
+        // The published path has new bytes but the live snapshot still sees the
+        // original file. Keeping it open also prevents file-ID reuse on ABA.
+        let mut old_bytes = Vec::new();
+        let mut old_file = confirmation.identity.as_ref();
+        old_file.rewind().unwrap();
+        old_file.read_to_end(&mut old_bytes).unwrap();
+        assert_eq!(old_bytes, original);
+        assert_eq!(store.metadata(id).unwrap().name.as_deref(), Some("Updated"));
+        assert_eq!(
+            store.check_unchanged(id, &confirmation).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn failed_replacement_cleans_staging_without_changing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("existing");
+        fs::create_dir(&dest).unwrap();
+        fs::write(dest.join("sentinel"), "original").unwrap();
+        let staged = NamedTempFile::new_in(dir.path()).unwrap();
+        let staged_path = staged.path().to_owned();
+        assert!(replace_record(staged, &dest).is_err());
+        assert_eq!(fs::read(dest.join("sentinel")).unwrap(), b"original");
+        assert!(!staged_path.exists());
     }
 
     #[test]
@@ -766,11 +825,7 @@ mod tests {
         );
         drop(guard);
         let replacement = store.read(id).unwrap();
-        store
-            .write(id, &replacement, |staged, path| {
-                staged.persist(path).map(|_| ()).map_err(|e| e.error)
-            })
-            .unwrap();
+        store.write(id, &replacement, replace_record).unwrap();
         assert_eq!(
             store
                 .remove_if_unchanged(id, &confirmation)
@@ -922,11 +977,7 @@ mod tests {
                 2 => latest.provider_interval_minutes = Some(120),
                 _ => latest.policy.automatic = true,
             }
-            store
-                .write(id, &latest, |staged, path| {
-                    staged.persist(path).map(|_| ()).map_err(|e| e.error)
-                })
-                .unwrap();
+            store.write(id, &latest, replace_record).unwrap();
             let before = fs::read(store.record_path(id)).unwrap();
             assert_eq!(
                 store
@@ -1032,11 +1083,7 @@ mod tests {
         // Display also sanitizes a syntactically valid record edited outside Paw.
         let mut record = store.read(id).unwrap();
         record.name = Some(format!("\u{202e}{}", "a".repeat(100)));
-        store
-            .write(id, &record, |staged, path| {
-                staged.persist(path).map(|_| ()).map_err(|e| e.error)
-            })
-            .unwrap();
+        store.write(id, &record, replace_record).unwrap();
         assert_eq!(
             store.metadata(id).unwrap().name.unwrap(),
             "a".repeat(MAX_NAME_CHARS)
