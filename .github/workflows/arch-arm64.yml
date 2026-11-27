@@ -1,0 +1,29 @@
+name: Arch Linux ARM package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build and test the native aarch64 package
+        run: bash packaging/arch/build-ci.sh
+
+      - name: Upload tested Arch package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: meow-paw-arch-aarch64
+          path: ${{ runner.temp }}/paw-arch-artifact/
+          if-no-files-found: error
+          compression-level: 0

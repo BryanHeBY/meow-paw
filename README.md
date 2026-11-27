@@ -21,6 +21,10 @@ and execute the headless test suite with locked dependencies. They do not
 build or publish the kernel submodule or run a graphical tray session.
 See the [Windows packaging and visual acceptance runbook](docs/windows-packaging-visual-acceptance.md)
 for local provenance checks and isolated synthetic captures.
+
+For Omarchy on Apple Silicon (and other compatible Arch Linux ARM systems),
+[build and install the native AArch64 package](docs/arch-arm64-package.md)
+without compiling locally.
 Paw listens on `127.0.0.1:7890` for its mixed proxy. The authenticated controller
 still uses a dynamically allocated loopback port. To use a different mixed port,
 save it under Settings → Meow Engine → Mixed proxy port, set `"mixed_port": PORT`

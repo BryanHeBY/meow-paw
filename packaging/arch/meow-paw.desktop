@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Meow Paw
+Comment=Desktop frontend for the Meow proxy engine
+Exec=meow-paw
+Icon=meow-paw
+Terminal=false
+Categories=Network;

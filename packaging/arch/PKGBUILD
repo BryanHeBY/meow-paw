@@ -1,0 +1,60 @@
+# The workflow stages tracked Paw and pinned engine sources beneath source/.
+pkgname=meow-paw
+pkgver=${PAW_PACKAGE_VERSION:?set by build-ci.sh}
+pkgrel=1
+pkgdesc='Desktop frontend and pinned Meow proxy engine'
+arch=('aarch64')
+url='https://github.com/BryanHeBY/meow-paw'
+license=('MIT')
+depends=('ca-certificates' 'dbus' 'fontconfig' 'glibc' 'libgcc' 'libstdc++'
+         'libx11' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'vulkan-icd-loader' 'wayland')
+makedepends=('clang' 'cmake' 'rustup' 'vulkan-headers')
+checkdepends=('desktop-file-utils')
+optdepends=('vulkan-driver: Vulkan driver for your GPU (provided by your desktop)'
+            'xdg-desktop-portal: native file picker (requires a desktop-specific backend)')
+options=('!debug' '!lto')
+
+build() {
+  local source="$startdir/source" toolchain
+  toolchain=$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' "$source/vendor/meow-rs/rust-toolchain.toml")
+  [[ $toolchain =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  rustup toolchain install "$toolchain" --profile minimal --no-self-update
+
+  export CARGO_INCREMENTAL=0
+  # Both commands target the native Arch Linux ARM userland and use the
+  # built-in desktop/full feature sets of the existing bundling tool.
+  cd "$source/vendor/meow-rs"
+  cargo "+$toolchain" build --locked --release -j2 --target-dir "$srcdir/cargo-core" \
+    -p meow-app --bin meow
+  install -m755 "$srcdir/cargo-core/release/meow" "$srcdir/meow"
+  # Retain the engine binary, not its large temporary Rust/C++ objects.
+  rm -rf -- "${srcdir:?}/cargo-core"
+  cd "$source"
+  cargo "+$toolchain" build --locked --release -j2 --target-dir "$srcdir/cargo-paw" \
+    --features desktop --bin meow-paw
+}
+
+check() {
+  local binary
+  for binary in "$srcdir/meow" "$srcdir/cargo-paw/release/meow-paw"; do
+    LC_ALL=C readelf -h "$binary" | grep -Eq 'Machine:[[:space:]]+AArch64'
+    LC_ALL=C readelf -lW "$binary" | grep -Fq '/lib/ld-linux-aarch64.so.1'
+  done
+  "$srcdir/meow" --version
+  desktop-file-validate "$startdir/meow-paw.desktop"
+}
+
+package() {
+  install -Dm755 "$srcdir/cargo-paw/release/meow-paw" "$pkgdir/usr/lib/meow-paw/meow-paw"
+  install -Dm755 "$srcdir/meow" "$pkgdir/usr/lib/meow-paw/meow"
+  install -d "$pkgdir/usr/bin"
+  # On Linux current_exe() resolves this symlink, so Paw finds the engine
+  # beside its actual executable without polluting PATH with another meow.
+  ln -s ../lib/meow-paw/meow-paw "$pkgdir/usr/bin/meow-paw"
+  install -Dm644 "$startdir/meow-paw.desktop" "$pkgdir/usr/share/applications/meow-paw.desktop"
+  install -Dm644 "$startdir/source/assets/paw-mark.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/meow-paw.svg"
+  install -Dm644 "$startdir/source/LICENSE" "$pkgdir/usr/share/licenses/meow-paw/LICENSE"
+  install -Dm644 "$startdir/source/vendor/meow-rs/LICENSE" \
+    "$pkgdir/usr/share/licenses/meow-paw/meow-rs-LICENSE"
+}
