@@ -49,13 +49,19 @@ printf 'Server = %s/$arch/$repo\n' "$mirror" | sudo tee "$root/etc/pacman.d/mirr
 cleanup_mounts() {
   sudo umount "$root/proc" 2>/dev/null || true
   sudo umount -R "$root/dev" 2>/dev/null || true
+  sudo umount "$root" 2>/dev/null || true
 }
 trap cleanup_mounts EXIT
+# A bare chroot path is not a mount point. Pacman's CheckSpace uses the
+# chroot's mount table, so bind the root to itself as arch-chroot does.
+sudo mount --bind "$root" "$root"
 sudo mount --rbind /dev "$root/dev"
 sudo mount --make-rslave "$root/dev"
 sudo mount -t proc proc "$root/proc"
 
 archrun() { sudo chroot "$root" "$@"; }
+archrun findmnt --target /var/cache/pacman/pkg
+archrun df -h /var/cache/pacman/pkg
 archrun pacman-key --init
 archrun pacman-key --populate archlinuxarm
 # The runner supplies the kernel; do not generate a boot image in the chroot.
