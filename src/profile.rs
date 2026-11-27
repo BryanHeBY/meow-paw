@@ -6,6 +6,7 @@ use std::{error::Error, fmt, net::SocketAddrV4};
 use url::Url;
 
 mod geodata;
+pub mod local_import;
 
 pub const MAX_PROFILE_BYTES: usize = 8 * 1024 * 1024;
 
