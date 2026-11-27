@@ -7,4 +7,5 @@ pub mod rule_inspection;
 
 pub mod subscription;
 pub mod subscription_store;
+pub mod system_proxy;
 pub mod unlock;
