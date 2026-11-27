@@ -3308,6 +3308,19 @@ impl Paw {
                                         }))
                                     },
                                 );
+                                let sort_button = secondary_button(
+                                    SharedString::from(format!("proxy-order:{name}")),
+                                    self.locale.message(order.message()),
+                                )
+                                .on_click(cx.listener(move |paw, _, _, cx| {
+                                    let next = order.next();
+                                    if next == ProxyOrder::Configured {
+                                        paw.proxy_order.remove(&group_name);
+                                    } else {
+                                        paw.proxy_order.insert(group_name.clone(), next);
+                                    }
+                                    cx.notify();
+                                }));
                                 let comparison_panel = div()
                                     .flex()
                                     .flex_col()
@@ -3317,39 +3330,49 @@ impl Paw {
                                             .flex()
                                             .flex_wrap()
                                             .items_center()
+                                            .justify_between()
                                             .gap_2()
-                                            .child(compare_button)
-                                            .when_some(comparison, |row, g| {
-                                                let done = g
-                                                    .results
-                                                    .rows()
-                                                    .iter()
-                                                    .filter(|(_, status)| {
-                                                        matches!(
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_wrap()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(compare_button)
+                                                    .when_some(comparison, |row, g| {
+                                                        let done = g
+                                                            .results
+                                                            .rows()
+                                                            .iter()
+                                                            .filter(|(_, status)| {
+                                                                matches!(
                                                             status,
                                                             Some(
                                                                 ProxyProbeStatus::Measured(_)
                                                                     | ProxyProbeStatus::Unavailable
                                                             )
                                                         )
-                                                    })
-                                                    .count();
-                                                row.child(
-                                                    div().text_xs().text_color(rgb(FAINT)).child(
-                                                        format!(
-                                                            "{done}/{} · {}",
-                                                            g.results.rows().len(),
-                                                            if g.interrupted {
-                                                                labels.6
-                                                            } else if g.active {
-                                                                labels.4
-                                                            } else {
-                                                                labels.7
-                                                            }
-                                                        ),
-                                                    ),
-                                                )
-                                            }),
+                                                            })
+                                                            .count();
+                                                        row.child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(FAINT))
+                                                                .child(format!(
+                                                                    "{done}/{} · {}",
+                                                                    g.results.rows().len(),
+                                                                    if g.interrupted {
+                                                                        labels.6
+                                                                    } else if g.active {
+                                                                        labels.4
+                                                                    } else {
+                                                                        labels.7
+                                                                    }
+                                                                )),
+                                                        )
+                                                    }),
+                                            )
+                                            .child(sort_button),
                                     )
                                     .when_some(comparison, |panel, g| {
                                         panel.children(g.results.rows().iter().map(
@@ -3384,26 +3407,6 @@ impl Paw {
                                     .flex_col()
                                     .gap_2()
                                     .child(comparison_panel)
-                                    .child(
-                                        div().flex().justify_end().child(
-                                            secondary_button(
-                                                SharedString::from(format!("proxy-order:{name}")),
-                                                self.locale.message(order.message()),
-                                            )
-                                            .on_click(
-                                                cx.listener(move |paw, _, _, cx| {
-                                                    let next = order.next();
-                                                    if next == ProxyOrder::Configured {
-                                                        paw.proxy_order.remove(&group_name);
-                                                    } else {
-                                                        paw.proxy_order
-                                                            .insert(group_name.clone(), next);
-                                                    }
-                                                    cx.notify();
-                                                }),
-                                            ),
-                                        ),
-                                    )
                                     .children(members.chunks(columns).map(|pair| {
                                         let row = div().flex().gap_2().children(pair.iter().map(
                                             |&(index, member)| {
