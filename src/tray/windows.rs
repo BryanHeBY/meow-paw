@@ -20,7 +20,7 @@ use windows_sys::{
             },
             WindowsAndMessaging::{
                 AppendMenuW, CREATESTRUCTW, CreateIcon, CreatePopupMenu, CreateWindowExW,
-                DefWindowProcW, DestroyIcon, DestroyMenu, DispatchMessageW, FindWindowW,
+                DefWindowProcW, DestroyIcon, DestroyMenu, DispatchMessageW, EndMenu, FindWindowW,
                 GWLP_USERDATA, GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics,
                 GetWindowLongPtrW, HICON, HMENU, MF_STRING, MSG, PostMessageW, RegisterClassW,
                 RegisterWindowMessageW, SM_MENUDROPALIGNMENT, SetForegroundWindow, SetTimer,
@@ -40,7 +40,9 @@ const ID: u32 = 1;
 const MENU_SHOW: i32 = 1;
 const MENU_QUIT: i32 = 2;
 // The shell can report one mouse selection in both raw and semantic forms.
-// Pair adjacent opposite forms; same-kind clicks and keyboard remain distinct.
+// Pair nearby opposite reports, not individual physical gestures; Windows
+// can deliver either form alone. Same-kind and keyboard input stays distinct.
+// The application separately coalesces pending Show signals until its poll.
 const PRIMARY_PAIR_WINDOW: Duration = Duration::from_millis(160);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +141,12 @@ fn track_if_foreground(
     (acquired || already_foreground()).then(track)
 }
 
+fn dismiss_tracked_popup() {
+    // EndMenu only ends the calling thread's active menu. Production callers
+    // reach this on the tray thread while our own popup is tracking.
+    unsafe { EndMenu() };
+}
+
 struct TrayState {
     shell: Cell<HWND>,
     icon: HICON,
@@ -146,8 +154,10 @@ struct TrayState {
     taskbar_created: u32,
     locale: Locale,
     version_4: Cell<bool>,
+    retrying: Cell<bool>,
     menu_open: Cell<bool>,
     menu_current: Cell<bool>,
+    menu_tracking: Cell<bool>,
     last_mouse: Cell<Option<(PrimaryActivation, Instant)>>,
 }
 
@@ -160,8 +170,10 @@ impl TrayState {
             taskbar_created,
             locale,
             version_4: Cell::new(false),
+            retrying: Cell::new(false),
             menu_open: Cell::new(false),
             menu_current: Cell::new(false),
+            menu_tracking: Cell::new(false),
             last_mouse: Cell::new(None),
         }
     }
@@ -177,16 +189,26 @@ impl TrayState {
         !paired
     }
 
-    fn mark_unready(&self) {
+    fn mark_unready(&self, dismiss: impl FnOnce()) {
         // Don't restore this latch on a successful NIM_ADD (the active popup
         // still belongs to the old icon). A later popup sets its own latch.
-        self.menu_current.set(false);
+        let dismiss_current = self.menu_current.replace(false) && self.menu_tracking.get();
         self.last_mouse.set(None);
         self.signals.ready.store(false, Ordering::Release);
+        if dismiss_current {
+            dismiss();
+        }
     }
 
     fn menu_is_current(&self) -> bool {
         self.menu_current.get() && self.signals.ready()
+    }
+
+    fn track_owned_popup(&self, track: impl FnOnce() -> i32) -> i32 {
+        self.menu_tracking.set(true);
+        let command = track();
+        self.menu_tracking.set(false);
+        command
     }
 
     fn data(&self, window: HWND) -> NOTIFYICONDATAW {
@@ -204,22 +226,37 @@ impl TrayState {
     }
 
     fn retry(&self, window: HWND, forced: bool) {
+        // Dismissing an old modal can dispatch another retry on this thread.
+        if self.retrying.replace(true) {
+            return;
+        }
+        self.retry_registration(window, forced);
+        self.retrying.set(false);
+    }
+
+    fn owns_window(&self, window: HWND) -> bool {
+        unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) == std::ptr::from_ref(self) as isize }
+    }
+
+    fn retry_registration(&self, window: HWND, forced: bool) {
         let shell = unsafe { FindWindowW(w!("Shell_TrayWnd"), null()) };
         if !forced && self.shell.get() == shell && self.signals.ready() {
             return;
         }
-        self.mark_unready();
+        self.mark_unready(dismiss_tracked_popup);
         self.version_4.set(false);
         self.shell.set(shell);
-        if shell.is_null() || self.icon.is_null() {
+        if shell.is_null() || self.icon.is_null() || !self.owns_window(window) {
             return;
         }
         let mut data = self.data(window);
-        if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } != 0 {
+        if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } != 0 && self.owns_window(window) {
             data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-            self.version_4
-                .set(unsafe { Shell_NotifyIconW(NIM_SETVERSION, &data) } != 0);
-            self.signals.ready.store(true, Ordering::Release);
+            let version_4 = unsafe { Shell_NotifyIconW(NIM_SETVERSION, &data) } != 0;
+            if self.owns_window(window) {
+                self.version_4.set(version_4);
+                self.signals.ready.store(true, Ordering::Release);
+            }
         }
     }
 
@@ -274,15 +311,17 @@ impl TrayState {
             let command = track_if_foreground(
                 acquired,
                 || unsafe { GetForegroundWindow() == window },
-                || unsafe {
-                    TrackPopupMenuEx(
-                        menu.0,
-                        alignment | TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-                        anchor.x,
-                        anchor.y,
-                        window,
-                        params,
-                    )
+                || {
+                    self.track_owned_popup(|| unsafe {
+                        TrackPopupMenuEx(
+                            menu.0,
+                            alignment | TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                            anchor.x,
+                            anchor.y,
+                            window,
+                            params,
+                        )
+                    })
                 },
             )?;
             if self.menu_is_current() {
@@ -334,11 +373,11 @@ unsafe extern "system" fn window_proc(
             return 0;
         }
         if message == WM_DESTROY {
-            state.mark_unready();
+            // Clear callback state before either dismissal or shell deletion
+            // can reenter the hidden window's procedure.
+            unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
+            state.mark_unready(dismiss_tracked_popup);
             unsafe {
-                // Remove the callback's state pointer before calling into the
-                // shell again; NIM_DELETE may pump messages.
-                SetWindowLongPtrW(window, GWLP_USERDATA, 0);
                 Shell_NotifyIconW(NIM_DELETE, &state.data(window));
                 windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
             }
@@ -524,12 +563,16 @@ mod tests {
             let signals = Arc::new(Signals::default());
             let state = TrayState::new(signals.clone(), Locale::En, 0);
             signals.ready.store(true, Ordering::Release);
+            let dismissed = Cell::new(false);
             state.run_menu(|| {
-                // The same readiness transition as WM_DESTROY in the modal loop.
-                state.mark_unready();
-                assert!(!state.menu_is_current());
-                Some(command)
+                Some(state.track_owned_popup(|| {
+                    // The same readiness transition as WM_DESTROY in the modal loop.
+                    state.mark_unready(|| dismissed.set(true));
+                    assert!(!state.menu_is_current());
+                    command
+                }))
             });
+            assert!(dismissed.get());
             assert!(!signals.take_show());
             assert!(!signals.take_quit());
             assert!(!state.menu_open.get());
@@ -538,25 +581,51 @@ mod tests {
     }
 
     #[test]
-    fn explorer_renewal_cannot_revive_an_old_popup() {
+    fn explorer_renewal_dismisses_an_old_modal_only_once_then_allows_reopen() {
         let signals = Arc::new(Signals::default());
         let state = TrayState::new(signals.clone(), Locale::En, 0);
         signals.ready.store(true, Ordering::Release);
+        let dismissed = Cell::new(false);
         state.run_menu(|| {
-            assert!(state.menu_is_current());
-            state.mark_unready();
-            signals.ready.store(true, Ordering::Release);
-            assert!(!state.menu_is_current());
-            Some(MENU_QUIT)
+            Some(state.track_owned_popup(|| {
+                assert!(state.menu_is_current());
+                state.mark_unready(|| dismissed.set(true));
+                state.mark_unready(|| panic!("don't dismiss the same menu twice"));
+                signals.ready.store(true, Ordering::Release);
+                assert!(!state.menu_is_current());
+                state.run_menu(|| panic!("the obsolete modal is still unwinding"));
+                MENU_QUIT
+            }))
         });
+        assert!(dismissed.get());
         assert!(!signals.take_show());
         assert!(!signals.take_quit());
         state.run_menu(|| {
-            assert!(state.menu_is_current());
-            Some(MENU_SHOW)
+            Some(state.track_owned_popup(|| {
+                assert!(state.menu_is_current());
+                MENU_SHOW
+            }))
         });
         assert!(signals.take_show());
         assert!(!signals.take_quit());
+    }
+
+    #[test]
+    fn invalidation_outside_native_tracking_does_not_end_another_menu() {
+        let signals = Arc::new(Signals::default());
+        let state = TrayState::new(signals.clone(), Locale::En, 0);
+        for after_tracking in [false, true] {
+            signals.ready.store(true, Ordering::Release);
+            state.run_menu(|| {
+                if after_tracking {
+                    assert_eq!(state.track_owned_popup(|| 0), 0);
+                }
+                state.mark_unready(|| panic!("no owned popup is tracking"));
+                Some(MENU_QUIT)
+            });
+            assert!(!signals.take_show());
+            assert!(!signals.take_quit());
+        }
     }
 
     #[test]
