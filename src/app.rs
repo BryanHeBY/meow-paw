@@ -3373,10 +3373,12 @@ mod tests {
             message: "kept".into(),
         });
         history.set_state(LogStreamState::Unavailable);
-        let mut snapshot = Snapshot::default();
-        snapshot.engine = EngineStatus::Running { mixed_port: 1234 };
-        snapshot.probe_epoch = 7;
-        snapshot.logs = Some(history.clone());
+        let mut snapshot = Snapshot {
+            engine: EngineStatus::Running { mixed_port: 1234 },
+            probe_epoch: 7,
+            logs: Some(history.clone()),
+            ..Snapshot::default()
+        };
         assert!(log_retry_eligible(&snapshot, 7, 7, &history));
         assert!(!log_retry_eligible(&snapshot, 8, 7, &history));
         assert!(!log_retry_eligible(&snapshot, 7, 6, &history));
@@ -3446,10 +3448,12 @@ mod tests {
         });
         let mut worker = Some(LogWorker::start(controller.clone(), history.clone()));
         wait_for_log_state(&history, LogStreamState::Unavailable);
-        let mut snapshot = Snapshot::default();
-        snapshot.engine = EngineStatus::Running { mixed_port: 1234 };
-        snapshot.probe_epoch = 7;
-        snapshot.logs = Some(history.clone());
+        let snapshot = Snapshot {
+            engine: EngineStatus::Running { mixed_port: 1234 },
+            probe_epoch: 7,
+            logs: Some(history.clone()),
+            ..Snapshot::default()
+        };
         retry_log_worker(&snapshot, 7, 7, history.clone(), &controller, &mut worker);
         wait_for_log_state(&history, LogStreamState::Connected);
         let deadline = Instant::now() + Duration::from_secs(2);
