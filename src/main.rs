@@ -20,6 +20,8 @@ fn main() {
     let mut locale_override = None;
     #[cfg(feature = "visual-test")]
     let mut screenshot = None;
+    #[cfg(feature = "visual-test")]
+    let mut proxy_fixture = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--profile") => profile = args.next().map(PathBuf::from),
@@ -43,6 +45,8 @@ fn main() {
             Some("--no-preferences") => remember = false,
             #[cfg(feature = "visual-test")]
             Some("--screenshot") => screenshot = args.next().map(PathBuf::from),
+            #[cfg(feature = "visual-test")]
+            Some("--fixture-proxies") => proxy_fixture = true,
             _ => {
                 eprintln!(
                     "Usage: meow-paw [--profile FILE] [--start] [--page PAGE] [--locale LOCALE] [--no-preferences] [--no-tray]"
@@ -56,6 +60,21 @@ fn main() {
     let capturing = screenshot.is_some();
     #[cfg(not(feature = "visual-test"))]
     let capturing = false;
+    #[cfg(feature = "visual-test")]
+    if proxy_fixture
+        && (!capturing
+            || page != view::Page::Proxies
+            || binary.is_some()
+            || start
+            || profile.is_some())
+    {
+        eprintln!(
+            "--fixture-proxies requires --page proxies --screenshot FILE and no engine, profile, or --start"
+        );
+        std::process::exit(2);
+    }
+    #[cfg(not(feature = "visual-test"))]
+    let proxy_fixture = false;
     if capturing {
         use_tray = false;
     }
@@ -67,13 +86,17 @@ fn main() {
         system_locale().as_deref(),
     );
     let (binary, profile) = prefs.resolve(binary, profile);
-    let binary = binary.or_else(bundled_engine);
+    let binary = if proxy_fixture {
+        None
+    } else {
+        binary.or_else(bundled_engine)
+    };
     let app: Application = gpui_kit::application().with_assets(brand::PawAssets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         let (_handle, paw) = gpui_kit::open_window(window_options(cx), cx, move |window, cx| {
             window.set_window_title(locale.message(Message::AppTitle));
-            view::open(
+            let paw = view::open(
                 binary,
                 profile,
                 (page, locale),
@@ -81,7 +104,12 @@ fn main() {
                 (prefs, warning),
                 window,
                 cx,
-            )
+            );
+            #[cfg(feature = "visual-test")]
+            if proxy_fixture {
+                view::seed_proxy_fixture(&paw, cx);
+            }
+            paw
         })
         .expect("could not open Meow Paw");
         cx.activate(true);

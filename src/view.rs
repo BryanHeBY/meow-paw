@@ -569,6 +569,71 @@ fn register_page_filter_shortcut(
     })
 }
 
+/// Deterministic visual-test data; no controller, profile, tray or external requests.
+#[cfg(feature = "visual-test")]
+pub fn seed_proxy_fixture(paw: &Entity<Paw>, cx: &mut App) {
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        use meow_paw::engine::controller::{Inventory, ProviderStatus, Proxy, RoutingMode};
+        let group = |kind: &str, selected: &str, members: &[&str]| Proxy {
+            kind: kind.into(),
+            now: Some(selected.into()),
+            all: Some(members.iter().map(|name| (*name).into()).collect()),
+            ..Proxy::default()
+        };
+        let (auto, daily, work, hk, jp, provider) = match paw.read(cx).locale {
+            Locale::En => (
+                "Auto Select",
+                "Daily Proxy",
+                "Work",
+                "Hong Kong 01",
+                "Tokyo 02",
+                "Sample Provider",
+            ),
+            Locale::ZhCn => (
+                "自动选择",
+                "日常代理",
+                "工作连接",
+                "香港 01",
+                "东京 02",
+                "示例供应商",
+            ),
+        };
+        let inventory = Inventory {
+            groups: [
+                (
+                    auto.into(),
+                    group("URLTest", hk, &[hk, jp, "Singapore East"]),
+                ),
+                (
+                    daily.into(),
+                    group("Selector", jp, &[auto, hk, jp, "Singapore East", "DIRECT"]),
+                ),
+                (work.into(), group("Selector", "DIRECT", &["DIRECT", jp])),
+            ]
+            .into(),
+            providers: [(
+                provider.into(),
+                ProviderStatus {
+                    vehicle_type: "HTTP".into(),
+                    updated_at: None,
+                    subscription_info: None,
+                },
+            )]
+            .into(),
+            ..Inventory::default()
+        };
+        paw.update(cx, |paw, cx| {
+            paw.snapshot.mode = Some(RoutingMode::Rule);
+            paw.snapshot.inventory = Some(std::sync::Arc::new(inventory));
+            paw.expanded_groups.insert(daily.into());
+            cx.notify();
+        });
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let _ = (paw, cx);
+}
+
 pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let query = paw.read(cx).search.read(cx).value();
     let search = cx.new(|cx| InputState::new(window, cx).default_value(query));
