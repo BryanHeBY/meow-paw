@@ -10,6 +10,7 @@ use crate::{
         session::{ApplyError, Session},
     },
     profile::{Diagnostic, MAX_PROFILE_BYTES, Profile},
+    unlock,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -426,6 +427,7 @@ pub struct Snapshot {
     pub probe_busy: bool,
     pub group_probe: Option<GroupComparison>,
     group_run_id: u64,
+    pub unlock: unlock::State,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -603,6 +605,7 @@ enum Command {
         target: ProxyProbeTarget,
         url: url::Url,
     },
+    RunUnlock(u64, unlock::Job),
     CloseConnection(String),
 }
 
@@ -734,6 +737,42 @@ impl Desktop {
         change(&self.snapshot, |s| s.group_probe = None);
     }
 
+    pub fn run_unlock(&self, epoch: u64, group: &str) -> io::Result<()> {
+        let mut s = self.snapshot.lock().expect("snapshot poisoned");
+        if self.stop.load(Ordering::Acquire)
+            || self.quit.load(Ordering::Acquire)
+            || s.probe_epoch != epoch
+            || !matches!(s.engine, EngineStatus::Running { .. })
+            || s.apply_reservation.is_some()
+            || s.inventory_stale
+        {
+            return Err(Error::new(ErrorKind::WouldBlock, "Unlock session changed"));
+        }
+        let inventory = s
+            .inventory
+            .as_deref()
+            .filter(|inventory| inventory.groups.contains_key(group))
+            .ok_or_else(|| {
+                Error::new(ErrorKind::NotFound, "Unlock group is no longer available")
+            })?;
+        let routes = unlock::routes(inventory, group);
+        let job = s
+            .unlock
+            .begin(routes)
+            .ok_or_else(|| Error::new(ErrorKind::WouldBlock, "Unlock is already checking"))?;
+        let failure = job.without_checks(unlock::Phase::Unavailable);
+        let result = self.send(Command::RunUnlock(epoch, job));
+        if result.is_err() {
+            s.unlock.finish(failure);
+        }
+        s.revision = s.revision.wrapping_add(1);
+        result
+    }
+
+    pub fn cancel_unlock(&self) {
+        change(&self.snapshot, |s| s.unlock.cancel());
+    }
+
     pub fn refresh_provider(&self, name: String) -> io::Result<()> {
         self.send(Command::RefreshProvider(name))
     }
@@ -755,6 +794,7 @@ impl Desktop {
             self.stop.store(true, Ordering::Release);
             s.apply_reservation = None;
             s.group_probe = None;
+            s.unlock.reset();
             clear_rule_provider_state(s);
         });
     }
@@ -787,6 +827,7 @@ impl Desktop {
             return Err(error);
         }
         s.group_probe = None;
+        s.unlock.reset();
         s.revision = s.revision.wrapping_add(1);
         Ok(())
     }
@@ -808,6 +849,7 @@ impl Drop for Desktop {
         change(&self.snapshot, |s| {
             self.quit.store(true, Ordering::Release);
             s.apply_reservation = None;
+            s.unlock.reset();
         });
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -844,6 +886,7 @@ fn run(
     let (rule_provider_tx, rule_provider_rx) = mpsc::channel();
     let mut rule_provider_inflight = None;
     let (probe_tx, probe_rx) = mpsc::channel();
+    let (unlock_tx, unlock_rx) = mpsc::channel();
     let mut probe_inflight = false;
     let cancelled = || stop.load(Ordering::Acquire) || quit.load(Ordering::Acquire);
     loop {
@@ -864,7 +907,14 @@ fn run(
         if stopping {
             generation = generation.wrapping_add(1);
             // Retire already queued actions from the old session.
-            while receiver.try_recv().is_ok() {}
+            while let Ok(command) = receiver.try_recv() {
+                if let Command::RunUnlock(_, job) = command {
+                    change(snapshot, |s| {
+                        s.unlock
+                            .finish(job.without_checks(unlock::Phase::Cancelled));
+                    });
+                }
+            }
             let engine = if let Some(active) = session.take() {
                 match active.stop() {
                     Ok(()) => EngineStatus::Stopped,
@@ -901,6 +951,17 @@ fn run(
         }
 
         match receiver.recv_timeout(Duration::from_millis(75)) {
+            Ok(Command::RunUnlock(epoch, job)) => {
+                let result = match &session {
+                    Some(active) if epoch == generation && !cancelled() => {
+                        job.dispatch(active.controller.unlock_client(), unlock_tx.clone())
+                    }
+                    _ => Err(job.without_checks(unlock::Phase::Unavailable)),
+                };
+                if let Err(completion) = result {
+                    change(snapshot, |s| s.unlock.finish(completion));
+                }
+            }
             Ok(_) if cancelled() => continue,
             Ok(Command::Start(input)) => {
                 let path = input.key();
@@ -1164,6 +1225,10 @@ fn run(
             }
             change(snapshot, |s| finish_provider_refresh(s, result));
             next_sample = Instant::now();
+        }
+
+        while let Ok(completion) = unlock_rx.try_recv() {
+            change(snapshot, |s| s.unlock.finish(completion));
         }
 
         while let Ok((epoch, result)) = rule_provider_rx.try_recv() {
@@ -1543,6 +1608,7 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64, engine: EngineSt
         s.probe_epoch = generation;
         s.probes = ProxyProbeResults::default();
         s.group_probe = None;
+        s.unlock.reset();
         s.inventory = None;
         s.inventory_stale = false;
         s.refreshing_provider = None;

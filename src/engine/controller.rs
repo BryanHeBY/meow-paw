@@ -245,6 +245,11 @@ impl Controller {
         })
     }
 
+    #[cfg(any(target_os = "linux", windows, test))]
+    pub(crate) fn unlock_client(&self) -> crate::unlock::Client {
+        crate::unlock::Client::new(self.address.clone(), &self.secret)
+    }
+
     fn endpoint(&self, parts: &[&str]) -> Url {
         let mut address = self.address.clone();
         address

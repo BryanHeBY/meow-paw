@@ -88,7 +88,24 @@ pub enum Message {
     Loopback,
     KeepRunning,
     NoExecutableSelected,
+    UnlockStartSession,
+    UnlockChooseGroup,
+    UnlockGroup,
+    UnlockCancel,
+    UnlockChecking,
+    UnlockCancelling,
+    UnlockUnsupportedCore,
+    UnlockNoRoutes,
+    UnlockComplete,
+    UnlockRankDetail,
+    UnlockCancelled,
     UnlockUnavailableDetail,
+    UnlockPlatformUnavailable,
+    UnlockPending,
+    UnlockNotRun,
+    UnlockPassed,
+    UnlockTimedOut,
+    UnlockCheckFailed,
     MeowExecutable,
     Browse,
     HideFullPath,
@@ -229,6 +246,17 @@ pub enum Message {
 }
 
 impl Locale {
+    pub fn unlock_manual_detail(self, route_limit: usize) -> String {
+        match self {
+            Self::En => format!(
+                "Checks HTTPS connectivity to Google and Cloudflare through the first {route_limit} unambiguous proxy routes in a group."
+            ),
+            Self::ZhCn => format!(
+                "使用组内前 {route_limit} 条可明确识别的代理路线，检测到 Google 和 Cloudflare 的 HTTPS 连通性。"
+            ),
+        }
+    }
+
     pub fn subscription_interval(self, label: Message, minutes: u32) -> String {
         match self {
             Self::En => format!("{}: {} min", self.message(label), minutes),
@@ -432,9 +460,26 @@ fn english(key: Message) -> &'static str {
         Message::Loopback => "Loopback",
         Message::KeepRunning => "Keep running",
         Message::NoExecutableSelected => "No executable selected",
-        Message::UnlockUnavailableDetail => {
-            "Service availability tests are not available in this build."
+        Message::UnlockStartSession => "Start a managed Meow session to check routes.",
+        Message::UnlockChooseGroup => "Run checks for a proxy group",
+        Message::UnlockGroup => "Proxy group",
+        Message::UnlockCancel => "Cancel checks",
+        Message::UnlockChecking => "Checking routes…",
+        Message::UnlockCancelling => "Waiting for the current check to finish…",
+        Message::UnlockUnsupportedCore => "Route-pinned checks require a compatible Meow core.",
+        Message::UnlockNoRoutes => "Choose a proxy group with eligible routes.",
+        Message::UnlockComplete => "Checks complete",
+        Message::UnlockRankDetail => {
+            "Ranked by checks passed, then lowest total latency for those checks."
         }
+        Message::UnlockCancelled => "Cancelled",
+        Message::UnlockUnavailableDetail => "Could not run checks through the managed core.",
+        Message::UnlockPlatformUnavailable => "Managed route checks require Linux or Windows.",
+        Message::UnlockPending => "Pending",
+        Message::UnlockNotRun => "Not run",
+        Message::UnlockPassed => "Passed",
+        Message::UnlockTimedOut => "Timed out",
+        Message::UnlockCheckFailed => "Check failed",
         Message::MeowExecutable => "Meow executable",
         Message::Browse => "Browse…",
         Message::HideFullPath => "Hide full path",
@@ -688,7 +733,24 @@ fn chinese(key: Message) -> &'static str {
         Message::Loopback => "回环",
         Message::KeepRunning => "继续运行",
         Message::NoExecutableSelected => "未选择可执行文件",
-        Message::UnlockUnavailableDetail => "此版本不提供服务可用性测试。",
+        Message::UnlockStartSession => "启动托管的 Meow 会话后，即可检测路线。",
+        Message::UnlockChooseGroup => "为代理组运行检测",
+        Message::UnlockGroup => "代理组",
+        Message::UnlockCancel => "取消检测",
+        Message::UnlockChecking => "正在检测路线…",
+        Message::UnlockCancelling => "正在等待当前检测结束…",
+        Message::UnlockUnsupportedCore => "指定路线检测需要兼容的 Meow 核心。",
+        Message::UnlockNoRoutes => "请选择包含可检测路线的代理组。",
+        Message::UnlockComplete => "检测完成",
+        Message::UnlockRankDetail => "按通过的检测数排序，数量相同时，总延迟较低的路线排在前面。",
+        Message::UnlockCancelled => "已取消",
+        Message::UnlockUnavailableDetail => "无法通过托管核心运行检测。",
+        Message::UnlockPlatformUnavailable => "托管路线检测需要 Linux 或 Windows。",
+        Message::UnlockPending => "等待中",
+        Message::UnlockNotRun => "未执行",
+        Message::UnlockPassed => "通过",
+        Message::UnlockTimedOut => "超时",
+        Message::UnlockCheckFailed => "检测失败",
         Message::MeowExecutable => "Meow 可执行文件",
         Message::Browse => "浏览…",
         Message::HideFullPath => "隐藏完整路径",
@@ -1030,8 +1092,8 @@ mod tests {
             ),
             (
                 Message::UnlockUnavailableDetail,
-                "Service availability tests are not available in this build.",
-                "此版本不提供服务可用性测试。",
+                "Could not run checks through the managed core.",
+                "无法通过托管核心运行检测。",
             ),
         ];
         for (key, en, zh) in cases {

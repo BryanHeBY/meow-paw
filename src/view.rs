@@ -4013,6 +4013,217 @@ impl Paw {
             && !matches!(phase, "Starting" | "Running" | "Stopping")
     }
 
+    fn unlock(&self, cx: &mut Context<Self>) -> Div {
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            use meow_paw::{
+                app::EngineStatus,
+                unlock::{Phase, ROUTE_LIMIT, Status},
+            };
+
+            let state = &self.snapshot.unlock;
+            let running = matches!(self.snapshot.engine, EngineStatus::Running { .. });
+            let active = running && state.phase == Phase::Checking;
+            let show_cancel = active || running && state.phase == Phase::Cancelling;
+            let inventory = self
+                .snapshot
+                .inventory
+                .as_ref()
+                .filter(|_| running && !self.snapshot.inventory_stale);
+            let groups: Vec<_> = inventory
+                .into_iter()
+                .flat_map(|inventory| inventory.groups.iter())
+                .filter_map(|(name, group)| (!group.hidden).then_some(name))
+                .collect();
+            let can_run = self.desktop.is_some()
+                && self.snapshot.applying_profile.is_none()
+                && !state.is_busy();
+            let summary = match (&self.snapshot.engine, &state.phase) {
+                (EngineStatus::Starting, _) => Some(Message::OverviewStarting),
+                (EngineStatus::Stopping, _) => Some(Message::Stopping),
+                (_, _) if !running => Some(Message::UnlockStartSession),
+                (_, _) if self.snapshot.applying_profile.is_some() => Some(Message::Applying),
+                (_, Phase::Idle) if state.is_busy() => Some(Message::UnlockCancelling),
+                (_, Phase::Idle) if inventory.is_none() => Some(Message::OverviewRouteUnavailable),
+                (_, Phase::Idle) if groups.is_empty() => Some(Message::NoProxyGroups),
+                (_, Phase::Idle) => None,
+                (_, Phase::Checking) => Some(Message::UnlockChecking),
+                (_, Phase::Cancelling) => Some(Message::UnlockCancelling),
+                (_, Phase::Unsupported) => Some(Message::UnlockUnsupportedCore),
+                (_, Phase::NoRoutes) => Some(Message::UnlockNoRoutes),
+                (_, Phase::Complete) => Some(Message::UnlockComplete),
+                (_, Phase::Cancelled) => Some(Message::UnlockCancelled),
+                (_, Phase::Unavailable) => Some(Message::UnlockUnavailableDetail),
+            };
+            let show_groups = !groups.is_empty() && !matches!(state.phase, Phase::Unsupported);
+            let group_buttons = groups.into_iter().enumerate().map(|(index, name)| {
+                let group = name.clone();
+                let mut label = safe_rule_set_text(&group, "");
+                if label.trim().is_empty() {
+                    label = format!(
+                        "{} {}",
+                        self.locale.message(Message::UnlockGroup),
+                        index + 1
+                    );
+                }
+                SemanticButton::new(("unlock-group", index))
+                    .accessibility_label(label.clone())
+                    .disabled(!can_run)
+                    .max_w(px(248.))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(if can_run { SOFT_BLUE } else { BG }))
+                    .text_color(rgb(if can_run { BLUE } else { FAINT }))
+                    .child(div().truncate().child(label))
+                    .when(can_run, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0xd8e7ff)))
+                            .focus_visible(|style| style.border_2().border_color(rgb(BLUE)))
+                            .on_click(cx.listener(move |this, event, _, cx| {
+                                if matches!(event, ClickEvent::Keyboard(_)) {
+                                    cx.stop_propagation();
+                                }
+                                if let Some(desktop) = &this.desktop {
+                                    this.error = desktop
+                                        .run_unlock(this.snapshot.probe_epoch, &group)
+                                        .err()
+                                        .map(|_| {
+                                            this.locale
+                                                .message(Message::UnlockUnavailableDetail)
+                                                .into()
+                                        });
+                                }
+                                this.refresh();
+                                cx.notify();
+                            }))
+                    })
+            });
+            let setup = card()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child(self.locale.unlock_manual_detail(ROUTE_LIMIT)),
+                )
+                .when_some(summary, |panel, message| {
+                    panel.child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(FAINT))
+                            .child(self.locale.message(message)),
+                    )
+                })
+                .when(show_cancel, |panel| {
+                    panel.child(
+                        subscription_button(
+                            "unlock-cancel",
+                            self.locale.message(Message::UnlockCancel),
+                            false,
+                            cx,
+                        )
+                        .disabled(!active)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(desktop) = &this.desktop {
+                                desktop.cancel_unlock();
+                            }
+                            this.refresh();
+                            cx.notify();
+                        })),
+                    )
+                })
+                .when(show_groups, |panel| {
+                    panel
+                        .child(section_label(
+                            self.locale.message(Message::UnlockChooseGroup),
+                        ))
+                        .child(div().flex().flex_wrap().gap_2().children(group_buttons))
+                });
+            let ranked = state.phase == Phase::Complete && state.rows.len() > 1;
+            let message = |key| self.locale.message(key);
+            let result_text = |status| match status {
+                Status::Passed { elapsed_ms } => {
+                    format!("{} · {elapsed_ms} ms", message(Message::UnlockPassed))
+                }
+                Status::Http(code) => format!("HTTP {code}"),
+                Status::Pending => message(Message::UnlockPending).to_owned(),
+                Status::NotRun => message(Message::UnlockNotRun).to_owned(),
+                Status::TimedOut => message(Message::UnlockTimedOut).to_owned(),
+                Status::Failed => message(Message::UnlockCheckFailed).to_owned(),
+                Status::Cancelled => message(Message::UnlockCancelled).to_owned(),
+            };
+            let rows = state.rows.iter().enumerate().map(|(index, row)| {
+                let label = safe_rule_set_text(&row.route, message(Message::RuleSetRedacted));
+                let heading = if ranked {
+                    format!("{}. {label}", index + 1)
+                } else {
+                    label
+                };
+                div()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(rgb(LINE))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(heading))
+                    .child(div().flex().flex_wrap().gap_3().children(
+                        ["Google", "Cloudflare"].into_iter().zip(row.checks).map(
+                            |(label, status)| {
+                                let color = if matches!(status, Status::Passed { .. }) {
+                                    GREEN
+                                } else {
+                                    FAINT
+                                };
+                                div()
+                                    .min_w(px(124.))
+                                    .flex()
+                                    .flex_col()
+                                    .child(section_label(label))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(color))
+                                            .child(result_text(status)),
+                                    )
+                            },
+                        ),
+                    ))
+            });
+            div().flex().flex_col().gap_3().child(setup).when(
+                running && !state.rows.is_empty(),
+                |page| {
+                    page.child(
+                        card()
+                            .when(ranked, |results| {
+                                results.child(
+                                    div()
+                                        .pb_3()
+                                        .text_sm()
+                                        .text_color(rgb(FAINT))
+                                        .child(message(Message::UnlockRankDetail)),
+                                )
+                            })
+                            .children(rows),
+                    )
+                },
+            )
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        {
+            let _ = cx;
+            empty_state(
+                self.locale.message(Message::Unlock),
+                self.locale.message(Message::UnlockPlatformUnavailable),
+            )
+        }
+    }
+
     fn settings(&self, wide: bool, cx: &mut Context<Self>) -> Div {
         let saved_language = self.preferences.language();
         let can_save_language = self.preferences.has_persistent_file();
@@ -4294,10 +4505,7 @@ impl Render for Paw {
             Page::Connections => self.connections(cx),
             Page::Rules => self.rules(cx),
             Page::Logs => self.logs(cx),
-            Page::Unlock => empty_state(
-                self.locale.message(Message::Unlock),
-                self.locale.message(Message::UnlockUnavailableDetail),
-            ),
+            Page::Unlock => self.unlock(cx),
             Page::Settings => self.settings(window.viewport_size().width >= px(960.), cx),
         };
         let pane = div().id(("paw-page", self.page as usize));
