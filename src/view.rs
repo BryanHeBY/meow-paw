@@ -37,7 +37,6 @@ const BLUE: u32 = 0x155cd7;
 const SOFT_BLUE: u32 = 0xe8f1ff;
 const STREAM_DOWN: u32 = 0x146cce;
 const STREAM_UP: u32 = 0xa06100;
-#[cfg(any(target_os = "linux", windows))]
 const GREEN: u32 = 0x168460;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2761,6 +2760,11 @@ impl Paw {
                         })
                     });
                 card()
+                    .border_color(rgb(profile_card_border(
+                        confirmed_active,
+                        applying == Some(profile),
+                        next,
+                    )))
                     .flex_basis(px(300.))
                     .flex_grow(1.)
                     .min_w_0()
@@ -6242,6 +6246,18 @@ impl Paw {
     }
 }
 
+fn profile_card_border(confirmed_running: bool, applying: bool, next_start: bool) -> u32 {
+    if applying {
+        STREAM_UP
+    } else if confirmed_running {
+        GREEN
+    } else if next_start {
+        BLUE
+    } else {
+        LINE
+    }
+}
+
 fn card() -> Div {
     div()
         .rounded_xl()
@@ -7529,6 +7545,16 @@ mod tests {
         for page in [Page::Overview, Page::Unlock, Page::Settings] {
             assert!(!visible(page, &snapshot, false, false));
         }
+    }
+
+    #[test]
+    fn profile_card_border_distinguishes_pending_running_and_staged() {
+        use super::{BLUE, GREEN, LINE, STREAM_UP, profile_card_border};
+
+        assert_eq!(profile_card_border(false, false, false), LINE);
+        assert_eq!(profile_card_border(false, false, true), BLUE);
+        assert_eq!(profile_card_border(true, false, true), GREEN);
+        assert_eq!(profile_card_border(false, true, true), STREAM_UP);
     }
 
     #[test]
