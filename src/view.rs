@@ -5968,6 +5968,15 @@ impl Render for Paw {
                                     .min_w_0()
                                     .overflow_y_scroll()
                                     .p_4()
+                                    .when(self.page == Page::Proxies && !compact, |pane| {
+                                        // The 32 px jump rail already separates the card
+                                        // edge from its hit targets. Keep their full size.
+                                        pane.pl_3().pr(if proxy_navigator.is_some() {
+                                            px(4.)
+                                        } else {
+                                            px(12.)
+                                        })
+                                    })
                                     .when_some(self.issue(), |pane, issue| {
                                         pane.child(
                                             div()
