@@ -44,6 +44,15 @@ jobs:
       - name: Check formatting
         run: cargo +stable fmt --all -- --check
 
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        with:
+          key: desktop-${{ matrix.os }}
+          cache-bin: 'false'
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
       - name: Lint desktop code
         run: cargo +stable clippy --locked --features desktop --all-targets -- -D warnings
 
