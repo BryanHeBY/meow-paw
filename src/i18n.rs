@@ -68,6 +68,10 @@ pub enum Message {
     SortName,
     Test,
     Refresh,
+    ProviderNoUsage,
+    ProviderAwaitingUpdate,
+    ProviderRefreshing,
+    ProviderRefreshBusy,
     LatencyTestDescription,
     NoMatchingGroups,
     TryAnotherRoute,
@@ -436,6 +440,10 @@ fn english(key: Message) -> &'static str {
         Message::SortName => "Sort: Name",
         Message::Test => "Test",
         Message::Refresh => "Refresh",
+        Message::ProviderNoUsage => "No usage information",
+        Message::ProviderAwaitingUpdate => "Awaiting first update",
+        Message::ProviderRefreshing => "Refreshing…",
+        Message::ProviderRefreshBusy => "Another provider is refreshing",
         Message::LatencyTestDescription => {
             "Latency test · Meow opens this HTTPS URL through the chosen proxy."
         }
@@ -713,6 +721,10 @@ fn chinese(key: Message) -> &'static str {
         Message::SortName => "排序：名称",
         Message::Test => "测试",
         Message::Refresh => "刷新",
+        Message::ProviderNoUsage => "暂无流量用量信息",
+        Message::ProviderAwaitingUpdate => "等待首次更新",
+        Message::ProviderRefreshing => "正在刷新…",
+        Message::ProviderRefreshBusy => "另一个代理集合正在刷新",
         Message::LatencyTestDescription => "延迟测试 · Meow 通过所选代理访问此 HTTPS 地址。",
         Message::NoMatchingGroups => "没有匹配的代理组",
         Message::TryAnotherRoute => "请尝试其他路线或代理组名称。",
@@ -1628,6 +1640,22 @@ mod tests {
             (Message::SortName, "Sort: Name", "排序：名称"),
             (Message::Test, "Test", "测试"),
             (Message::Refresh, "Refresh", "刷新"),
+            (
+                Message::ProviderNoUsage,
+                "No usage information",
+                "暂无流量用量信息",
+            ),
+            (
+                Message::ProviderAwaitingUpdate,
+                "Awaiting first update",
+                "等待首次更新",
+            ),
+            (Message::ProviderRefreshing, "Refreshing…", "正在刷新…"),
+            (
+                Message::ProviderRefreshBusy,
+                "Another provider is refreshing",
+                "另一个代理集合正在刷新",
+            ),
             (
                 Message::LatencyTestDescription,
                 "Latency test · Meow opens this HTTPS URL through the chosen proxy.",

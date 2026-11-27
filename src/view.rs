@@ -3514,11 +3514,10 @@ impl Paw {
                                 bytes(usage.total)
                             )
                         })
-                        .unwrap_or_else(|| "No usage information".into());
-                    let updated = status
-                        .updated_at
-                        .clone()
-                        .unwrap_or_else(|| "Awaiting first update".into());
+                        .unwrap_or_else(|| self.locale.message(Message::ProviderNoUsage).into());
+                    let updated = status.updated_at.clone().unwrap_or_else(|| {
+                        self.locale.message(Message::ProviderAwaitingUpdate).into()
+                    });
                     card()
                         .px_3()
                         .py_2()
@@ -3571,13 +3570,13 @@ impl Paw {
                             row.child(
                                 secondary_button(
                                     SharedString::from(format!("provider-refresh:{label}")),
-                                    if pending {
-                                        "Refreshing…"
+                                    self.locale.message(if pending {
+                                        Message::ProviderRefreshing
                                     } else if busy {
-                                        "Refresh busy"
+                                        Message::ProviderRefreshBusy
                                     } else {
-                                        self.locale.message(Message::Refresh)
-                                    },
+                                        Message::Refresh
+                                    }),
                                 )
                                 .when(!busy, |button| {
                                     button.on_click(cx.listener(move |paw, _, _, cx| {
