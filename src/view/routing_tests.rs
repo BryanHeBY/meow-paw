@@ -88,6 +88,71 @@ fn provider_refresh_exposes_keyboard_action_and_busy_labels(cx: &mut TestAppCont
     assert_eq!(*activations.borrow(), 2);
 }
 
+#[gpui_kit::test]
+fn locating_the_selected_route_expands_its_group_and_scrolls(cx: &mut TestAppContext) {
+    use meow_paw::engine::controller::{Inventory, Proxy};
+
+    cx.update(gpui_kit::init);
+    let holder = Rc::new(RefCell::new(None));
+    let holder2 = holder.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let paw = open(
+            None,
+            None,
+            (Page::Proxies, Locale::ZhCn),
+            false,
+            (Preferences::discover(false).0, None),
+            window,
+            cx,
+        );
+        let mut all: Vec<_> = (0..60).map(|i| format!("Node {i:02}")).collect();
+        all.extend(["当前节点".into(), "当前节点".into()]);
+        let first = Proxy {
+            kind: "Selector".into(),
+            now: Some("当前节点".into()),
+            all: Some(all),
+            ..Proxy::default()
+        };
+        let second = Proxy {
+            all: Some(vec!["当前节点".into()]),
+            ..first.clone()
+        };
+        paw.update(cx, |paw, _| {
+            paw.snapshot.mode = Some(RoutingMode::Rule);
+            paw.snapshot.inventory = Some(Arc::new(Inventory {
+                groups: [("Group A".into(), first), ("Group B".into(), second)].into(),
+                ..Inventory::default()
+            }));
+        });
+        *holder2.borrow_mut() = Some(paw.clone());
+        gpui_kit::base::Root::new(paw, window, cx)
+    });
+    let paw = holder.borrow_mut().take().unwrap();
+    ui.update(|window, cx| {
+        window.activate_window();
+        window.render_frame(cx);
+        let locator = window.find("locate:Group A");
+        assert_eq!(locator.role(), Some(gpui_kit::Role::Button));
+        assert!(locator.label().unwrap().contains("当前节点"));
+        let starting = paw.read(cx).proxy_group_scroll.offset().y;
+        window.click("locate:Group A", cx);
+        window.render_frame(cx);
+        window.simulate_next_frame(cx);
+        window.render_frame(cx);
+        let paw = paw.read(cx);
+        assert!(paw.expanded_groups.contains("Group A"));
+        assert!(!paw.expanded_groups.contains("Group B"));
+        assert!(
+            paw.proxy_group_scroll.offset().y < starting - gpui_kit::px(200.),
+            "the selected deep candidate must scroll into view"
+        );
+        assert!(
+            paw.locate_route.is_none(),
+            "scroll must not repeat on refresh"
+        );
+    });
+}
+
 fn quote(path: &Path) -> String {
     format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"))
 }

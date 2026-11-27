@@ -496,6 +496,8 @@ pub struct Paw {
     #[cfg(any(target_os = "linux", windows))]
     proxy_group_scroll: ScrollHandle,
     #[cfg(any(target_os = "linux", windows))]
+    locate_route: Option<(String, String)>,
+    #[cfg(any(target_os = "linux", windows))]
     snapshot: meow_paw::app::Snapshot,
 }
 
@@ -664,6 +666,8 @@ pub fn open(
             proxy_order: Default::default(),
             #[cfg(any(target_os = "linux", windows))]
             proxy_group_scroll: ScrollHandle::new(),
+            #[cfg(any(target_os = "linux", windows))]
+            locate_route: None,
             error: None,
             copied_listener: None,
             show_engine_path: false,
@@ -2988,14 +2992,16 @@ impl Paw {
         self.error = None;
     }
 
-    fn proxies(&self, window_width: Pixels, cx: &mut Context<Self>) -> Div {
+    fn proxies(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        #[cfg(any(target_os = "linux", windows))]
+        let locate_route = self.locate_route.take();
         #[cfg(any(target_os = "linux", windows))]
         if let Some(inventory) = self.snapshot.inventory.as_ref() {
             let value = self.search.read(cx).value();
             let query = value.trim().to_lowercase();
             let mut count = 0;
             let mut group_anchors = Vec::new();
-            let columns = route_columns(window_width);
+            let columns = route_columns(window.viewport_size().width);
             use meow_paw::app::{ProxyProbeStatus, ProxyProbeTarget, parse_probe_url};
             let probe_url = parse_probe_url(&self.probe_url.read(cx).value());
             let probe_ready = probe_url.is_some();
@@ -3049,6 +3055,18 @@ impl Paw {
                     if open {
                         sort_route_members(&mut members, order, &delays);
                     }
+                    let visible_selection = group
+                        .now
+                        .as_deref()
+                        .filter(|selected| members.iter().any(|(_, member)| member == selected));
+                    let route_anchor = visible_selection.and_then(|selected| {
+                        let (wanted_group, wanted_member) = locate_route.as_ref()?;
+                        (open && name == wanted_group && selected == wanted_member).then(|| {
+                            let anchor = ScrollAnchor::for_handle(self.proxy_group_scroll.clone());
+                            anchor.scroll_to(window, cx);
+                            anchor
+                        })
+                    });
                     let toggle = name.clone();
                     let heading = card()
                         .px_3()
@@ -3108,6 +3126,36 @@ impl Paw {
                                     ),
                                 ),
                         )
+                        .when_some(visible_selection, |heading, selected| {
+                            let group = name.clone();
+                            let member = selected.to_owned();
+                            let label = match self.locale {
+                                Locale::En => "Locate selected node",
+                                Locale::ZhCn => "定位当前节点",
+                            };
+                            heading.child(
+                                SemanticButton::new(SharedString::from(format!("locate:{name}")))
+                                    .accessibility_label(format!("{label}: {name}, {selected}"))
+                                    .cursor_pointer()
+                                    .rounded_md()
+                                    .px_2()
+                                    .py_1()
+                                    .border_1()
+                                    .border_color(rgb(LINE))
+                                    .text_sm()
+                                    .text_color(rgb(BLUE))
+                                    .bg(rgb(SOFT_BLUE))
+                                    .hover(|style| style.bg(rgb(0xd8e7ff)))
+                                    .focus_visible(|style| style.border_color(rgb(BLUE)))
+                                    .child(label)
+                                    .on_click(cx.listener(move |paw, _, _, cx| {
+                                        cx.stop_propagation();
+                                        paw.expanded_groups.insert(group.clone());
+                                        paw.locate_route = Some((group.clone(), member.clone()));
+                                        cx.notify();
+                                    })),
+                            )
+                        })
                         .when(expandable, |heading| {
                             heading.child(line_icon(
                                 if open {
@@ -3331,6 +3379,9 @@ impl Paw {
                                                     .id(SharedString::from(format!(
                                                         "proxy:{name}:{index}"
                                                     )))
+                                                    .when(selected, |card| {
+                                                        card.anchor_scroll(route_anchor.clone())
+                                                    })
                                                     .flex_1()
                                                     .min_w_0()
                                                     .min_h(px(48.))
@@ -3672,7 +3723,7 @@ impl Paw {
                 .children(groups)
             };
         }
-        let _ = (window_width, cx);
+        let _ = (window, cx);
         #[cfg(any(target_os = "linux", windows))]
         if self.snapshot.inventory_stale {
             return empty_state(
@@ -4530,9 +4581,13 @@ impl Render for Paw {
         #[cfg(any(target_os = "linux", windows))]
         self.reconcile_connection_detail(cx);
         let compact = window.viewport_size().width < px(820.);
+        #[cfg(any(target_os = "linux", windows))]
+        if self.page != Page::Proxies {
+            self.locate_route = None;
+        }
         let body = match self.page {
             Page::Overview => self.overview(window.viewport_size().width >= px(960.), cx),
-            Page::Proxies => self.proxies(window.viewport_size().width, cx),
+            Page::Proxies => self.proxies(window, cx),
             Page::Profiles => self.profiles(cx),
             Page::Connections => self.connections(cx),
             Page::Rules => self.rules(cx),
