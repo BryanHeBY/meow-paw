@@ -6,6 +6,7 @@ use std::{
     mem::size_of,
     ptr::{null, null_mut},
     sync::{Arc, atomic::Ordering},
+    time::{Duration, Instant},
 };
 use windows_sys::{
     Win32::{
@@ -20,13 +21,13 @@ use windows_sys::{
             WindowsAndMessaging::{
                 AppendMenuW, CREATESTRUCTW, CreateIcon, CreatePopupMenu, CreateWindowExW,
                 DefWindowProcW, DestroyIcon, DestroyMenu, DispatchMessageW, FindWindowW,
-                GWLP_USERDATA, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-                HICON, HMENU, MF_STRING, MSG, PostMessageW, RegisterClassW, RegisterWindowMessageW,
-                SM_MENUDROPALIGNMENT, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-                TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_RIGHTBUTTON,
-                TPMPARAMS, TrackPopupMenuEx, TranslateMessage, UnregisterClassW, WM_APP,
-                WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP, WM_NCCREATE, WM_NULL, WM_RBUTTONUP,
-                WM_TIMER, WNDCLASSW,
+                GWLP_USERDATA, GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics,
+                GetWindowLongPtrW, HICON, HMENU, MF_STRING, MSG, PostMessageW, RegisterClassW,
+                RegisterWindowMessageW, SM_MENUDROPALIGNMENT, SetForegroundWindow, SetTimer,
+                SetWindowLongPtrW, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTALIGN,
+                TPM_RIGHTBUTTON, TPMPARAMS, TrackPopupMenuEx, TranslateMessage, UnregisterClassW,
+                WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP, WM_NCCREATE, WM_NULL,
+                WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
             },
         },
     },
@@ -38,10 +39,20 @@ const CALLBACK: u32 = WM_APP + 3;
 const ID: u32 = 1;
 const MENU_SHOW: i32 = 1;
 const MENU_QUIT: i32 = 2;
+// The shell can report one mouse selection in both raw and semantic forms.
+// Pair adjacent opposite forms; same-kind clicks and keyboard remain distinct.
+const PRIMARY_PAIR_WINDOW: Duration = Duration::from_millis(160);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrimaryActivation {
+    MouseButton,
+    MouseSelect,
+    Keyboard,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CallbackAction {
-    Show,
+    Show(PrimaryActivation),
     Menu,
 }
 
@@ -49,13 +60,15 @@ fn callback_action(version_4: bool, wparam: WPARAM, lparam: LPARAM) -> Option<Ca
     // V4 packs the icon ID in HIWORD(lParam). Older shells use wParam for the ID.
     match version_4 {
         true if (lparam as u32 >> 16) == ID => match lparam as u32 & 0xffff {
-            NIN_SELECT | NIN_KEYSELECT => Some(CallbackAction::Show),
+            NIN_SELECT => Some(CallbackAction::Show(PrimaryActivation::MouseSelect)),
+            NIN_KEYSELECT => Some(CallbackAction::Show(PrimaryActivation::Keyboard)),
+            WM_LBUTTONUP => Some(CallbackAction::Show(PrimaryActivation::MouseButton)),
             // Handle the semantic callback only, not raw right-button events too.
             WM_CONTEXTMENU => Some(CallbackAction::Menu),
             _ => None,
         },
         false if wparam == ID as WPARAM => match lparam as u32 {
-            WM_LBUTTONUP => Some(CallbackAction::Show),
+            WM_LBUTTONUP => Some(CallbackAction::Show(PrimaryActivation::MouseButton)),
             WM_RBUTTONUP => Some(CallbackAction::Menu),
             _ => None,
         },
@@ -118,6 +131,14 @@ fn popup_position(rect: RECT, right: bool) -> (POINT, TPMPARAMS) {
     )
 }
 
+fn track_if_foreground(
+    acquired: bool,
+    already_foreground: impl FnOnce() -> bool,
+    track: impl FnOnce() -> i32,
+) -> Option<i32> {
+    (acquired || already_foreground()).then(track)
+}
+
 struct TrayState {
     shell: Cell<HWND>,
     icon: HICON,
@@ -126,6 +147,8 @@ struct TrayState {
     locale: Locale,
     version_4: Cell<bool>,
     menu_open: Cell<bool>,
+    menu_current: Cell<bool>,
+    last_mouse: Cell<Option<(PrimaryActivation, Instant)>>,
 }
 
 impl TrayState {
@@ -138,7 +161,32 @@ impl TrayState {
             locale,
             version_4: Cell::new(false),
             menu_open: Cell::new(false),
+            menu_current: Cell::new(false),
+            last_mouse: Cell::new(None),
         }
+    }
+
+    fn accept_primary(&self, activation: PrimaryActivation, now: Instant) -> bool {
+        if activation == PrimaryActivation::Keyboard {
+            return true;
+        }
+        let paired = self.last_mouse.get().is_some_and(|(previous, at)| {
+            previous != activation && now.saturating_duration_since(at) <= PRIMARY_PAIR_WINDOW
+        });
+        self.last_mouse.set((!paired).then_some((activation, now)));
+        !paired
+    }
+
+    fn mark_unready(&self) {
+        // Don't restore this latch on a successful NIM_ADD (the active popup
+        // still belongs to the old icon). A later popup sets its own latch.
+        self.menu_current.set(false);
+        self.last_mouse.set(None);
+        self.signals.ready.store(false, Ordering::Release);
+    }
+
+    fn menu_is_current(&self) -> bool {
+        self.menu_current.get() && self.signals.ready()
     }
 
     fn data(&self, window: HWND) -> NOTIFYICONDATAW {
@@ -160,7 +208,7 @@ impl TrayState {
         if !forced && self.shell.get() == shell && self.signals.ready() {
             return;
         }
-        self.signals.ready.store(false, Ordering::Release);
+        self.mark_unready();
         self.version_4.set(false);
         self.shell.set(shell);
         if shell.is_null() || self.icon.is_null() {
@@ -175,26 +223,30 @@ impl TrayState {
         }
     }
 
-    fn run_menu(&self, open: impl FnOnce() -> i32) {
+    fn run_menu(&self, open: impl FnOnce() -> Option<i32>) {
         // TrackPopupMenuEx pumps messages on this same thread. A nested or
         // duplicate context event must not start a second modal loop.
-        if self.menu_open.replace(true) {
+        if !self.signals.ready() || self.menu_open.replace(true) {
             return;
         }
+        self.menu_current.set(true);
         let command = open();
         self.menu_open.set(false);
+        let current = self.menu_is_current();
+        self.menu_current.set(false);
+        if !current {
+            return;
+        }
         match command {
-            MENU_SHOW => self.signals.show.store(true, Ordering::Release),
-            MENU_QUIT => self.signals.quit.store(true, Ordering::Release),
+            Some(MENU_SHOW) => self.signals.show.store(true, Ordering::Release),
+            Some(MENU_QUIT) => self.signals.quit.store(true, Ordering::Release),
             _ => {}
         }
     }
 
     fn show_menu(&self, window: HWND) {
         self.run_menu(|| {
-            let Some(menu) = PopupMenu::new(self.locale) else {
-                return 0;
-            };
+            let menu = PopupMenu::new(self.locale)?;
             let right = unsafe { GetSystemMetrics(SM_MENUDROPALIGNMENT) } != 0;
             let mut anchor = POINT::default();
             // A keyboard request may arrive with the cursor on another display.
@@ -205,28 +257,44 @@ impl TrayState {
                 params
             });
             if exclude.is_none() && unsafe { GetCursorPos(&mut anchor) } == 0 {
-                return 0;
+                return None;
             }
             let params = exclude.as_ref().map_or(null(), std::ptr::from_ref);
             let alignment = if right { TPM_RIGHTALIGN } else { TPM_LEFTALIGN };
-            unsafe {
-                SetForegroundWindow(window);
-                // Only a return value from this owned menu can generate Quit.
-                let command = TrackPopupMenuEx(
-                    menu.0,
-                    alignment | TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-                    anchor.x,
-                    anchor.y,
-                    window,
-                    params,
-                );
-                // Follow the notification-area dismissal protocol before another open.
-                PostMessageW(window, WM_NULL, 0, 0);
-                if command == 0 {
-                    Shell_NotifyIconW(NIM_SETFOCUS, &self.data(window));
-                }
-                command
+            if !self.menu_is_current() {
+                return None;
             }
+            let acquired = unsafe { SetForegroundWindow(window) } != 0;
+            if !self.menu_is_current() {
+                return None;
+            }
+            // Windows can deny foreground changes. An already-foreground
+            // owner is fine, but don't open a popup that can't dismiss itself.
+            // Only a return value from this owned menu can generate Quit.
+            let command = track_if_foreground(
+                acquired,
+                || unsafe { GetForegroundWindow() == window },
+                || unsafe {
+                    TrackPopupMenuEx(
+                        menu.0,
+                        alignment | TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                        anchor.x,
+                        anchor.y,
+                        window,
+                        params,
+                    )
+                },
+            )?;
+            if self.menu_is_current() {
+                unsafe {
+                    // Follow the notification-area dismissal protocol before another open.
+                    PostMessageW(window, WM_NULL, 0, 0);
+                    if command == 0 {
+                        Shell_NotifyIconW(NIM_SETFOCUS, &self.data(window));
+                    }
+                }
+            }
+            Some(command)
         });
     }
 }
@@ -249,7 +317,10 @@ unsafe extern "system" fn window_proc(
         if message == CALLBACK {
             if state.signals.ready() {
                 match callback_action(state.version_4.get(), wparam, lparam) {
-                    Some(CallbackAction::Show) if !state.menu_open.get() => {
+                    Some(CallbackAction::Show(activation))
+                        if !state.menu_open.get()
+                            && state.accept_primary(activation, Instant::now()) =>
+                    {
                         state.signals.show.store(true, Ordering::Release);
                     }
                     Some(CallbackAction::Menu) => state.show_menu(window),
@@ -263,10 +334,12 @@ unsafe extern "system" fn window_proc(
             return 0;
         }
         if message == WM_DESTROY {
-            state.signals.ready.store(false, Ordering::Release);
+            state.mark_unready();
             unsafe {
-                Shell_NotifyIconW(NIM_DELETE, &state.data(window));
+                // Remove the callback's state pointer before calling into the
+                // shell again; NIM_DELETE may pump messages.
                 SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+                Shell_NotifyIconW(NIM_DELETE, &state.data(window));
                 windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
             }
             return 0;
@@ -354,15 +427,19 @@ mod tests {
 
     #[test]
     fn callback_respects_version_and_icon_ownership() {
-        for event in [NIN_SELECT, NIN_KEYSELECT] {
+        for (event, activation) in [
+            (NIN_SELECT, PrimaryActivation::MouseSelect),
+            (NIN_KEYSELECT, PrimaryActivation::Keyboard),
+            (WM_LBUTTONUP, PrimaryActivation::MouseButton),
+        ] {
             assert_eq!(
                 callback_action(true, 0, v4(event, ID)),
-                Some(CallbackAction::Show)
+                Some(CallbackAction::Show(activation))
             );
         }
         assert_eq!(
             callback_action(false, ID as WPARAM, WM_LBUTTONUP as LPARAM),
-            Some(CallbackAction::Show)
+            Some(CallbackAction::Show(PrimaryActivation::MouseButton))
         );
         assert_eq!(
             callback_action(true, 0, v4(WM_CONTEXTMENU, ID)),
@@ -372,7 +449,7 @@ mod tests {
             callback_action(false, ID as WPARAM, WM_RBUTTONUP as LPARAM),
             Some(CallbackAction::Menu)
         );
-        for event in [WM_LBUTTONUP, WM_RBUTTONUP, WM_COMMAND] {
+        for event in [WM_RBUTTONUP, WM_COMMAND] {
             assert_eq!(callback_action(true, 0, v4(event, ID)), None);
         }
         assert_eq!(callback_action(true, 0, v4(WM_CONTEXTMENU, ID + 1)), None);
@@ -383,26 +460,103 @@ mod tests {
     }
 
     #[test]
+    fn primary_activation_pairs_only_adjacent_raw_and_semantic_mouse_reports() {
+        use PrimaryActivation::*;
+        let now = Instant::now();
+        for (first, second) in [(MouseButton, MouseSelect), (MouseSelect, MouseButton)] {
+            let state = TrayState::new(Arc::new(Signals::default()), Locale::En, 0);
+            assert!(state.accept_primary(first, now));
+            assert!(state.accept_primary(Keyboard, now));
+            assert!(!state.accept_primary(second, now + Duration::from_millis(10)));
+            // A new callback after consuming the pair remains observable.
+            assert!(state.accept_primary(first, now + Duration::from_millis(20)));
+            // Raw-only or semantic-only repeated clicks must not be dropped.
+            assert!(state.accept_primary(first, now + Duration::from_millis(30)));
+            assert!(state.accept_primary(second, now + Duration::from_secs(1)));
+        }
+    }
+
+    #[test]
     fn menu_cancel_reopen_and_nested_events_do_not_duplicate_actions() {
         let signals = Arc::new(Signals::default());
         let state = TrayState::new(signals.clone(), Locale::En, 0);
+        signals.ready.store(true, Ordering::Release);
         state.run_menu(|| {
             state.run_menu(|| panic!("nested popup must not start"));
-            0
+            Some(0)
         });
         assert!(!signals.take_show());
         assert!(!signals.take_quit());
-        state.run_menu(|| MENU_SHOW);
+        state.run_menu(|| Some(MENU_SHOW));
         assert!(signals.take_show());
         assert!(!signals.take_show());
         assert!(!signals.take_quit());
-        state.run_menu(|| 1234);
+        state.run_menu(|| Some(1234));
         assert!(!signals.take_show());
         assert!(!signals.take_quit());
-        state.run_menu(|| MENU_QUIT);
+        state.run_menu(|| Some(MENU_QUIT));
         assert!(signals.take_quit());
         assert!(!signals.take_quit());
         assert!(!signals.take_show());
+    }
+
+    #[test]
+    fn denied_foreground_never_tracks_or_signals_then_allows_reopen() {
+        let signals = Arc::new(Signals::default());
+        let state = TrayState::new(signals.clone(), Locale::En, 0);
+        signals.ready.store(true, Ordering::Release);
+        state.run_menu(|| {
+            track_if_foreground(false, || false, || panic!("denied menu must not track"))
+        });
+        assert!(!signals.take_show());
+        assert!(!signals.take_quit());
+        state.run_menu(|| track_if_foreground(false, || true, || MENU_SHOW));
+        assert!(signals.take_show());
+        assert!(!signals.take_quit());
+        state.run_menu(|| track_if_foreground(true, || panic!("no fallback needed"), || 0));
+        assert!(!signals.take_show());
+        assert!(!signals.take_quit());
+    }
+
+    #[test]
+    fn commands_returned_after_reentrant_destroy_are_ignored() {
+        for command in [MENU_SHOW, MENU_QUIT] {
+            let signals = Arc::new(Signals::default());
+            let state = TrayState::new(signals.clone(), Locale::En, 0);
+            signals.ready.store(true, Ordering::Release);
+            state.run_menu(|| {
+                // The same readiness transition as WM_DESTROY in the modal loop.
+                state.mark_unready();
+                assert!(!state.menu_is_current());
+                Some(command)
+            });
+            assert!(!signals.take_show());
+            assert!(!signals.take_quit());
+            assert!(!state.menu_open.get());
+            state.run_menu(|| panic!("destroyed tray must not track"));
+        }
+    }
+
+    #[test]
+    fn explorer_renewal_cannot_revive_an_old_popup() {
+        let signals = Arc::new(Signals::default());
+        let state = TrayState::new(signals.clone(), Locale::En, 0);
+        signals.ready.store(true, Ordering::Release);
+        state.run_menu(|| {
+            assert!(state.menu_is_current());
+            state.mark_unready();
+            signals.ready.store(true, Ordering::Release);
+            assert!(!state.menu_is_current());
+            Some(MENU_QUIT)
+        });
+        assert!(!signals.take_show());
+        assert!(!signals.take_quit());
+        state.run_menu(|| {
+            assert!(state.menu_is_current());
+            Some(MENU_SHOW)
+        });
+        assert!(signals.take_show());
+        assert!(!signals.take_quit());
     }
 
     #[test]
