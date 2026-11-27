@@ -1,8 +1,9 @@
 //! Bind the new process to a private kill-on-close Job before it can run.
 use std::{
     ffi::OsStr,
-    io::{self, Error},
-    mem::{size_of, size_of_val},
+    io::{self, Error, ErrorKind},
+    mem::{offset_of, size_of, size_of_val},
+    net::{Ipv4Addr, SocketAddrV4},
     os::windows::{
         ffi::OsStrExt,
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
@@ -14,7 +15,12 @@ use std::{
 };
 
 use windows_sys::Win32::{
-    Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{ERROR_INSUFFICIENT_BUFFER, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
+        MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+    },
+    Networking::WinSock::{AF_INET, AF_INET6},
     System::{
         JobObjects::{
             CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -23,9 +29,10 @@ use windows_sys::Win32::{
         },
         Threading::{
             CREATE_NO_WINDOW, CreateProcessW, DeleteProcThreadAttributeList,
-            EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
-            LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
-            STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+            EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, GetProcessId,
+            InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+            PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTUPINFOEXW,
+            UpdateProcThreadAttribute, WaitForSingleObject,
         },
     },
 };
@@ -143,6 +150,14 @@ impl OwnedChild {
         Ok(Self { job, process })
     }
 
+    pub(super) fn id(&self) -> io::Result<u32> {
+        let pid = unsafe { GetProcessId(self.process.as_raw_handle()) };
+        if pid == 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(pid)
+    }
+
     pub(super) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         match unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) } {
             WAIT_TIMEOUT => Ok(None),
@@ -210,9 +225,150 @@ fn quote(value: &OsStr, out: &mut Vec<u16>) -> io::Result<()> {
     Ok(())
 }
 
+fn visit_listener_table<Row: Copy>(
+    family: u16,
+    row_offset: usize,
+    mut visit: impl FnMut(Row) -> io::Result<()>,
+) -> io::Result<()> {
+    const COUNT_SIZE: usize = size_of::<u32>();
+    const MAX_TABLE_SIZE: usize = 16 * 1024 * 1024;
+    let mut size = 0;
+    let query = |buffer, size| unsafe {
+        GetExtendedTcpTable(
+            buffer,
+            size,
+            0,
+            u32::from(family),
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    let status = query(null_mut(), &mut size);
+    if status != ERROR_INSUFFICIENT_BUFFER {
+        return Err(Error::from_raw_os_error(status as i32));
+    }
+    // The listener table can grow between the size and data calls.
+    for _ in 0..3 {
+        let byte_count = size as usize;
+        if !(row_offset..=MAX_TABLE_SIZE).contains(&byte_count) || row_offset < COUNT_SIZE {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "invalid Windows TCP table size",
+            ));
+        }
+        let mut buffer = vec![0_u32; byte_count.div_ceil(COUNT_SIZE)];
+        let status = query(buffer.as_mut_ptr().cast(), &mut size);
+        if status == ERROR_INSUFFICIENT_BUFFER {
+            continue;
+        }
+        if status != 0 {
+            return Err(Error::from_raw_os_error(status as i32));
+        }
+        let count = buffer[0] as usize;
+        if count > (byte_count - row_offset) / size_of::<Row>() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "truncated Windows TCP table",
+            ));
+        }
+        let start = buffer.as_ptr().cast::<u8>();
+        for index in 0..count {
+            // The only row types are Windows ABI structs of integer fields.
+            let row = unsafe {
+                start
+                    .add(row_offset + index * size_of::<Row>())
+                    .cast::<Row>()
+                    .read_unaligned()
+            };
+            visit(row)?;
+        }
+        return Ok(());
+    }
+    Err(Error::other(
+        "Windows TCP listener table changed during ownership check",
+    ))
+}
+
+pub(super) fn verify_loopback_listener_owner(pid: u32, endpoint: SocketAddrV4) -> io::Result<()> {
+    if *endpoint.ip() != Ipv4Addr::LOCALHOST || endpoint.port() == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "expected a nonzero IPv4 loopback listener",
+        ));
+    }
+    let mut found = false;
+    let ambiguous = || {
+        Error::other(format!(
+            "mixed listener at {endpoint} has ambiguous ownership"
+        ))
+    };
+    visit_listener_table::<MIB_TCPROW_OWNER_PID>(
+        AF_INET,
+        offset_of!(MIB_TCPTABLE_OWNER_PID, table),
+        |row| {
+            if u16::from_be(row.dwLocalPort as u16) == endpoint.port() {
+                if found || row.dwLocalAddr.to_ne_bytes() != Ipv4Addr::LOCALHOST.octets() {
+                    return Err(ambiguous());
+                }
+                if row.dwOwningPid != pid {
+                    return Err(Error::new(
+                        ErrorKind::PermissionDenied,
+                        format!(
+                            "mixed listener at {endpoint} is not owned by the managed Meow process"
+                        ),
+                    ));
+                }
+                found = true;
+            }
+            Ok(())
+        },
+    )?;
+    visit_listener_table::<MIB_TCP6ROW_OWNER_PID>(
+        AF_INET6,
+        offset_of!(MIB_TCP6TABLE_OWNER_PID, table),
+        |row| {
+            if u16::from_be(row.dwLocalPort as u16) == endpoint.port() {
+                return Err(ambiguous());
+            }
+            Ok(())
+        },
+    )?;
+    if found {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorKind::NotFound,
+            format!("no mixed listener at {endpoint}"),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_listener_ownership_requires_matching_pid_and_exact_loopback() -> io::Result<()> {
+        use std::net::TcpListener;
+
+        let local = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let port = local.local_addr()?.port();
+        let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+        verify_loopback_listener_owner(std::process::id(), endpoint)?;
+        let error = verify_loopback_listener_owner(std::process::id() ^ 1, endpoint)
+            .expect_err("the same socket must not verify against a different PID");
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(
+            verify_loopback_listener_owner(
+                std::process::id(),
+                SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidInput,
+        );
+        Ok(())
+    }
 
     #[test]
     #[ignore = "helper for killing a session owner; not a standalone test"]

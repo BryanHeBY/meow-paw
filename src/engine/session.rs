@@ -265,6 +265,24 @@ impl Session {
         self.process.try_wait().ok()?.is_none().then_some(port)
     }
 
+    /// Fail closed before exporting the mixed port to an operating-system proxy.
+    /// Ordinary Paw sessions can still run on platforms without socket-owner evidence.
+    pub fn verified_mixed_listener_addr(&mut self) -> io::Result<SocketAddrV4> {
+        if self.process.try_wait()?.is_some() {
+            return Err(Error::other("the managed Meow process has exited"));
+        }
+        self.controller.verify().map_err(Error::other)?;
+        let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, self.mixed_port);
+        #[cfg(target_os = "linux")]
+        linux::verify_loopback_listener_owner(self.process.id(), endpoint)?;
+        #[cfg(windows)]
+        windows::verify_loopback_listener_owner(self.process.id()?, endpoint)?;
+        if self.process.try_wait()?.is_some() {
+            return Err(Error::other("the managed Meow process has exited"));
+        }
+        Ok(endpoint)
+    }
+
     pub fn status(&mut self) -> io::Result<Option<ExitStatus>> {
         self.process.try_wait()
     }
