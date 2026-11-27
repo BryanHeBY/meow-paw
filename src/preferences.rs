@@ -135,6 +135,27 @@ impl Preferences {
             )
     }
 
+    #[cfg(any(target_os = "linux", windows))]
+    pub fn saved_mixed_port(&self) -> u16 {
+        self.selected.mixed_port.map_or(
+            meow_paw::engine::session::DEFAULT_MIXED_PORT,
+            std::num::NonZeroU16::get,
+        )
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    pub fn has_mixed_port_override(&self) -> bool {
+        self.mixed_port_override.is_some()
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    pub fn save_mixed_port(&mut self, port: std::num::NonZeroU16) -> io::Result<()> {
+        self.persist(|next| {
+            next.mixed_port = Some(port);
+            Ok(())
+        })
+    }
+
     pub fn resolve(
         &self,
         cli_engine: Option<PathBuf>,
@@ -354,8 +375,13 @@ mod tests {
         assert_eq!(prefs.mixed_port(), 18790);
         prefs.set_mixed_port_override(std::num::NonZeroU16::new(28790));
         assert_eq!(prefs.mixed_port(), 28790);
+        prefs
+            .save_mixed_port(std::num::NonZeroU16::new(38790).unwrap())
+            .unwrap();
+        assert_eq!(prefs.saved_mixed_port(), 38790);
+        assert_eq!(prefs.mixed_port(), 28790);
         prefs.set_reduce_motion(true).unwrap();
-        assert_eq!(Preferences::open(file.clone()).unwrap().mixed_port(), 18790);
+        assert_eq!(Preferences::open(file.clone()).unwrap().mixed_port(), 38790);
         fs::write(&file, r#"{"mixed_port":0}"#).unwrap();
         assert!(Preferences::open(file).is_err());
     }

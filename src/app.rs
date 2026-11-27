@@ -19,7 +19,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
     thread::{self, JoinHandle},
@@ -614,6 +614,7 @@ pub struct Desktop {
     snapshot: Arc<Mutex<Snapshot>>,
     stop: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
+    next_mixed_port: Arc<AtomicU16>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -627,12 +628,14 @@ impl Desktop {
         let snapshot = Arc::new(Mutex::new(Snapshot::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let quit = Arc::new(AtomicBool::new(false));
+        let next_mixed_port = Arc::new(AtomicU16::new(mixed_port));
         let worker = {
             let (snapshot, stop, quit) = (snapshot.clone(), stop.clone(), quit.clone());
+            let next_mixed_port = Arc::clone(&next_mixed_port);
             thread::Builder::new()
                 .name("paw-meow-owner".into())
                 .spawn(move || {
-                    run(meow, mixed_port, receiver, &snapshot, &stop, &quit);
+                    run(meow, &next_mixed_port, receiver, &snapshot, &stop, &quit);
                 })?
         };
         Ok(Self {
@@ -640,8 +643,14 @@ impl Desktop {
             snapshot,
             stop,
             quit,
+            next_mixed_port,
             worker: Some(worker),
         })
+    }
+
+    /// Change the port for future starts without touching the running session.
+    pub fn set_next_mixed_port(&self, port: std::num::NonZeroU16) {
+        self.next_mixed_port.store(port.get(), Ordering::Release);
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -875,7 +884,7 @@ enum ProbeCompletion {
 
 fn run(
     binary: PathBuf,
-    mixed_port: u16,
+    next_mixed_port: &AtomicU16,
     receiver: Receiver<Command>,
     snapshot: &Mutex<Snapshot>,
     stop: &AtomicBool,
@@ -989,6 +998,7 @@ fn run(
                     s.diagnostics.clear();
                     s.action_error = None;
                 });
+                let mixed_port = next_mixed_port.load(Ordering::Acquire);
                 let result = input.load().and_then(|profile| {
                     change(snapshot, |s| s.diagnostics = profile.diagnostics());
                     Session::launch_with_mixed_port(&binary, &profile, mixed_port, cancelled)
@@ -1666,6 +1676,7 @@ mod tests {
             })),
             stop: Arc::new(AtomicBool::new(false)),
             quit: Arc::new(AtomicBool::new(false)),
+            next_mixed_port: Arc::new(AtomicU16::new(0)),
             worker: None,
         };
         (desktop, receiver)
@@ -2213,6 +2224,7 @@ mod tests {
             snapshot: Arc::new(Mutex::new(snapshot)),
             stop: Arc::new(AtomicBool::new(false)),
             quit: Arc::new(AtomicBool::new(false)),
+            next_mixed_port: Arc::new(AtomicU16::new(0)),
             worker: None,
         };
         desktop.stop();

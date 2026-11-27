@@ -453,6 +453,10 @@ pub struct Paw {
     preference_warning: Option<String>,
     language_save_failed: bool,
     motion_save_failed: bool,
+    #[cfg(any(target_os = "linux", windows))]
+    mixed_port_input: Entity<InputState>,
+    #[cfg(any(target_os = "linux", windows))]
+    mixed_port_notice: Option<Message>,
     language_choice_focus: [FocusHandle; 3],
     engine_browse_focus: FocusHandle,
     engine_reveal_focus: FocusHandle,
@@ -656,6 +660,11 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     let log_filter = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw.read(cx).probe_url.read(cx).value();
     let probe_url = cx.new(|cx| InputState::new(window, cx).default_value(query));
+    #[cfg(any(target_os = "linux", windows))]
+    let mixed_port_input = {
+        let value = paw.read(cx).mixed_port_input.read(cx).value();
+        cx.new(|cx| InputState::new(window, cx).default_value(value))
+    };
     let query = paw.read(cx).subscription_name.read(cx).value();
     let subscription_name = cx.new(|cx| InputState::new(window, cx).default_value(query));
     let query = paw
@@ -668,6 +677,7 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     paw.update(cx, |state, cx| {
         #[cfg(any(target_os = "linux", windows))]
         {
+            state.mixed_port_input = mixed_port_input;
             for (name, tools) in &mut state.group_route_tools {
                 for (field, slot) in [
                     (GroupRouteField::Url, &mut tools.url),
@@ -721,6 +731,10 @@ pub fn open(
     let probe_url = cx.new(|cx| InputState::new(window, cx));
     let subscription_url = cx.new(|cx| InputState::new(window, cx));
     let subscription_name = cx.new(|cx| InputState::new(window, cx));
+    #[cfg(any(target_os = "linux", windows))]
+    let mixed_port_input = cx.new(|cx| {
+        InputState::new(window, cx).default_value(preferences.saved_mixed_port().to_string())
+    });
     cx.new(|cx| {
         let subscription_url_changes = subscribe_subscription_url(&subscription_url, cx);
         let log_filter_changes = subscribe_search(&log_filter, cx);
@@ -783,6 +797,10 @@ pub fn open(
             preference_warning: warning.map(str::to_owned),
             language_save_failed: false,
             motion_save_failed: false,
+            #[cfg(any(target_os = "linux", windows))]
+            mixed_port_input,
+            #[cfg(any(target_os = "linux", windows))]
+            mixed_port_notice: None,
             language_choice_focus: std::array::from_fn(|_| cx.focus_handle()),
             engine_browse_focus: cx.focus_handle(),
             engine_reveal_focus: cx.focus_handle(),
@@ -4739,6 +4757,74 @@ impl Paw {
                         }),
                 )
             });
+        #[cfg(any(target_os = "linux", windows))]
+        let engine = engine.child(
+            div()
+                .mx_4()
+                .py_3()
+                .border_t_1()
+                .border_color(rgb(LINE))
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(self.locale.message(Message::MixedProxyPort)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(FAINT))
+                        .child(self.locale.message(Message::MixedProxyPortHelp)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().w(px(125.)).child(Input::new(&self.mixed_port_input)))
+                        .child(
+                            subscription_button(
+                                "save-mixed-port",
+                                self.locale.message(Message::MixedProxyPortSave),
+                                false,
+                                cx,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let value = this.mixed_port_input.read(cx).value();
+                                this.mixed_port_notice =
+                                    Some(match value.trim().parse::<std::num::NonZeroU16>() {
+                                        Err(_) => Message::MixedProxyPortInvalid,
+                                        Ok(port) => match this.preferences.save_mixed_port(port) {
+                                            Err(_) => Message::MixedProxyPortSaveFailed,
+                                            Ok(()) => {
+                                                if !this.preferences.has_mixed_port_override()
+                                                    && let Some(desktop) = &this.desktop
+                                                {
+                                                    desktop.set_next_mixed_port(port);
+                                                }
+                                                Message::MixedProxyPortSaved
+                                            }
+                                        },
+                                    });
+                                cx.notify();
+                            })),
+                        ),
+                )
+                .when(self.preferences.has_mixed_port_override(), |row| {
+                    row.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(FAINT))
+                            .child(self.locale.message(Message::MixedProxyPortCli)),
+                    )
+                })
+                .when_some(self.mixed_port_notice, |row, notice| {
+                    row.child(div().text_xs().child(self.locale.message(notice)))
+                }),
+        );
         let reduce_motion = self.preferences.reduce_motion();
         let app = settings_card("Meow Paw", "icons/house.svg")
             .child(form_row(

@@ -132,6 +132,13 @@ pub enum Message {
     CurrentLanguage,
     LanguageSystem,
     LanguageRestart,
+    MixedProxyPort,
+    MixedProxyPortHelp,
+    MixedProxyPortCli,
+    MixedProxyPortSave,
+    MixedProxyPortSaved,
+    MixedProxyPortInvalid,
+    MixedProxyPortSaveFailed,
     ReduceMotion,
     ReduceMotionDescription,
     ReduceMotionSaveFailed,
@@ -464,6 +471,17 @@ fn english(key: Message) -> &'static str {
         Message::SortName => "Sort: Name",
         Message::Test => "Test",
         Message::Refresh => "Refresh",
+        Message::MixedProxyPort => "Mixed proxy port",
+        Message::MixedProxyPortHelp => {
+            "Listens on 127.0.0.1. Applies the next time you start the engine."
+        }
+        Message::MixedProxyPortCli => {
+            "The launch flag overrides this saved port until you relaunch Paw."
+        }
+        Message::MixedProxyPortSave => "Save port",
+        Message::MixedProxyPortSaved => "Port saved. The active session is unchanged.",
+        Message::MixedProxyPortInvalid => "Enter a port from 1 to 65535.",
+        Message::MixedProxyPortSaveFailed => "Could not save the mixed proxy port.",
         Message::ReduceMotion => "Reduce motion",
         Message::ReduceMotionDescription => {
             "Skip the proxy list expansion animation. Applies immediately."
@@ -762,6 +780,13 @@ fn chinese(key: Message) -> &'static str {
         Message::SortName => "排序：名称",
         Message::Test => "测试",
         Message::Refresh => "刷新",
+        Message::MixedProxyPort => "混合代理端口",
+        Message::MixedProxyPortHelp => "仅监听 127.0.0.1，下次启动内核时生效。",
+        Message::MixedProxyPortCli => "本次启动参数优先；重启 Paw 后使用保存的端口。",
+        Message::MixedProxyPortSave => "保存端口",
+        Message::MixedProxyPortSaved => "端口已保存，当前会话不受影响。",
+        Message::MixedProxyPortInvalid => "请输入 1 到 65535 之间的端口。",
+        Message::MixedProxyPortSaveFailed => "未能保存混合代理端口。",
         Message::ReduceMotion => "减少动态效果",
         Message::ReduceMotionDescription => "跳过代理列表展开动画，立即生效。",
         Message::ReduceMotionSaveFailed => "未能保存动态效果偏好。",
