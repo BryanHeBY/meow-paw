@@ -30,8 +30,8 @@ pub fn start(locale: meow_paw::i18n::Locale) -> Arc<Signals> {
     #[cfg(target_os = "linux")]
     linux::start(signals.clone(), locale);
     #[cfg(windows)]
-    windows::start(signals.clone());
-    #[cfg(not(target_os = "linux"))]
+    windows::start(signals.clone(), locale);
+    #[cfg(not(any(target_os = "linux", windows)))]
     let _ = locale;
     signals
 }

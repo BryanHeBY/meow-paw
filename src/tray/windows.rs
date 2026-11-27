@@ -1,5 +1,6 @@
 //! Shell notification icons, backed by a hidden top-level Win32 window.
 use super::{Signals, paw_pixel};
+use meow_paw::i18n::Locale;
 use std::{
     cell::Cell,
     mem::size_of,
@@ -8,19 +9,24 @@ use std::{
 };
 use windows_sys::{
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Shell::{
-                NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION,
-                NIN_SELECT, NINF_KEY, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
+                NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETFOCUS,
+                NIM_SETVERSION, NIN_SELECT, NINF_KEY, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
+                NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect, Shell_NotifyIconW,
             },
             WindowsAndMessaging::{
-                CREATESTRUCTW, CreateIcon, CreateWindowExW, DefWindowProcW, DestroyIcon,
-                DispatchMessageW, FindWindowW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW,
-                HICON, MSG, RegisterClassW, RegisterWindowMessageW, SetTimer, SetWindowLongPtrW,
-                TranslateMessage, UnregisterClassW, WM_APP, WM_CONTEXTMENU, WM_DESTROY,
-                WM_LBUTTONUP, WM_NCCREATE, WM_TIMER, WNDCLASSW,
+                AppendMenuW, CREATESTRUCTW, CreateIcon, CreatePopupMenu, CreateWindowExW,
+                DefWindowProcW, DestroyIcon, DestroyMenu, DispatchMessageW, FindWindowW,
+                GWLP_USERDATA, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
+                HICON, HMENU, MF_STRING, MSG, PostMessageW, RegisterClassW, RegisterWindowMessageW,
+                SM_MENUDROPALIGNMENT, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+                TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_RIGHTBUTTON,
+                TPMPARAMS, TrackPopupMenuEx, TranslateMessage, UnregisterClassW, WM_APP,
+                WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP, WM_NCCREATE, WM_NULL, WM_RBUTTONUP,
+                WM_TIMER, WNDCLASSW,
             },
         },
     },
@@ -30,21 +36,108 @@ use windows_sys::{
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const CALLBACK: u32 = WM_APP + 3;
 const ID: u32 = 1;
+const MENU_SHOW: i32 = 1;
+const MENU_QUIT: i32 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CallbackAction {
+    Show,
+    Menu,
+}
+
+fn callback_action(version_4: bool, wparam: WPARAM, lparam: LPARAM) -> Option<CallbackAction> {
+    // V4 packs the icon ID in HIWORD(lParam). Older shells use wParam for the ID.
+    match version_4 {
+        true if (lparam as u32 >> 16) == ID => match lparam as u32 & 0xffff {
+            NIN_SELECT | NIN_KEYSELECT => Some(CallbackAction::Show),
+            // Handle the semantic callback only, not raw right-button events too.
+            WM_CONTEXTMENU => Some(CallbackAction::Menu),
+            _ => None,
+        },
+        false if wparam == ID as WPARAM => match lparam as u32 {
+            WM_LBUTTONUP => Some(CallbackAction::Show),
+            WM_RBUTTONUP => Some(CallbackAction::Menu),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+struct PopupMenu(HMENU);
+
+impl PopupMenu {
+    fn new(locale: Locale) -> Option<Self> {
+        let handle = unsafe { CreatePopupMenu() };
+        if handle.is_null() {
+            return None;
+        }
+        let menu = Self(handle);
+        let (show, quit) = match locale {
+            Locale::En => (w!("Show"), w!("Quit")),
+            Locale::ZhCn => (w!("显示"), w!("退出")),
+        };
+        // Strings are copied into the menu; ownership of the HMENU remains here.
+        let populated = unsafe {
+            AppendMenuW(menu.0, MF_STRING, MENU_SHOW as usize, show) != 0
+                && AppendMenuW(menu.0, MF_STRING, MENU_QUIT as usize, quit) != 0
+        };
+        populated.then_some(menu)
+    }
+}
+
+impl Drop for PopupMenu {
+    fn drop(&mut self) {
+        unsafe { DestroyMenu(self.0) };
+    }
+}
+
+fn icon_rectangle(window: HWND) -> Option<RECT> {
+    let icon = NOTIFYICONIDENTIFIER {
+        cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+        hWnd: window,
+        uID: ID,
+        ..Default::default()
+    };
+    let mut rect = RECT::default();
+    (unsafe { Shell_NotifyIconGetRect(&icon, &mut rect) } >= 0
+        && rect.left < rect.right
+        && rect.top < rect.bottom)
+        .then_some(rect)
+}
+
+fn popup_position(rect: RECT, right: bool) -> (POINT, TPMPARAMS) {
+    (
+        POINT {
+            x: if right { rect.right } else { rect.left },
+            y: rect.bottom,
+        },
+        TPMPARAMS {
+            cbSize: size_of::<TPMPARAMS>() as u32,
+            rcExclude: rect,
+        },
+    )
+}
 
 struct TrayState {
     shell: Cell<HWND>,
     icon: HICON,
     signals: Arc<Signals>,
     taskbar_created: u32,
+    locale: Locale,
+    version_4: Cell<bool>,
+    menu_open: Cell<bool>,
 }
 
 impl TrayState {
-    fn new(signals: Arc<Signals>) -> Self {
+    fn new(signals: Arc<Signals>, locale: Locale, taskbar_created: u32) -> Self {
         Self {
             shell: Cell::new(null_mut()),
             icon: null_mut(),
             signals,
-            taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
+            taskbar_created,
+            locale,
+            version_4: Cell::new(false),
+            menu_open: Cell::new(false),
         }
     }
 
@@ -68,6 +161,7 @@ impl TrayState {
             return;
         }
         self.signals.ready.store(false, Ordering::Release);
+        self.version_4.set(false);
         self.shell.set(shell);
         if shell.is_null() || self.icon.is_null() {
             return;
@@ -75,9 +169,65 @@ impl TrayState {
         let mut data = self.data(window);
         if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } != 0 {
             data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-            unsafe { Shell_NotifyIconW(NIM_SETVERSION, &data) };
+            self.version_4
+                .set(unsafe { Shell_NotifyIconW(NIM_SETVERSION, &data) } != 0);
             self.signals.ready.store(true, Ordering::Release);
         }
+    }
+
+    fn run_menu(&self, open: impl FnOnce() -> i32) {
+        // TrackPopupMenuEx pumps messages on this same thread. A nested or
+        // duplicate context event must not start a second modal loop.
+        if self.menu_open.replace(true) {
+            return;
+        }
+        let command = open();
+        self.menu_open.set(false);
+        match command {
+            MENU_SHOW => self.signals.show.store(true, Ordering::Release),
+            MENU_QUIT => self.signals.quit.store(true, Ordering::Release),
+            _ => {}
+        }
+    }
+
+    fn show_menu(&self, window: HWND) {
+        self.run_menu(|| {
+            let Some(menu) = PopupMenu::new(self.locale) else {
+                return 0;
+            };
+            let right = unsafe { GetSystemMetrics(SM_MENUDROPALIGNMENT) } != 0;
+            let mut anchor = POINT::default();
+            // A keyboard request may arrive with the cursor on another display.
+            // Use our icon rectangle, not screen coordinates from the callback.
+            let exclude = icon_rectangle(window).map(|rect| {
+                let (position, params) = popup_position(rect, right);
+                anchor = position;
+                params
+            });
+            if exclude.is_none() && unsafe { GetCursorPos(&mut anchor) } == 0 {
+                return 0;
+            }
+            let params = exclude.as_ref().map_or(null(), std::ptr::from_ref);
+            let alignment = if right { TPM_RIGHTALIGN } else { TPM_LEFTALIGN };
+            unsafe {
+                SetForegroundWindow(window);
+                // Only a return value from this owned menu can generate Quit.
+                let command = TrackPopupMenuEx(
+                    menu.0,
+                    alignment | TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                    anchor.x,
+                    anchor.y,
+                    window,
+                    params,
+                );
+                // Follow the notification-area dismissal protocol before another open.
+                PostMessageW(window, WM_NULL, 0, 0);
+                if command == 0 {
+                    Shell_NotifyIconW(NIM_SETFOCUS, &self.data(window));
+                }
+                command
+            }
+        });
     }
 }
 
@@ -96,16 +246,19 @@ unsafe extern "system" fn window_proc(
     if address != 0 {
         // The message-loop thread owns the Box until the window is destroyed.
         let state = unsafe { &*(address as *const TrayState) };
-        if message == CALLBACK
-            && matches!(
-                lparam as u32 & 0xffff,
-                NIN_SELECT | NIN_KEYSELECT | WM_LBUTTONUP | WM_CONTEXTMENU
-            )
-        {
-            state.signals.show.store(true, Ordering::Release);
+        if message == CALLBACK {
+            if state.signals.ready() {
+                match callback_action(state.version_4.get(), wparam, lparam) {
+                    Some(CallbackAction::Show) if !state.menu_open.get() => {
+                        state.signals.show.store(true, Ordering::Release);
+                    }
+                    Some(CallbackAction::Menu) => state.show_menu(window),
+                    _ => {}
+                }
+            }
             return 0;
         }
-        if message == WM_TIMER || message == state.taskbar_created {
+        if message == WM_TIMER || (state.taskbar_created != 0 && message == state.taskbar_created) {
             state.retry(window, message != WM_TIMER);
             return 0;
         }
@@ -122,7 +275,7 @@ unsafe extern "system" fn window_proc(
     unsafe { DefWindowProcW(window, message, wparam, lparam) }
 }
 
-pub(super) fn start(signals: Arc<Signals>) {
+pub(super) fn start(signals: Arc<Signals>, locale: Locale) {
     let _ = std::thread::Builder::new()
         .name("paw-notification-icon".into())
         .spawn(move || {
@@ -137,7 +290,8 @@ pub(super) fn start(signals: Arc<Signals>) {
             if unsafe { RegisterClassW(&definition) } == 0 {
                 return;
             }
-            let mut state = Box::new(TrayState::new(signals));
+            let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+            let mut state = Box::new(TrayState::new(signals, locale, taskbar_created));
             state.icon = {
                 let mut and_mask = [0_u8; 128];
                 let mut pixels = Vec::with_capacity(4096);
@@ -185,4 +339,116 @@ pub(super) fn start(signals: Arc<Signals>) {
             }
             unsafe { UnregisterClassW(class, module) };
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetMenuItemCount, GetMenuItemID, GetMenuStringW, MF_BYPOSITION, WM_COMMAND,
+    };
+
+    fn v4(event: u32, icon: u32) -> LPARAM {
+        ((icon << 16) | event) as LPARAM
+    }
+
+    #[test]
+    fn callback_respects_version_and_icon_ownership() {
+        for event in [NIN_SELECT, NIN_KEYSELECT] {
+            assert_eq!(
+                callback_action(true, 0, v4(event, ID)),
+                Some(CallbackAction::Show)
+            );
+        }
+        assert_eq!(
+            callback_action(false, ID as WPARAM, WM_LBUTTONUP as LPARAM),
+            Some(CallbackAction::Show)
+        );
+        assert_eq!(
+            callback_action(true, 0, v4(WM_CONTEXTMENU, ID)),
+            Some(CallbackAction::Menu)
+        );
+        assert_eq!(
+            callback_action(false, ID as WPARAM, WM_RBUTTONUP as LPARAM),
+            Some(CallbackAction::Menu)
+        );
+        for event in [WM_LBUTTONUP, WM_RBUTTONUP, WM_COMMAND] {
+            assert_eq!(callback_action(true, 0, v4(event, ID)), None);
+        }
+        assert_eq!(callback_action(true, 0, v4(WM_CONTEXTMENU, ID + 1)), None);
+        assert_eq!(
+            callback_action(false, (ID + 1) as WPARAM, WM_RBUTTONUP as LPARAM),
+            None
+        );
+    }
+
+    #[test]
+    fn menu_cancel_reopen_and_nested_events_do_not_duplicate_actions() {
+        let signals = Arc::new(Signals::default());
+        let state = TrayState::new(signals.clone(), Locale::En, 0);
+        state.run_menu(|| {
+            state.run_menu(|| panic!("nested popup must not start"));
+            0
+        });
+        assert!(!signals.take_show());
+        assert!(!signals.take_quit());
+        state.run_menu(|| MENU_SHOW);
+        assert!(signals.take_show());
+        assert!(!signals.take_show());
+        assert!(!signals.take_quit());
+        state.run_menu(|| 1234);
+        assert!(!signals.take_show());
+        assert!(!signals.take_quit());
+        state.run_menu(|| MENU_QUIT);
+        assert!(signals.take_quit());
+        assert!(!signals.take_quit());
+        assert!(!signals.take_show());
+    }
+
+    #[test]
+    fn popup_anchor_keeps_signed_icon_coordinates_and_excludes_icon() {
+        let icon = RECT {
+            left: -80,
+            top: -40,
+            right: -60,
+            bottom: -20,
+        };
+        for (right, expected_x) in [(false, -80), (true, -60)] {
+            let (point, params) = popup_position(icon, right);
+            assert_eq!((point.x, point.y), (expected_x, -20));
+            let excluded = params.rcExclude;
+            assert_eq!(
+                (excluded.left, excluded.top, excluded.right, excluded.bottom),
+                (-80, -40, -60, -20)
+            );
+        }
+    }
+
+    #[test]
+    fn native_popup_contains_only_the_two_localized_actions() {
+        for (locale, labels) in [
+            (Locale::En, ["Show", "Quit"]),
+            (Locale::ZhCn, ["显示", "退出"]),
+        ] {
+            let menu = PopupMenu::new(locale).expect("allocate an unattached Win32 menu");
+            assert_eq!(unsafe { GetMenuItemCount(menu.0) }, 2);
+            for (position, (id, label)) in
+                [MENU_SHOW, MENU_QUIT].into_iter().zip(labels).enumerate()
+            {
+                assert_eq!(unsafe { GetMenuItemID(menu.0, position as i32) }, id as u32);
+                let mut buffer = [0; 16];
+                let length = unsafe {
+                    GetMenuStringW(
+                        menu.0,
+                        position as u32,
+                        buffer.as_mut_ptr(),
+                        buffer.len() as i32,
+                        MF_BYPOSITION,
+                    )
+                };
+                assert!(length > 0);
+                assert_eq!(String::from_utf16_lossy(&buffer[..length as usize]), label);
+            }
+        }
+    }
 }
