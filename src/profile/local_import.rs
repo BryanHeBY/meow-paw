@@ -7,9 +7,25 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Validate a user-selected local YAML file and save a private copy.
-/// The caller decides whether to register or select this imported profile.
-pub fn copy_yaml(path: &Path, directory: &Path) -> io::Result<PathBuf> {
+/// An unregistered copy. Dropping it rolls back the complete staged file.
+pub struct StagedYaml {
+    directory: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl StagedYaml {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Retain the copy once its path has been registered successfully.
+    pub fn keep(self) {
+        let _ = self.directory.keep();
+    }
+}
+
+/// Validate a user-selected local YAML file and stage a private copy.
+pub fn stage_yaml(path: &Path, directory: &Path) -> io::Result<StagedYaml> {
     let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "Select a regular YAML file");
     let name = path.file_name().ok_or_else(invalid)?;
     if !path
@@ -64,12 +80,35 @@ pub fn copy_yaml(path: &Path, directory: &Path) -> io::Result<PathBuf> {
     staged
         .persist_noclobber(&path)
         .map_err(|error| error.error)?;
-    Ok(destination.keep().join(name))
+    Ok(StagedYaml {
+        directory: destination,
+        path,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn copy_yaml(path: &Path, destination: &Path) -> io::Result<PathBuf> {
+        let staged = stage_yaml(path, destination)?;
+        let path = staged.path().to_path_buf();
+        staged.keep();
+        Ok(path)
+    }
+
+    #[test]
+    fn dropping_unregistered_copy_rolls_back_only_its_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("original.yaml");
+        fs::write(&source, "mode: rule").unwrap();
+        let stage = stage_yaml(&source, &root.path().join("imports")).unwrap();
+        let path = stage.path().to_path_buf();
+        assert!(path.exists());
+        drop(stage);
+        assert!(!path.parent().unwrap().exists());
+        assert_eq!(fs::read_to_string(source).unwrap(), "mode: rule");
+    }
 
     #[test]
     fn same_name_imports_are_independent_and_preserve_the_original() {

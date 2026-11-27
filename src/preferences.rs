@@ -271,6 +271,39 @@ impl Preferences {
         })
     }
 
+    /// Publish staged imports as one list update without selecting any of them.
+    #[allow(dead_code)] // Called by the desktop import workflow.
+    pub fn register_local_imports(
+        &mut self,
+        staged: Vec<meow_paw::profile::local_import::StagedYaml>,
+    ) -> io::Result<()> {
+        if staged.is_empty() {
+            return Ok(());
+        }
+        if !self.has_persistent_file() {
+            return Err(io::Error::other("Preferences unavailable"));
+        }
+        self.persist(|next| {
+            for item in &staged {
+                let path = std::path::absolute(item.path())?;
+                if !next.profiles.contains(&path) {
+                    if next.profiles.len() >= PROFILE_LIMIT {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Profile list is full",
+                        ));
+                    }
+                    next.profiles.push(path);
+                }
+            }
+            Ok(())
+        })?;
+        for item in staged {
+            item.keep();
+        }
+        Ok(())
+    }
+
     pub fn forget_profile(&mut self, path: &Path) -> io::Result<()> {
         self.persist(|next| {
             next.profiles.retain(|candidate| candidate != path);
@@ -735,6 +768,59 @@ mod tests {
             assert_eq!(fs::read(&file).unwrap(), raw);
             assert_eq!(prefs.language(), LanguagePreference::En);
         }
+    }
+
+    #[test]
+    fn registering_local_imports_persists_both_without_switching_profile() {
+        use meow_paw::profile::local_import::stage_yaml;
+
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        fs::write(&file, "{}").unwrap();
+        let source = root.path().join("original.yaml");
+        fs::write(&source, "mode: rule").unwrap();
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        let current = root.path().join("current.yaml");
+        prefs.remember(false, &current).unwrap();
+        let directory = root.path().join("imports");
+        let first = stage_yaml(&source, &directory).unwrap();
+        let second = stage_yaml(&source, &directory).unwrap();
+        let expected = vec![
+            current.clone(),
+            first.path().to_path_buf(),
+            second.path().to_path_buf(),
+        ];
+        prefs.register_local_imports(vec![first, second]).unwrap();
+        let reopened = Preferences::open(file).unwrap();
+        assert_eq!(reopened.profiles(), expected);
+        assert_eq!(reopened.resolve(None, None).1, Some(current));
+        assert!(expected[1..].iter().all(|path| path.is_file()));
+    }
+
+    #[test]
+    fn rejected_local_import_batch_leaves_no_copies_or_partial_list_entries() {
+        use meow_paw::profile::local_import::stage_yaml;
+
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        fs::write(&file, "{}").unwrap();
+        let source = root.path().join("original.yaml");
+        fs::write(&source, "mode: rule").unwrap();
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        for index in 1..PROFILE_LIMIT {
+            prefs
+                .remember(false, &root.path().join(format!("existing-{index}.yaml")))
+                .unwrap();
+        }
+        let before = fs::read(&file).unwrap();
+        let directory = root.path().join("imports");
+        let first = stage_yaml(&source, &directory).unwrap();
+        let second = stage_yaml(&source, &directory).unwrap();
+        assert!(prefs.register_local_imports(vec![first, second]).is_err());
+        assert_eq!(fs::read(&file).unwrap(), before);
+        assert_eq!(prefs.profiles().len(), PROFILE_LIMIT - 1);
+        assert!(fs::read_dir(directory).unwrap().next().is_none());
+        assert!(source.is_file());
     }
 
     #[test]
