@@ -34,6 +34,14 @@ impl Render for Header {
     }
 }
 
+struct Connections(Entity<Paw>);
+impl Render for Connections {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.0.update(cx, |paw, cx| paw.connections(cx));
+        div().size_full().tab_group().child(rows)
+    }
+}
+
 struct ProviderControls(Rc<RefCell<usize>>);
 
 impl Render for ProviderControls {
@@ -887,6 +895,144 @@ fn requests(dir: &Path) -> Vec<String> {
 }
 
 #[gpui_kit::test]
+fn connection_row_fences_delayed_apply_and_pointer_closes_once(cx: &mut TestAppContext) {
+    match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) {
+        Ok(listener) => drop(listener),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("SKIP connection row integration: loopback sockets unavailable: {error}");
+            return;
+        }
+        Err(error) => panic!("loopback availability probe failed: {error}"),
+    }
+    cx.update(gpui_kit::init);
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("connection-fixture"), "").unwrap();
+    let binary = dir.path().join("fake-controller");
+    let script = format!(
+        "#!/bin/sh\nconfig=\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -t) exit 0 ;;\n    -f) shift; config=$1 ;;\n  esac\n  shift\ndone\nPAW_ROUTING_FAKE_CONFIG=\"$config\" PAW_ROUTING_FAKE_DIR={} exec {} --ignored --exact view::routing_tests::fake_controller_child\n",
+        quote(dir.path()),
+        quote(&std::env::current_exe().unwrap())
+    );
+    fs::write(&binary, script).unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = dir.path().join("synthetic.yaml");
+    fs::write(&profile, "mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
+    let desktop = Desktop::with_mixed_port(binary, 0).unwrap();
+    desktop.start(profile.clone()).unwrap();
+    wait_for(|| {
+        desktop
+            .snapshot()
+            .connections
+            .as_ref()
+            .is_some_and(|rows| !rows.is_empty())
+    });
+    let snapshot = desktop.snapshot();
+    let old_epoch = snapshot.probe_epoch;
+    let holder = Rc::new(RefCell::new(None));
+    let out = holder.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let paw = open(
+            None,
+            None,
+            (Page::Connections, Locale::En),
+            false,
+            (Preferences::discover(false).0, None),
+            window,
+            cx,
+        );
+        paw.update(cx, |paw, _| {
+            paw.desktop = Some(desktop);
+            paw.snapshot = snapshot;
+        });
+        *out.borrow_mut() = Some(paw.clone());
+        let rows = cx.new(|_| Connections(paw));
+        gpui_kit::base::Root::new(rows, window, cx)
+    });
+    let paw = holder.borrow_mut().take().unwrap();
+    ui.update(|window, cx| {
+        window.activate_window();
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("connection-close:row-id").label(),
+            Some("Close connection: example.invalid:443")
+        );
+    });
+    paw.update(ui, |paw, _| {
+        paw.desktop
+            .as_ref()
+            .unwrap()
+            .apply_profile(profile)
+            .unwrap()
+    });
+    wait_for(|| {
+        requests(dir.path())
+            .iter()
+            .any(|line| line == "PUT /configs")
+    });
+    ui.update(|window, cx| {
+        window.click("connection-close:row-id", cx);
+        assert!(
+            paw.read(cx)
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("session changed"))
+        );
+    });
+    assert!(
+        requests(dir.path())
+            .iter()
+            .all(|line| !line.starts_with("DELETE "))
+    );
+    fs::write(dir.path().join("release-apply"), "").unwrap();
+    wait_for(|| {
+        ui.update(|_, cx| {
+            let snapshot = paw.read(cx).desktop.as_ref().unwrap().snapshot();
+            snapshot.probe_epoch != old_epoch
+                && snapshot.applying_profile.is_none()
+                && snapshot
+                    .connections
+                    .as_ref()
+                    .is_some_and(|rows| rows.iter().any(|row| row.id == "row-id"))
+        })
+    });
+    ui.update(|window, cx| {
+        window.click("connection-close:row-id", cx);
+        assert!(
+            paw.read(cx)
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("session changed"))
+        );
+    });
+    assert!(
+        requests(dir.path())
+            .iter()
+            .all(|line| !line.starts_with("DELETE "))
+    );
+    paw.update(ui, |paw, cx| {
+        paw.snapshot = paw.desktop.as_ref().unwrap().snapshot();
+        cx.notify();
+    });
+    ui.update(|window, cx| {
+        window.render_frame(cx);
+        window.click("connection-close:row-id", cx);
+    });
+    wait_for(|| {
+        requests(dir.path())
+            .iter()
+            .any(|line| line == "DELETE /connections/row-id")
+    });
+    paw.update(ui, |paw, _| drop(paw.desktop.take()));
+    assert_eq!(
+        requests(dir.path())
+            .iter()
+            .filter(|line| line.starts_with("DELETE "))
+            .collect::<Vec<_>>(),
+        ["DELETE /connections/row-id"]
+    );
+}
+
+#[gpui_kit::test]
 fn routing_segments_are_focusable_and_activate_without_a_controller(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     for locale in [Locale::En, Locale::ZhCn] {
@@ -1229,7 +1375,13 @@ fn serve(mut stream: TcpStream, secret: &str, dir: &Path, state: &Mutex<String>,
         )
         .unwrap();
     }
-    let (status, body) = if method == "PATCH" && path == "/configs" {
+    let (status, body) = if method == "PUT"
+        && path == "/configs"
+        && dir.join("connection-fixture").exists()
+    {
+        wait_for(|| dir.join("release-apply").exists());
+        ("204 No Content", String::new())
+    } else if method == "PATCH" && path == "/configs" {
         ("204 No Content", String::new())
     } else if path == "/" {
         ("200 OK", r#"{"hello":"meow"}"#.to_owned())
@@ -1242,8 +1394,15 @@ fn serve(mut stream: TcpStream, secret: &str, dir: &Path, state: &Mutex<String>,
         ("200 OK", r#"{"proxies":{}}"#.to_owned())
     } else if path == "/providers/proxies" {
         ("200 OK", r#"{"providers":{}}"#.to_owned())
+    } else if method == "DELETE" && path == "/connections/row-id" {
+        ("204 No Content", String::new())
     } else if path == "/connections" {
-        ("200 OK", r#"{"connections":[]}"#.to_owned())
+        let body = if dir.join("connection-fixture").exists() {
+            r#"{"connections":[{"id":"row-id","metadata":{"host":"example.invalid","destinationPort":"443"}}]}"#
+        } else {
+            r#"{"connections":[]}"#
+        };
+        ("200 OK", body.to_owned())
     } else if path == "/traffic" {
         ("200 OK", r#"{"up":0,"down":0}"#.to_owned())
     } else {

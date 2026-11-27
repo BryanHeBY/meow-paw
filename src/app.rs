@@ -452,6 +452,75 @@ struct ApplyReservation {
     generation: u64,
 }
 
+const STALE_CONNECTION_CLOSE: &str = "Connection is no longer available or the session changed";
+
+impl Snapshot {
+    /// Check session readiness for a row already taken from the active sample.
+    pub fn can_close_active_connection(&self, epoch: u64) -> bool {
+        self.probe_epoch == epoch
+            && matches!(self.engine, EngineStatus::Running { .. })
+            && self.apply_reservation.is_none()
+            && self.applying_profile.is_none()
+    }
+
+    pub fn can_close_connection(&self, epoch: u64, id: &str) -> bool {
+        validate_connection_close(self, epoch, false, false, id).is_ok()
+    }
+}
+
+fn validate_connection_close(
+    snapshot: &Snapshot,
+    epoch: u64,
+    stop: bool,
+    quit: bool,
+    id: &str,
+) -> io::Result<()> {
+    if stop
+        || quit
+        || !snapshot.can_close_active_connection(epoch)
+        || !snapshot
+            .connections
+            .as_ref()
+            .is_some_and(|rows| rows.iter().any(|row| row.id == id))
+    {
+        return Err(Error::new(ErrorKind::WouldBlock, STALE_CONNECTION_CLOSE));
+    }
+    Ok(())
+}
+
+fn execute_connection_close(
+    snapshot: &Mutex<Snapshot>,
+    epoch: u64,
+    generation: u64,
+    has_session: bool,
+    (stop, quit): (&AtomicBool, &AtomicBool),
+    id: &str,
+    close: impl FnOnce() -> Result<(), String>,
+) {
+    // Admission is serialized with apply, stop, and quit reservations. Once
+    // admitted, this worker owns the fixed session until the request finishes;
+    // later reservations take effect before the worker processes another command.
+    let valid = {
+        let s = snapshot.lock().expect("snapshot poisoned");
+        has_session
+            && epoch == generation
+            && validate_connection_close(
+                &s,
+                epoch,
+                stop.load(Ordering::Acquire),
+                quit.load(Ordering::Acquire),
+                id,
+            )
+            .is_ok()
+    };
+    let error = if valid {
+        close().err()
+    } else {
+        Some(STALE_CONNECTION_CLOSE.into())
+    };
+    change(snapshot, |s| s.action_error = error);
+}
+
 #[derive(Clone, Debug)]
 pub struct GroupComparison {
     pub group: String,
@@ -723,7 +792,10 @@ enum Command {
         url: url::Url,
     },
     RunUnlock(u64, unlock::Job),
-    CloseConnection(String),
+    CloseConnection {
+        epoch: u64,
+        id: String,
+    },
     RetryLogs(u64, LogHistory),
 }
 
@@ -950,8 +1022,16 @@ impl Desktop {
         self.send(Command::ReadRuleProviders)
     }
 
-    pub fn close_connection(&self, id: String) -> io::Result<()> {
-        self.send(Command::CloseConnection(id))
+    pub fn close_connection(&self, epoch: u64, id: String) -> io::Result<()> {
+        let s = self.snapshot.lock().expect("snapshot poisoned");
+        validate_connection_close(
+            &s,
+            epoch,
+            self.stop.load(Ordering::Acquire),
+            self.quit.load(Ordering::Acquire),
+            &id,
+        )?;
+        self.send(Command::CloseConnection { epoch, id })
     }
 
     pub fn enable_system_proxy(&self, consent: crate::system_proxy::Consent) -> io::Result<()> {
@@ -1103,11 +1183,15 @@ fn run(
             generation = generation.wrapping_add(1);
             // Retire already queued actions from the old session.
             while let Ok(command) = receiver.try_recv() {
-                if let Command::RunUnlock(_, job) = command {
-                    change(snapshot, |s| {
+                match command {
+                    Command::RunUnlock(_, job) => change(snapshot, |s| {
                         s.unlock
                             .finish(job.without_checks(unlock::Phase::Cancelled));
-                    });
+                    }),
+                    Command::CloseConnection { .. } => change(snapshot, |s| {
+                        s.action_error = Some(STALE_CONNECTION_CLOSE.into());
+                    }),
+                    _ => {}
                 }
             }
             let engine = if let Some(active) = session.take() {
@@ -1160,6 +1244,25 @@ fn run(
                 if let Err(completion) = result {
                     change(snapshot, |s| s.unlock.finish(completion));
                 }
+            }
+            Ok(Command::CloseConnection { epoch, id }) => {
+                execute_connection_close(
+                    snapshot,
+                    epoch,
+                    generation,
+                    session.is_some(),
+                    (stop, quit),
+                    &id,
+                    || {
+                        session
+                            .as_ref()
+                            .expect("validated session")
+                            .controller
+                            .close_connection(&id)
+                            .map_err(|e| e.to_string())
+                    },
+                );
+                next_sample = Instant::now();
             }
             Ok(_) if cancelled() => continue,
             Ok(Command::RetryLogs(epoch, history)) => {
@@ -1272,6 +1375,7 @@ fn run(
                     s.probe_epoch = generation;
                     s.probes = ProxyProbeResults::default();
                     s.group_probe = None;
+                    s.connections = None;
                     clear_connection_history(s);
                 });
                 let active = session.as_ref().expect("apply requires a session");
@@ -1440,15 +1544,6 @@ fn run(
                     if !cancelled() && begin_rule_provider_read(&mut s, generation) {
                         s.revision = s.revision.wrapping_add(1);
                     }
-                }
-            }
-            Ok(Command::CloseConnection(id)) => {
-                if let Some(active) = &session {
-                    let result = active.controller.close_connection(&id);
-                    change(snapshot, |s| {
-                        s.action_error = result.err().map(|e| e.to_string())
-                    });
-                    next_sample = Instant::now();
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1702,7 +1797,10 @@ fn begin_apply(
         return false;
     }
     snapshot.applying_profile = Some(path.to_path_buf());
-    snapshot.action_error = None;
+    // A close rejected while this apply was reserved must remain visible.
+    if snapshot.action_error.as_deref() != Some(STALE_CONNECTION_CLOSE) {
+        snapshot.action_error = None;
+    }
     snapshot.diagnostics.clear();
     snapshot.revision = snapshot.revision.wrapping_add(1);
     true
@@ -2514,6 +2612,210 @@ mod tests {
             rule: "rule".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn connection_close_is_fenced_by_apply_reservation_and_generation() {
+        let (desktop, receiver) = apply_test_desktop(8);
+        change(&desktop.snapshot, |s| {
+            s.connections = Some(Arc::new(vec![connection("reused", "old")]));
+        });
+        let painted_epoch = desktop.snapshot().probe_epoch;
+        desktop
+            .close_connection(painted_epoch, "reused".into())
+            .unwrap();
+        let (queued_epoch, queued_id) = match receiver.try_recv().unwrap() {
+            Command::CloseConnection { epoch, id } => (epoch, id),
+            _ => panic!("expected close"),
+        };
+
+        desktop.apply_profile("b.yaml".into()).unwrap();
+        let (input, reservation) = queued_apply(&receiver);
+        assert!(desktop.snapshot().applying_profile.is_none());
+        assert!(
+            !desktop
+                .snapshot()
+                .can_close_connection(painted_epoch, "reused")
+        );
+        assert_eq!(
+            desktop
+                .close_connection(painted_epoch, "reused".into())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WouldBlock
+        );
+        execute_connection_close(
+            &desktop.snapshot,
+            queued_epoch,
+            painted_epoch,
+            true,
+            (&desktop.stop, &desktop.quit),
+            &queued_id,
+            || panic!("reserved apply must fence queued close"),
+        );
+        assert_eq!(
+            desktop.snapshot().action_error.as_deref(),
+            Some(STALE_CONNECTION_CLOSE)
+        );
+
+        {
+            let mut s = desktop.snapshot.lock().unwrap();
+            assert!(begin_apply(
+                &mut s,
+                reservation,
+                painted_epoch,
+                true,
+                false,
+                &input.key()
+            ));
+            assert_eq!(s.action_error.as_deref(), Some(STALE_CONNECTION_CLOSE));
+            s.probe_epoch += 1;
+            s.connections = None;
+            finish_apply(&mut s, reservation, input.key(), None, Ok(()));
+            s.connections = Some(Arc::new(vec![connection("reused", "new")]));
+        }
+        assert_eq!(
+            desktop
+                .close_connection(painted_epoch, "reused".into())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WouldBlock
+        );
+        execute_connection_close(
+            &desktop.snapshot,
+            queued_epoch,
+            painted_epoch + 1,
+            true,
+            (&desktop.stop, &desktop.quit),
+            &queued_id,
+            || panic!("old close must not touch reused ID"),
+        );
+        assert_eq!(
+            desktop.snapshot().action_error.as_deref(),
+            Some(STALE_CONNECTION_CLOSE)
+        );
+        let mut closed = Vec::new();
+        desktop
+            .close_connection(painted_epoch + 1, "reused".into())
+            .unwrap();
+        let Command::CloseConnection { epoch, id } = receiver.try_recv().unwrap() else {
+            panic!("expected close")
+        };
+        execute_connection_close(
+            &desktop.snapshot,
+            epoch,
+            painted_epoch + 1,
+            true,
+            (&desktop.stop, &desktop.quit),
+            &id,
+            || {
+                closed.push(id.clone());
+                Ok(())
+            },
+        );
+        assert_eq!(closed, ["reused"]);
+        assert_eq!(desktop.snapshot().action_error, None);
+    }
+
+    #[test]
+    fn connection_close_rechecks_membership_and_stop_at_execution() {
+        let (desktop, receiver) = apply_test_desktop(8);
+        change(&desktop.snapshot, |s| {
+            s.connections = Some(Arc::new(vec![connection("id", "host")]))
+        });
+        desktop.close_connection(7, "id".into()).unwrap();
+        let Command::CloseConnection { epoch, id } = receiver.try_recv().unwrap() else {
+            panic!("expected close")
+        };
+        change(&desktop.snapshot, |s| {
+            s.connections = Some(Arc::new(vec![]))
+        });
+        execute_connection_close(
+            &desktop.snapshot,
+            epoch,
+            7,
+            true,
+            (&desktop.stop, &desktop.quit),
+            &id,
+            || panic!("removed row must not close"),
+        );
+        assert_eq!(
+            desktop.snapshot().action_error.as_deref(),
+            Some(STALE_CONNECTION_CLOSE)
+        );
+        assert!(desktop.close_connection(7, id.clone()).is_err());
+        change(&desktop.snapshot, |s| {
+            s.connections = Some(Arc::new(vec![connection("id", "host")]))
+        });
+        desktop.stop();
+        assert!(desktop.close_connection(7, id.clone()).is_err());
+        execute_connection_close(
+            &desktop.snapshot,
+            epoch,
+            7,
+            true,
+            (&desktop.stop, &desktop.quit),
+            &id,
+            || panic!("stopped session must not close"),
+        );
+        assert_eq!(
+            desktop.snapshot().action_error.as_deref(),
+            Some(STALE_CONNECTION_CLOSE)
+        );
+    }
+
+    #[test]
+    fn delayed_connection_close_does_not_block_snapshot_apply_or_stop_admission() {
+        let (desktop, receiver) = apply_test_desktop(8);
+        let desktop = Arc::new(desktop);
+        change(&desktop.snapshot, |s| {
+            s.connections = Some(Arc::new(vec![connection("id", "host")]))
+        });
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_desktop = Arc::clone(&desktop);
+        let worker = thread::spawn(move || {
+            execute_connection_close(
+                &worker_desktop.snapshot,
+                7,
+                7,
+                true,
+                (&worker_desktop.stop, &worker_desktop.quit),
+                "id",
+                || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                    Ok(())
+                },
+            );
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let admission_desktop = Arc::clone(&desktop);
+        let admission = thread::spawn(move || {
+            let snapshot = admission_desktop.snapshot();
+            let apply = admission_desktop.apply_profile("b.yaml".into());
+            let stale_after_apply = admission_desktop.close_connection(7, "id".into());
+            admission_desktop.stop();
+            let stale_after_stop = admission_desktop.close_connection(7, "id".into());
+            done_tx
+                .send((snapshot, apply, stale_after_apply, stale_after_stop))
+                .unwrap();
+        });
+        // Always unblock the stub, even when a regression makes admission time out.
+        let result = done_rx.recv_timeout(Duration::from_secs(1));
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        admission.join().unwrap();
+        let (snapshot, apply, stale_after_apply, stale_after_stop) =
+            result.expect("snapshot and admission must finish while DELETE is delayed");
+        assert_eq!(snapshot.probe_epoch, 7);
+        assert!(apply.is_ok());
+        assert_eq!(stale_after_apply.unwrap_err().kind(), ErrorKind::WouldBlock);
+        assert_eq!(stale_after_stop.unwrap_err().kind(), ErrorKind::WouldBlock);
+        assert!(desktop.stop.load(Ordering::Acquire));
+        assert!(desktop.snapshot().apply_reservation.is_none());
+        let _ = queued_apply(&receiver);
     }
 
     fn connection_sample(history: &mut ConnectionHistory, rows: Vec<Connection>) {

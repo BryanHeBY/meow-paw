@@ -4704,26 +4704,23 @@ impl Paw {
                         let mut actions = div().flex().items_center().gap_1().child(details);
                         if !self.closed_connections_open {
                             let key = c.id.clone();
-                            actions = actions.child(
-                                div()
-                                    .id(SharedString::from(format!("connection-close:{key}")))
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .text_color(rgb(BLUE))
-                                    .hover(|s| s.bg(rgb(SOFT_BLUE)))
-                                    .child(self.locale.message(Message::CloseConnection))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.error = this
-                                            .desktop
-                                            .as_ref()
-                                            .and_then(|d| d.close_connection(key.clone()).err())
-                                            .map(|err| err.to_string());
-                                        cx.notify();
-                                    })),
-                            );
+                            let button_key = key.clone();
+                            let epoch = self.snapshot.probe_epoch;
+                            let disabled = self.desktop.is_none()
+                                || !self.snapshot.can_close_active_connection(epoch);
+                            actions = actions.child(connection_close_button(
+                                &button_key,
+                                &destination,
+                                self.locale,
+                                disabled,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.error = match this.desktop.as_ref() {
+                                        Some(desktop) => desktop.close_connection(epoch, key.clone()).err().map(|error| error.to_string()),
+                                        None => Some("Connection is no longer available or the session changed".into()),
+                                    };
+                                    cx.notify();
+                                }),
+                            ));
                         }
                         let row = connection_row(
                             div()
@@ -6796,6 +6793,36 @@ fn small_connection_button(id: impl Into<ElementId>, label: &'static str, cx: &A
 }
 
 #[cfg(any(target_os = "linux", windows))]
+fn connection_close_button(
+    id: &str,
+    destination: &str,
+    locale: Locale,
+    disabled: bool,
+    on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> SemanticButton {
+    semantic_secondary_button(
+        SharedString::from(format!("connection-close:{id}")),
+        locale.message(Message::CloseConnection),
+    )
+    .accessibility_label(format!(
+        "{}: {destination}",
+        locale.message(Message::CloseConnectionAction)
+    ))
+    .disabled(disabled)
+    .px_2()
+    .text_xs()
+    .on_click(move |event, window, cx| {
+        if disabled {
+            return;
+        }
+        if matches!(event, ClickEvent::Keyboard(_)) {
+            cx.stop_propagation();
+        }
+        on_close(event, window, cx);
+    })
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn connection_detail_area(
     connection: &meow_paw::engine::controller::Connection,
     destination: &str,
@@ -8460,3 +8487,6 @@ mod tests {
 
 #[cfg(all(test, feature = "visual-test", target_os = "linux"))]
 mod routing_tests;
+
+#[cfg(all(test, feature = "visual-test", target_os = "linux"))]
+mod connection_action_tests;
