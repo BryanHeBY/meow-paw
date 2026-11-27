@@ -1025,8 +1025,27 @@ impl Paw {
                             .enumerate()
                             .map(|(index, mode)| {
                                 let selected = mode == active;
-                                div()
-                                    .id(("routing-mode", index))
+                                let label = self.locale.message(match mode {
+                                    RoutingMode::Rule => Message::ModeRule,
+                                    RoutingMode::Global => Message::ModeGlobal,
+                                    RoutingMode::Direct => Message::ModeDirect,
+                                });
+                                let accessible_label = if selected {
+                                    format!(
+                                        "{} · {}",
+                                        label,
+                                        self.locale.message(Message::ActiveTab)
+                                    )
+                                } else {
+                                    label.to_owned()
+                                };
+                                SemanticButton::new(("routing-mode", index))
+                                    .accessibility_label(accessible_label)
+                                    .aria_toggled(if selected {
+                                        gpui_kit::accesskit::Toggled::True
+                                    } else {
+                                        gpui_kit::accesskit::Toggled::False
+                                    })
                                     .px_4()
                                     .py_2()
                                     .text_sm()
@@ -1036,23 +1055,30 @@ impl Paw {
                                     .when(index != 0, |el| {
                                         el.border_l_1().border_color(rgb(0x9eb9ee))
                                     })
-                                    .child(self.locale.message(match mode {
-                                        RoutingMode::Rule => Message::ModeRule,
-                                        RoutingMode::Global => Message::ModeGlobal,
-                                        RoutingMode::Direct => Message::ModeDirect,
-                                    }))
-                                    .when(!selected, |el| {
-                                        el.cursor_pointer()
-                                            .hover(|s| s.bg(rgb(SOFT_BLUE)))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.error = this
-                                                    .desktop
-                                                    .as_ref()
-                                                    .and_then(|d| d.set_mode(mode).err())
-                                                    .map(|e| e.to_string());
-                                                cx.notify();
-                                            }))
+                                    .focus_visible(|s| {
+                                        s.border_2().border_color(rgb(if selected {
+                                            SURFACE
+                                        } else {
+                                            BLUE
+                                        }))
                                     })
+                                    .child(label)
+                                    .when(!selected, |el| {
+                                        el.cursor_pointer().hover(|s| s.bg(rgb(SOFT_BLUE)))
+                                    })
+                                    .on_click(cx.listener(move |this, event, _, cx| {
+                                        if matches!(event, ClickEvent::Keyboard(_)) {
+                                            cx.stop_propagation();
+                                        }
+                                        if this.snapshot.mode != Some(mode) {
+                                            this.error = this
+                                                .desktop
+                                                .as_ref()
+                                                .and_then(|d| d.set_mode(mode).err())
+                                                .map(|e| e.to_string());
+                                            cx.notify();
+                                        }
+                                    }))
                             }),
                     );
             }
@@ -6254,3 +6280,6 @@ mod tests {
         assert!(log_review_context_changed(&current, &next));
     }
 }
+
+#[cfg(all(test, feature = "visual-test", target_os = "linux"))]
+mod routing_tests;
