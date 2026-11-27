@@ -167,6 +167,43 @@ fn proxy_disclosures_preserve_settings_and_do_not_refresh_or_probe(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn sorting_from_proxy_header_does_not_collapse_group(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let holder = Rc::new(RefCell::new(None));
+    let holder2 = holder.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let paw = open(
+            None,
+            None,
+            (Page::Proxies, Locale::En),
+            false,
+            (Preferences::discover(false).0, None),
+            window,
+            cx,
+        );
+        super::seed_proxy_fixture(&paw, cx);
+        *holder2.borrow_mut() = Some(paw.clone());
+        gpui_kit::base::Root::new(paw, window, cx)
+    });
+    let paw = holder.borrow_mut().take().unwrap();
+    ui.update(|window, cx| {
+        window.activate_window();
+        window.render_frame(cx);
+        let sort = window.find("proxy-order:Daily Proxy");
+        assert_eq!(sort.role(), Some(gpui_kit::Role::Button));
+        assert_eq!(
+            window.find("group-compare:Daily Proxy").role(),
+            Some(gpui_kit::Role::Button)
+        );
+        window.click("proxy-order:Daily Proxy", cx);
+        let state = paw.read(cx);
+        assert!(state.proxy_order.contains_key("Daily Proxy"));
+        assert!(state.expanded_groups.contains("Daily Proxy"));
+        assert!(state.snapshot.group_probe.is_none());
+    });
+}
+
+#[gpui_kit::test]
 fn profile_forget_has_context_and_leaves_the_original_file(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let dir = tempfile::tempdir().unwrap();

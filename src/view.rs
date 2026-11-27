@@ -3158,6 +3158,79 @@ impl Paw {
                             anchor
                         })
                     });
+                    let group_name = name.clone();
+                    let comparison = self.snapshot.group_probe.as_ref().filter(|g| {
+                        g.group == *name && probe_url.as_ref() == Some(g.results.url())
+                    });
+                    let running = comparison.is_some_and(|g| g.active);
+                    let compare_name = name.clone();
+                    let labels = match self.locale {
+                        Locale::En => (
+                            "Compare nodes",
+                            "Cancel comparison",
+                            "Probe busy",
+                            "Waiting",
+                            "Testing…",
+                            "Unavailable",
+                            "Interrupted",
+                            "Complete",
+                        ),
+                        Locale::ZhCn => (
+                            "比较节点",
+                            "取消比较",
+                            "测试进行中",
+                            "等待中",
+                            "测试中…",
+                            "不可用",
+                            "已中断",
+                            "已完成",
+                        ),
+                    };
+                    let compare_button = semantic_secondary_button(
+                        SharedString::from(format!("group-compare:{name}")),
+                        if running {
+                            labels.1
+                        } else if probe_busy {
+                            labels.2
+                        } else {
+                            labels.0
+                        },
+                    )
+                    .disabled(!(running || (ownership_available && probe_ready && !probe_busy)))
+                    .when(
+                        running || (ownership_available && probe_ready && !probe_busy),
+                        |button| {
+                            button.on_click(cx.listener(move |paw, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(desktop) = &paw.desktop {
+                                    if running {
+                                        desktop.cancel_group_probe();
+                                    } else {
+                                        let value = paw.probe_url.read(cx).value();
+                                        paw.error = desktop
+                                            .compare_group(epoch, &compare_name, &value)
+                                            .err()
+                                            .map(|e| e.to_string());
+                                    }
+                                }
+                                cx.notify();
+                            }))
+                        },
+                    );
+                    let sort_button = semantic_secondary_button(
+                        SharedString::from(format!("proxy-order:{name}")),
+                        self.locale.message(order.message()),
+                    )
+                    .on_click(cx.listener(move |paw, _, _, cx| {
+                        cx.stop_propagation();
+                        let next = order.next();
+                        if next == ProxyOrder::Configured {
+                            paw.proxy_order.remove(&group_name);
+                        } else {
+                            paw.proxy_order.insert(group_name.clone(), next);
+                        }
+                        cx.notify();
+                    }));
                     let toggle = name.clone();
                     let heading = card()
                         .px_3()
@@ -3165,6 +3238,7 @@ impl Paw {
                         .id(SharedString::from(format!("group:{name}")))
                         .anchor_scroll(Some(anchor))
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .justify_between()
                         .gap_3()
@@ -3217,6 +3291,17 @@ impl Paw {
                                     ),
                                 ),
                         )
+                        .when(open && !members.is_empty(), |heading| {
+                            heading.child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(compare_button)
+                                    .child(sort_button),
+                            )
+                        })
                         .when_some(visible_selection, |heading, selected| {
                             let group = name.clone();
                             let member = selected.to_owned();
@@ -3277,129 +3362,39 @@ impl Paw {
                                             .child(self.locale.message(Message::NoCandidateRoutes)),
                                     );
                                 }
-                                let group_name = name.clone();
-                                let comparison = self.snapshot.group_probe.as_ref().filter(|g| {
-                                    g.group == *name && probe_url.as_ref() == Some(g.results.url())
-                                });
-                                let running = comparison.is_some_and(|g| g.active);
-                                let compare_name = name.clone();
-                                let labels = match self.locale {
-                                    Locale::En => (
-                                        "Compare nodes",
-                                        "Cancel comparison",
-                                        "Probe busy",
-                                        "Waiting",
-                                        "Testing…",
-                                        "Unavailable",
-                                        "Interrupted",
-                                        "Complete",
-                                    ),
-                                    Locale::ZhCn => (
-                                        "比较节点",
-                                        "取消比较",
-                                        "测试进行中",
-                                        "等待中",
-                                        "测试中…",
-                                        "不可用",
-                                        "已中断",
-                                        "已完成",
-                                    ),
-                                };
-                                let compare_button = secondary_button(
-                                    SharedString::from(format!("group-compare:{name}")),
-                                    if running {
-                                        labels.1
-                                    } else if probe_busy {
-                                        labels.2
-                                    } else {
-                                        labels.0
-                                    },
-                                )
-                                .when(
-                                    running || (ownership_available && probe_ready && !probe_busy),
-                                    |button| {
-                                        button.on_click(cx.listener(move |paw, _, _, cx| {
-                                            if let Some(desktop) = &paw.desktop {
-                                                if running {
-                                                    desktop.cancel_group_probe();
-                                                } else {
-                                                    let value = paw.probe_url.read(cx).value();
-                                                    paw.error = desktop
-                                                        .compare_group(epoch, &compare_name, &value)
-                                                        .err()
-                                                        .map(|e| e.to_string());
-                                                }
-                                            }
-                                            cx.notify();
-                                        }))
-                                    },
-                                );
-                                let sort_button = secondary_button(
-                                    SharedString::from(format!("proxy-order:{name}")),
-                                    self.locale.message(order.message()),
-                                )
-                                .on_click(cx.listener(move |paw, _, _, cx| {
-                                    let next = order.next();
-                                    if next == ProxyOrder::Configured {
-                                        paw.proxy_order.remove(&group_name);
-                                    } else {
-                                        paw.proxy_order.insert(group_name.clone(), next);
-                                    }
-                                    cx.notify();
-                                }));
                                 let comparison_panel = div()
                                     .flex()
                                     .flex_col()
                                     .gap_1()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_wrap()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_wrap()
-                                                    .items_center()
-                                                    .gap_2()
-                                                    .child(compare_button)
-                                                    .when_some(comparison, |row, g| {
-                                                        let done = g
-                                                            .results
-                                                            .rows()
-                                                            .iter()
-                                                            .filter(|(_, status)| {
-                                                                matches!(
-                                                            status,
-                                                            Some(
-                                                                ProxyProbeStatus::Measured(_)
-                                                                    | ProxyProbeStatus::Unavailable
-                                                            )
-                                                        )
-                                                            })
-                                                            .count();
-                                                        row.child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(rgb(FAINT))
-                                                                .child(format!(
-                                                                    "{done}/{} · {}",
-                                                                    g.results.rows().len(),
-                                                                    if g.interrupted {
-                                                                        labels.6
-                                                                    } else if g.active {
-                                                                        labels.4
-                                                                    } else {
-                                                                        labels.7
-                                                                    }
-                                                                )),
-                                                        )
-                                                    }),
-                                            )
-                                            .child(sort_button),
-                                    )
+                                    .when_some(comparison, |panel, g| {
+                                        let done = g
+                                            .results
+                                            .rows()
+                                            .iter()
+                                            .filter(|(_, status)| {
+                                                matches!(
+                                                    status,
+                                                    Some(
+                                                        ProxyProbeStatus::Measured(_)
+                                                            | ProxyProbeStatus::Unavailable
+                                                    )
+                                                )
+                                            })
+                                            .count();
+                                        panel.child(div().text_xs().text_color(rgb(FAINT)).child(
+                                            format!(
+                                                "{done}/{} · {}",
+                                                g.results.rows().len(),
+                                                if g.interrupted {
+                                                    labels.6
+                                                } else if g.active {
+                                                    labels.4
+                                                } else {
+                                                    labels.7
+                                                }
+                                            ),
+                                        ))
+                                    })
                                     .when_some(comparison, |panel, g| {
                                         panel.children(g.results.rows().iter().map(
                                             |(target, status)| {
@@ -3432,7 +3427,7 @@ impl Paw {
                                     .flex()
                                     .flex_col()
                                     .gap_2()
-                                    .child(comparison_panel)
+                                    .when(comparison.is_some(), |rows| rows.child(comparison_panel))
                                     .children(members.chunks(columns).map(|pair| {
                                         let row = div().flex().gap_2().children(pair.iter().map(
                                             |&(index, member)| {
