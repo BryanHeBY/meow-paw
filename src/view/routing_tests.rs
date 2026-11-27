@@ -89,7 +89,7 @@ fn provider_refresh_exposes_keyboard_action_and_busy_labels(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
-fn provider_disclosure_is_closed_by_default_and_does_not_refresh(cx: &mut TestAppContext) {
+fn proxy_disclosures_preserve_settings_and_do_not_refresh_or_probe(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let holder = Rc::new(RefCell::new(None));
     let holder2 = holder.clone();
@@ -111,6 +111,34 @@ fn provider_disclosure_is_closed_by_default_and_does_not_refresh(cx: &mut TestAp
     let paw = holder.borrow_mut().take().unwrap();
     ui.update(|window, cx| {
         window.activate_window();
+        window.render_frame(cx);
+        let test_settings = "proxy-probe-settings-toggle";
+        assert_eq!(
+            window.find(test_settings).label().unwrap(),
+            "Set latency test URL"
+        );
+        assert!(!paw.read(cx).proxy_probe_settings_open);
+        window.click(test_settings, cx);
+        window.render_frame(cx);
+        assert!(paw.read(cx).proxy_probe_settings_open);
+        assert_eq!(
+            window.find(test_settings).label().unwrap(),
+            "Hide latency test settings"
+        );
+        let target = "https://example.invalid/check";
+        let input = paw.read(cx).probe_url.clone();
+        input.update(cx, |input, cx| input.set_value(target, window, cx));
+        window.click(test_settings, cx);
+        window.render_frame(cx);
+        assert!(!paw.read(cx).proxy_probe_settings_open);
+        assert_eq!(
+            window.find(test_settings).label().unwrap(),
+            "Latency test settings"
+        );
+        window.click(test_settings, cx);
+        window.render_frame(cx);
+        assert_eq!(input.read(cx).value().as_str(), target);
+        window.click(test_settings, cx);
         window.render_frame(cx);
         let control = window.find("proxy-providers-toggle");
         assert_eq!(control.role(), Some(gpui_kit::Role::Button));
@@ -134,6 +162,7 @@ fn provider_disclosure_is_closed_by_default_and_does_not_refresh(cx: &mut TestAp
         assert!(!paw.read(cx).proxy_providers_open);
         assert_eq!(paw.read(cx).error.as_deref(), Some("unchanged"));
         assert!(paw.read(cx).snapshot.refreshing_provider.is_none());
+        assert!(paw.read(cx).snapshot.group_probe.is_none());
     });
 }
 

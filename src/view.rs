@@ -498,6 +498,8 @@ pub struct Paw {
     #[cfg(any(target_os = "linux", windows))]
     proxy_providers_open: bool,
     #[cfg(any(target_os = "linux", windows))]
+    proxy_probe_settings_open: bool,
+    #[cfg(any(target_os = "linux", windows))]
     locate_route: Option<(String, String)>,
     #[cfg(any(target_os = "linux", windows))]
     snapshot: meow_paw::app::Snapshot,
@@ -735,6 +737,8 @@ pub fn open(
             proxy_group_scroll: ScrollHandle::new(),
             #[cfg(any(target_os = "linux", windows))]
             proxy_providers_open: false,
+            #[cfg(any(target_os = "linux", windows))]
+            proxy_probe_settings_open: false,
             #[cfg(any(target_os = "linux", windows))]
             locate_route: None,
             error: None,
@@ -3719,7 +3723,8 @@ impl Paw {
                         })
                 })
                 .collect::<Vec<_>>();
-            let probe_settings = div()
+            let probe_settings = || {
+                div()
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -3733,7 +3738,26 @@ impl Paw {
                 .child(div().text_xs().text_color(rgb(FAINT)).child(match self.locale {
                     Locale::En => "Comparison is opt-in and tests each eligible node once; unknown or ambiguous nodes are omitted. Node health probes may change an automatic route’s effective choice.",
                     Locale::ZhCn => "比较需手动启动，每个符合条件的节点测试一次；未知或有歧义的节点会被跳过。节点健康检测可能改变自动路由的实际选择。",
-                }));
+                }))
+            };
+            let probe_caption = match (self.proxy_probe_settings_open, probe_ready, self.locale) {
+                (true, _, Locale::En) => "Hide latency test settings",
+                (false, true, Locale::En) => "Latency test settings",
+                (false, false, Locale::En) => "Set latency test URL",
+                (true, _, Locale::ZhCn) => "收起延迟测试设置",
+                (false, true, Locale::ZhCn) => "延迟测试设置",
+                (false, false, Locale::ZhCn) => "设置延迟测试地址",
+            };
+            let probe_control =
+                proxy_disclosure_button("proxy-probe-settings-toggle", probe_caption).on_click(
+                    cx.listener(|paw, event, _, cx| {
+                        if matches!(event, ClickEvent::Keyboard(_)) {
+                            cx.stop_propagation();
+                        }
+                        paw.proxy_probe_settings_open = !paw.proxy_probe_settings_open;
+                        cx.notify();
+                    }),
+                );
             let page = div()
                 .flex()
                 .flex_col()
@@ -3749,52 +3773,42 @@ impl Paw {
                         },
                     ))
                 })
-                .child(probe_settings)
-                .when(ownership_available && !inventory.providers.is_empty(), |page| {
-                    let expanded = self.proxy_providers_open;
-                    let label = match (expanded, self.locale) {
-                        (false, Locale::En) => "Show providers",
-                        (true, Locale::En) => "Hide providers",
-                        (false, Locale::ZhCn) => "展开提供者",
-                        (true, Locale::ZhCn) => "收起提供者",
-                    };
-                    let caption = format!("{label} ({})", inventory.providers.len());
-                    let control = SemanticButton::new("proxy-providers-toggle")
-                        .accessibility_label(caption.clone())
-                        .rounded_md()
-                        .px_3()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(0xb5cafa))
-                        .bg(rgb(SOFT_BLUE))
-                        .text_color(rgb(BLUE))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(0xd8e7ff)))
-                        .focus_visible(|style| style.border_color(rgb(BLUE)))
-                        .child(caption)
-                        .on_click(cx.listener(|paw, event, _, cx| {
-                            if matches!(event, ClickEvent::Keyboard(_)) {
-                                cx.stop_propagation();
-                            }
-                            paw.proxy_providers_open = !paw.proxy_providers_open;
-                            cx.notify();
-                        }));
-                    page.child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(control)
-                            .when_some(self.snapshot.refreshing_provider.as_ref(), |row, name| {
-                                row.child(div().text_sm().text_color(rgb(FAINT)).child(format!(
-                                    "{} {name}",
-                                    self.locale.message(Message::ProviderRefreshing),
-                                )))
-                            }),
-                    )
-                    .children(providers)
-                });
+                .child({
+                    let controls = div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(probe_control);
+                    controls.when(ownership_available && !inventory.providers.is_empty(), |row| {
+                        let label = match (self.proxy_providers_open, self.locale) {
+                            (false, Locale::En) => "Show providers",
+                            (true, Locale::En) => "Hide providers",
+                            (false, Locale::ZhCn) => "展开提供者",
+                            (true, Locale::ZhCn) => "收起提供者",
+                        };
+                        let caption = format!("{label} ({})", inventory.providers.len());
+                        row.child(
+                            proxy_disclosure_button("proxy-providers-toggle", caption).on_click(
+                                cx.listener(|paw, event, _, cx| {
+                                    if matches!(event, ClickEvent::Keyboard(_)) {
+                                        cx.stop_propagation();
+                                    }
+                                    paw.proxy_providers_open = !paw.proxy_providers_open;
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                        .when_some(self.snapshot.refreshing_provider.as_ref(), |row, name| {
+                            row.child(div().text_sm().text_color(rgb(FAINT)).child(format!(
+                                "{} {name}",
+                                self.locale.message(Message::ProviderRefreshing),
+                            )))
+                        })
+                    })
+                })
+                .when(self.proxy_probe_settings_open, |page| page.child(probe_settings()))
+                .children(providers);
             return if groups.is_empty() {
                 page.child(empty_state(
                     self.locale.message(Message::NoMatchingGroups),
@@ -5000,6 +5014,24 @@ fn subscription_button(
         .font_weight(FontWeight::SEMIBOLD)
         .px_4()
         .py_2()
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn proxy_disclosure_button(id: &'static str, caption: impl Into<SharedString>) -> SemanticButton {
+    let caption = caption.into();
+    SemanticButton::new(id)
+        .accessibility_label(caption.clone())
+        .rounded_md()
+        .px_3()
+        .py_1()
+        .border_1()
+        .border_color(rgb(0xb5cafa))
+        .bg(rgb(SOFT_BLUE))
+        .text_color(rgb(BLUE))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(0xd8e7ff)))
+        .focus_visible(|style| style.border_color(rgb(BLUE)))
+        .child(caption)
 }
 
 #[cfg(any(target_os = "linux", windows))]
