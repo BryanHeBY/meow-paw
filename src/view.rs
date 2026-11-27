@@ -8902,3 +8902,6 @@ mod connection_action_tests;
 
 #[cfg(all(test, feature = "visual-test", target_os = "linux"))]
 mod home_engine_error_tests;
+
+#[cfg(all(test, feature = "visual-test", target_os = "linux"))]
+mod profile_action_ui_tests;
