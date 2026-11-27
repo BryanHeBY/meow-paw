@@ -494,6 +494,8 @@ pub struct Paw {
     #[cfg(any(target_os = "linux", windows))]
     proxy_order: std::collections::HashMap<String, ProxyOrder>,
     #[cfg(any(target_os = "linux", windows))]
+    group_route_tools: HashMap<String, GroupRouteTools>,
+    #[cfg(any(target_os = "linux", windows))]
     proxy_group_scroll: ScrollHandle,
     #[cfg(any(target_os = "linux", windows))]
     proxy_providers_open: bool,
@@ -663,6 +665,17 @@ pub fn rebind_window(paw: &Entity<Paw>, window: &mut Window, cx: &mut App) {
     paw.update(cx, |state, cx| {
         #[cfg(any(target_os = "linux", windows))]
         {
+            for (name, tools) in &mut state.group_route_tools {
+                for (field, slot) in [
+                    (GroupRouteField::Url, &mut tools.url),
+                    (GroupRouteField::Filter, &mut tools.filter),
+                ] {
+                    if let Some(old) = slot {
+                        let value = old.input.read(cx).value();
+                        *slot = Some(GroupRouteInput::new(name, field, value, window, cx));
+                    }
+                }
+            }
             state._page_filter_shortcut =
                 register_page_filter_shortcut(cx.weak_entity(), window, cx);
         }
@@ -733,6 +746,8 @@ pub fn open(
             expanded_groups: Default::default(),
             #[cfg(any(target_os = "linux", windows))]
             proxy_order: Default::default(),
+            #[cfg(any(target_os = "linux", windows))]
+            group_route_tools: Default::default(),
             #[cfg(any(target_os = "linux", windows))]
             proxy_group_scroll: ScrollHandle::new(),
             #[cfg(any(target_os = "linux", windows))]
@@ -881,6 +896,11 @@ impl Paw {
                 }
                 if log_review_context_changed(&self.snapshot, &snap) {
                     self.log_review.reset_pause();
+                }
+                if self.snapshot.probe_epoch != snap.probe_epoch
+                    || self.snapshot.profile != snap.profile
+                {
+                    self.group_route_tools.clear();
                 }
                 self.snapshot = snap;
                 return true;
@@ -3083,6 +3103,39 @@ impl Paw {
         self.error = None;
     }
 
+    #[cfg(any(target_os = "linux", windows))]
+    fn toggle_proxy_group(&mut self, name: &str) {
+        if !self.expanded_groups.remove(name) {
+            self.expanded_groups.insert(name.to_owned());
+        }
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    fn show_group_route_field(
+        &mut self,
+        name: &str,
+        field: GroupRouteField,
+        toggle: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tools = self.group_route_tools.entry(name.to_owned()).or_default();
+        if toggle && tools.open == Some(field) {
+            tools.open = None;
+        } else {
+            tools.open = Some(field);
+            let slot = match field {
+                GroupRouteField::Url => &mut tools.url,
+                GroupRouteField::Filter => &mut tools.filter,
+            };
+            let input = slot.get_or_insert_with(|| {
+                GroupRouteInput::new(name, field, SharedString::default(), window, cx)
+            });
+            input.input.focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
     fn proxies(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
         let locate_route = self.locate_route.take();
@@ -3094,8 +3147,8 @@ impl Paw {
             let mut group_anchors = Vec::new();
             let columns = route_columns(window.viewport_size().width);
             use meow_paw::app::{ProxyProbeStatus, ProxyProbeTarget, parse_probe_url};
-            let probe_url = parse_probe_url(&self.probe_url.read(cx).value());
-            let probe_ready = probe_url.is_some();
+            let default_probe_url = self.probe_url.read(cx).value();
+            let default_probe_ready = parse_probe_url(&default_probe_url).is_some();
             let ownership_available =
                 !self.snapshot.inventory_stale && inventory.provider_error.is_none();
             let history_delays = if ownership_available {
@@ -3132,6 +3185,21 @@ impl Paw {
                         return None;
                     }
                     count += 1;
+                    let tools = self.group_route_tools.get(name);
+                    let group_filter = tools
+                        .and_then(|tools| tools.filter.as_ref())
+                        .map(|state| state.input.read(cx).value().trim().to_lowercase())
+                        .unwrap_or_default();
+                    members.retain(|(_, member)| route_matches(member, &group_filter));
+                    let has_members = !members.is_empty();
+                    let probe_value = tools
+                        .and_then(|tools| tools.url.as_ref())
+                        .map(|state| state.input.read(cx).value())
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_else(|| default_probe_url.clone());
+                    let probe_url = parse_probe_url(&probe_value);
+                    let probe_ready = probe_url.is_some();
+                    let hide_details = tools.is_some_and(|tools| tools.hide_details);
                     let anchor = ScrollAnchor::for_handle(self.proxy_group_scroll.clone());
                     group_anchors.push((name.clone(), anchor.clone()));
                     let expandable = name != "GLOBAL";
@@ -3191,43 +3259,51 @@ impl Paw {
                             "已完成",
                         ),
                     };
-                    let compare_button = semantic_secondary_button(
-                        SharedString::from(format!("group-compare:{name}")),
+                    let compare_value = probe_value.clone();
+                    let compare_label = if running {
+                        labels.1
+                    } else if probe_busy {
+                        labels.2
+                    } else {
+                        labels.0
+                    };
+                    let compare_button = proxy_tool_button(
+                        format!("group-compare:{name}"), compare_label,
+                        if running { "icons/square.svg" } else {"icons/gauge.svg"}, false,
+                    )
+                    .disabled(!(running || (ownership_available && route_count != 0 && !probe_busy)))
+                    .on_click(cx.listener(move |paw, _, window, cx| {
+                        cx.stop_propagation();
                         if running {
-                            labels.1
-                        } else if probe_busy {
-                            labels.2
+                            if let Some(desktop) = &paw.desktop {
+                                desktop.cancel_group_probe();
+                            }
                         } else {
-                            labels.0
-                        },
+                            paw.expanded_groups.insert(compare_name.clone());
+                            if !probe_ready {
+                                paw.show_group_route_field(
+                                    &compare_name, GroupRouteField::Url, false, window, cx,
+                                );
+                            } else if let Some(desktop) = &paw.desktop {
+                                paw.error = desktop.compare_group(epoch, &compare_name, &compare_value)
+                                    .err().map(|e| e.to_string());
+                            }
+                        }
+                        cx.notify();
+                    }));
+                    let sort_label = self.locale.message(order.message());
+                    let sort_button = proxy_tool_button(
+                        format!("proxy-order:{name}"), sort_label,
+                        match order {
+                            ProxyOrder::Configured => "icons/list-filter.svg",
+                            ProxyOrder::Delay => "icons/clock.svg",
+                            ProxyOrder::Name => "icons/arrow-down-a-z.svg",
+                        }, order != ProxyOrder::Configured,
                     )
-                    .disabled(!(running || (ownership_available && probe_ready && !probe_busy)))
-                    .when(
-                        running || (ownership_available && probe_ready && !probe_busy),
-                        |button| {
-                            button.on_click(cx.listener(move |paw, _, _, cx| {
-                                cx.stop_propagation();
-                                if let Some(desktop) = &paw.desktop {
-                                    if running {
-                                        desktop.cancel_group_probe();
-                                    } else {
-                                        let value = paw.probe_url.read(cx).value();
-                                        paw.error = desktop
-                                            .compare_group(epoch, &compare_name, &value)
-                                            .err()
-                                            .map(|e| e.to_string());
-                                    }
-                                }
-                                cx.notify();
-                            }))
-                        },
-                    );
-                    let sort_button = semantic_secondary_button(
-                        SharedString::from(format!("proxy-order:{name}")),
-                        self.locale.message(order.message()),
-                    )
+                    .disabled(route_count == 0)
                     .on_click(cx.listener(move |paw, _, _, cx| {
                         cx.stop_propagation();
+                        paw.expanded_groups.insert(group_name.clone());
                         let next = order.next();
                         if next == ProxyOrder::Configured {
                             paw.proxy_order.remove(&group_name);
@@ -3236,8 +3312,92 @@ impl Paw {
                         }
                         cx.notify();
                     }));
+                    let locate_label = localized_proxy_tool(self.locale, "Locate selected node", "定位当前节点");
+                    let locate_group = name.clone();
+                    let locate_member = visible_selection.map(str::to_owned);
+                    let locate_button = proxy_tool_button(
+                        format!("locate:{name}"), locate_label, "icons/target.svg", false,
+                    )
+                    .accessibility_label(match visible_selection {
+                        Some(selected) => format!("{locate_label}: {name}, {selected}"),
+                        None => format!("{locate_label}: {name}"),
+                    })
+                    .disabled(visible_selection.is_none())
+                    .on_click(cx.listener(move |paw, _, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(member) = locate_member.as_ref() {
+                            paw.expanded_groups.insert(locate_group.clone());
+                            paw.locate_route = Some((locate_group.clone(), member.clone()));
+                            cx.notify();
+                        }
+                    }));
+                    let url_label = GroupRouteField::Url.label(self.locale);
+                    let url_enabled = tools.is_some_and(|tools| tools.open == Some(GroupRouteField::Url));
+                    let url_group = name.clone();
+                    let url_button = proxy_tool_button(
+                        format!("group-probe-url:{name}"), url_label,
+                        if url_enabled { "icons/radio-tower.svg" } else { "icons/wifi-off.svg" }, url_enabled,
+                    )
+                    .on_click(cx.listener(move |paw, _, window, cx| {
+                        cx.stop_propagation();
+                        paw.show_group_route_field(&url_group, GroupRouteField::Url, true, window, cx);
+                    }));
+                    let detail_label = if hide_details {
+                        localized_proxy_tool(self.locale, "Show node details", "显示节点详情")
+                    } else {
+                        localized_proxy_tool(self.locale, "Hide node details", "隐藏节点详情")
+                    };
+                    let detail_group = name.clone();
+                    let detail_button = proxy_tool_button(
+                        format!("group-details:{name}"), detail_label,
+                        if hide_details { "icons/eye-off.svg" } else { "icons/eye.svg" }, false,
+                    )
+                    .aria_toggled(if hide_details {gpui_kit::accesskit::Toggled::False} else {gpui_kit::accesskit::Toggled::True})
+                    .disabled(route_count == 0)
+                    .on_click(cx.listener(move |paw, _, _, cx| {
+                        cx.stop_propagation();
+                        paw.expanded_groups.insert(detail_group.clone());
+                        let tools = paw.group_route_tools.entry(detail_group.clone()).or_default();
+                        tools.hide_details = !tools.hide_details;
+                        cx.notify();
+                    }));
+                    let filter_label = GroupRouteField::Filter.label(self.locale);
+                    let filter_enabled = tools.is_some_and(|tools| tools.open == Some(GroupRouteField::Filter));
+                    let filter_group = name.clone();
+                    let filter_button = proxy_tool_button(
+                        format!("group-filter:{name}"), filter_label,
+                        if filter_enabled { "icons/search-x.svg" } else { "icons/search.svg" },
+                        !group_filter.is_empty() || filter_enabled,
+                    )
+                    .disabled(route_count == 0)
+                    .on_click(cx.listener(move |paw, _, window, cx| {
+                        cx.stop_propagation();
+                        paw.expanded_groups.insert(filter_group.clone());
+                        paw.show_group_route_field(&filter_group, GroupRouteField::Filter, true, window, cx);
+                    }));
+                    let expand_label = if open {
+                        localized_proxy_tool(self.locale, "Collapse group", "折叠分组")
+                    } else {
+                        localized_proxy_tool(self.locale, "Expand group", "展开分组")
+                    };
+                    let expand_group = name.clone();
+                    let expand_button = proxy_tool_button(
+                        format!("group-expand:{name}"), expand_label,
+                        if open { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" }, false,
+                    )
+                    .disabled(!expandable || !query.is_empty())
+                    .aria_toggled(if open { gpui_kit::accesskit::Toggled::True } else { gpui_kit::accesskit::Toggled::False })
+                    .on_click(cx.listener(move |paw, _, _, cx| {
+                        cx.stop_propagation();
+                        paw.toggle_proxy_group(&expand_group);
+                        cx.notify();
+                    }));
                     let toggle = name.clone();
-                    let heading = card()
+                    let heading = div()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(LINE))
+                        .bg(rgb(SURFACE))
                         .px_3()
                         .py_2()
                         .id(SharedString::from(format!("group:{name}")))
@@ -3245,116 +3405,53 @@ impl Paw {
                         .flex()
                         .flex_wrap()
                         .items_center()
-                        .justify_between()
-                        .gap_3()
+                        .justify_end()
+                        .gap_2()
                         .when(expandable && query.is_empty(), |row| {
                             row.cursor_pointer()
                                 .hover(|style| style.bg(rgb(0xf6f9ff)))
                                 .on_click(cx.listener(move |paw, _, _, cx| {
-                                    if !paw.expanded_groups.remove(&toggle) {
-                                        paw.expanded_groups.insert(toggle.clone());
-                                    }
+                                    paw.toggle_proxy_group(&toggle);
                                     cx.notify();
                                 }))
                         })
                         .child(
                             div()
-                                .min_w_0()
+                                .min_w(px(120.))
                                 .flex_1()
+                                .child(div().font_weight(FontWeight::BOLD).truncate().child(name.clone()))
                                 .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .font_weight(FontWeight::BOLD)
-                                                .child(name.clone()),
-                                        )
-                                        .child(compact_chip(group.kind.clone(), BLUE, SOFT_BLUE))
-                                        .child(compact_chip(
-                                            format!(
-                                                "{route_count} {}",
-                                                self.locale.message(if route_count == 1 {
-                                                    Message::Route
-                                                } else {
-                                                    Message::Routes
-                                                })
-                                            ),
-                                            FAINT,
-                                            BG,
-                                        )),
-                                )
-                                .child(
-                                    div().text_xs().text_color(rgb(FAINT)).child(
-                                        group
-                                            .now
-                                            .clone()
-                                            .unwrap_or_else(|| "No active route".into()),
-                                    ),
+                                    div().flex().items_center().gap_2().min_w_0()
+                                        .child(route_type_badge(&group.kind))
+                                        .child(div().min_w_0().truncate().text_xs().text_color(rgb(FAINT))
+                                            .child(group.now.clone().unwrap_or_else(|| localized_proxy_tool(self.locale, "No active route", "没有当前线路").into()))),
                                 ),
                         )
-                        .when(open && !members.is_empty(), |heading| {
-                            heading.child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "compare-control:{name}"
-                                            )))
-                                            .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
-                                            .child(compare_button),
-                                    )
-                                    .child(sort_button),
-                            )
-                        })
-                        .when_some(visible_selection, |heading, selected| {
-                            let group = name.clone();
-                            let member = selected.to_owned();
-                            let label = match self.locale {
-                                Locale::En => "Locate selected node",
-                                Locale::ZhCn => "定位当前节点",
-                            };
-                            heading.child(
-                                SemanticButton::new(SharedString::from(format!("locate:{name}")))
-                                    .accessibility_label(format!("{label}: {name}, {selected}"))
-                                    .cursor_pointer()
-                                    .rounded_md()
-                                    .px_2()
-                                    .py_1()
-                                    .border_1()
-                                    .border_color(rgb(LINE))
-                                    .text_sm()
-                                    .text_color(rgb(BLUE))
-                                    .bg(rgb(SOFT_BLUE))
-                                    .hover(|style| style.bg(rgb(0xd8e7ff)))
-                                    .focus_visible(|style| style.border_color(rgb(BLUE)))
-                                    .child(label)
-                                    .on_click(cx.listener(move |paw, _, _, cx| {
-                                        cx.stop_propagation();
-                                        paw.expanded_groups.insert(group.clone());
-                                        paw.locate_route = Some((group.clone(), member.clone()));
-                                        cx.notify();
-                                    })),
-                            )
-                        })
-                        .when(expandable, |heading| {
-                            heading.child(line_icon(
-                                if open {
-                                    "icons/chevron-down.svg"
-                                } else {
-                                    "icons/chevron-right.svg"
-                                },
-                                FAINT,
-                                18.,
-                            ))
-                        });
+                        .child(
+                            div().flex().flex_shrink_0().items_center().gap_1()
+                                .child(proxy_tool_slot("locate", name, locate_label, locate_button))
+                                .child(proxy_tool_slot("compare", name, compare_label, compare_button))
+                                .child(proxy_tool_slot("sort", name, sort_label, sort_button))
+                                .child(proxy_tool_slot("url", name, url_label, url_button))
+                                .child(proxy_tool_slot("details", name, detail_label, detail_button))
+                                .child(proxy_tool_slot("filter", name, filter_label, filter_button))
+                                .child(div().h(px(26.)).w(px(30.)).flex().items_center().justify_center()
+                                    .child(div().rounded_full().bg(rgb(SOFT_BLUE)).px_2().py_1()
+                                        .text_xs().text_color(rgb(BLUE))
+                                        .child(if group_filter.is_empty() {
+                                            route_count.to_string()
+                                        } else {
+                                            format!("{}/{}", members.len(), route_count)
+                                        })))
+                                .child(proxy_tool_slot("expand", name, expand_label, expand_button)),
+                        );
+                    let editor = tools.and_then(|tools| {
+                        let field = tools.open?;
+                        let state = tools.input(field)?;
+                        Some(div().flex().items_center().gap_2()
+                            .child(div().flex_shrink_0().text_xs().text_color(rgb(FAINT)).child(field.label(self.locale)))
+                            .child(div().flex_1().min_w_0().child(Input::new(&state.input).cleanable(true))))
+                    });
                     let mutable = !self.snapshot.inventory_stale
                         && group.kind.eq_ignore_ascii_case("selector");
                     Some(
@@ -3363,8 +3460,9 @@ impl Paw {
                             .flex_col()
                             .gap_2()
                             .child(heading)
+                            .children(editor)
                             .when(open, |panel| {
-                                if members.is_empty() {
+                                if !has_members {
                                     return panel.child(
                                         div()
                                             .px_3()
@@ -3444,6 +3542,7 @@ impl Paw {
                                         let row = div().flex().gap_2().children(pair.iter().map(
                                             |&(index, member)| {
                                                 let (g, n) = (name.clone(), member.to_owned());
+                                                let member_probe_value = probe_value.clone();
                                                 let selected = group.now.as_deref() == Some(member);
                                                 let target = probe_candidates
                                                     .get(member)
@@ -3535,7 +3634,7 @@ impl Paw {
                                                                     .truncate()
                                                                     .child(member.to_owned()),
                                                             )
-                                                            .when_some(kind, |detail, kind| {
+                                                            .when_some(kind.filter(|_| !hide_details), |detail, kind| {
                                                                 detail.child(route_type_badge(kind))
                                                             }),
                                                     )
@@ -3609,10 +3708,6 @@ impl Paw {
                                                                 move |paw, _, _, cx| {
                                                                     cx.stop_propagation();
                                                                     if !probe_busy {
-                                                                        let value = paw
-                                                                            .probe_url
-                                                                            .read(cx)
-                                                                            .value();
                                                                         paw.error = paw
                                                                             .desktop
                                                                             .as_ref()
@@ -3623,7 +3718,7 @@ impl Paw {
                                                                                         target
                                                                                             .clone(
                                                                                             ),
-                                                                                        &value,
+                                                                                        &member_probe_value,
                                                                                     )
                                                                                     .err()
                                                                                     .map(|e| {
@@ -3811,7 +3906,11 @@ impl Paw {
                     Locale::ZhCn => "比较需手动启动，每个符合条件的节点测试一次；未知或有歧义的节点会被跳过。节点健康检测可能改变自动路由的实际选择。",
                 }))
             };
-            let probe_caption = match (self.proxy_probe_settings_open, probe_ready, self.locale) {
+            let probe_caption = match (
+                self.proxy_probe_settings_open,
+                default_probe_ready,
+                self.locale,
+            ) {
                 (true, _, Locale::En) => "Hide latency test settings",
                 (false, true, Locale::En) => "Latency test settings",
                 (false, false, Locale::En) => "Set latency test URL",
@@ -4232,6 +4331,7 @@ impl Paw {
                     self.binary = Some(path);
                     self.show_engine_path = false;
                     self.snapshot = Default::default();
+                    self.group_route_tools.clear();
                     self.log_review.reset_pause();
                     self.error = None;
                 }
@@ -5283,6 +5383,125 @@ fn mode_groups(
         visible.extend(global);
     }
     visible
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GroupRouteField {
+    Url,
+    Filter,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl GroupRouteField {
+    fn label(self, locale: Locale) -> &'static str {
+        match self {
+            Self::Url => localized_proxy_tool(locale, "Group latency test URL", "分组测速网址"),
+            Self::Filter => localized_proxy_tool(locale, "Filter this group", "筛选当前分组"),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+struct GroupRouteInput {
+    input: Entity<InputState>,
+    _changes: Subscription,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl GroupRouteInput {
+    fn new(
+        name: &str,
+        field: GroupRouteField,
+        value: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Paw>,
+    ) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+        let group = name.to_owned();
+        let changes = cx.subscribe(&input, move |paw, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                if field == GroupRouteField::Url
+                    && paw
+                        .snapshot
+                        .group_probe
+                        .as_ref()
+                        .is_some_and(|run| run.group == group)
+                    && let Some(desktop) = &paw.desktop
+                {
+                    desktop.invalidate_group_probe();
+                }
+                cx.notify();
+            }
+        });
+        Self {
+            input,
+            _changes: changes,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[derive(Default)]
+struct GroupRouteTools {
+    open: Option<GroupRouteField>,
+    url: Option<GroupRouteInput>,
+    filter: Option<GroupRouteInput>,
+    hide_details: bool,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl GroupRouteTools {
+    fn input(&self, field: GroupRouteField) -> Option<&GroupRouteInput> {
+        match field {
+            GroupRouteField::Url => self.url.as_ref(),
+            GroupRouteField::Filter => self.filter.as_ref(),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn localized_proxy_tool(locale: Locale, en: &'static str, zh: &'static str) -> &'static str {
+    match locale {
+        Locale::En => en,
+        Locale::ZhCn => zh,
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn proxy_tool_button(id: String, label: &str, icon: &'static str, active: bool) -> SemanticButton {
+    SemanticButton::new(SharedString::from(id))
+        .accessibility_label(label.to_owned())
+        .styles(|styles| styles.disabled(|state| state.opacity(0.38)))
+        .size(px(26.))
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(if active { LINE } else { SURFACE }))
+        .bg(rgb(if active { SOFT_BLUE } else { SURFACE }))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(SOFT_BLUE)))
+        .focus_visible(|style| style.border_color(rgb(BLUE)))
+        .child(line_icon(icon, if active { BLUE } else { INK }, 16.))
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn proxy_tool_slot(
+    kind: &'static str,
+    name: &str,
+    hint: &'static str,
+    button: SemanticButton,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("tool-slot:{name}:{kind}")))
+        .flex_shrink_0()
+        .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(hint).build(window, cx)
+        })
+        .child(button)
 }
 
 #[cfg(any(target_os = "linux", windows))]

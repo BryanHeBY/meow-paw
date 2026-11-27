@@ -206,6 +206,94 @@ fn sorting_from_proxy_header_does_not_collapse_group(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn proxy_group_actions_align_across_states_and_apply_locally(cx: &mut TestAppContext) {
+    use super::GroupRouteField;
+    cx.update(gpui_kit::init);
+    let holder = Rc::new(RefCell::new(None));
+    let result = holder.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let paw = open(
+            None,
+            None,
+            (Page::Proxies, Locale::En),
+            false,
+            (Preferences::discover(false).0, None),
+            window,
+            cx,
+        );
+        super::seed_proxy_fixture(&paw, cx);
+        *result.borrow_mut() = Some(paw.clone());
+        gpui_kit::base::Root::new(paw, window, cx)
+    });
+    let paw = holder.borrow_mut().take().unwrap();
+    for width in [1120., 760., 560.] {
+        ui.simulate_resize(gpui_kit::size(gpui_kit::px(width), gpui_kit::px(900.)));
+        ui.update(|window, cx| {
+            window.activate_window();
+            window.render_frame(cx);
+            assert!(paw.read(cx).expanded_groups.contains("Daily Proxy"));
+            assert!(!paw.read(cx).expanded_groups.contains("Work"));
+            let mut prev = gpui_kit::px(0.);
+            for prefix in [
+                "locate",
+                "group-compare",
+                "proxy-order",
+                "group-probe-url",
+                "group-details",
+                "group-filter",
+                "group-expand",
+            ] {
+                let find =
+                    |name| window.find(gpui_kit::SharedString::from(format!("{prefix}:{name}")));
+                let open = find("Daily Proxy");
+                let closed = find("Work");
+                assert_eq!(open.role(), Some(gpui_kit::Role::Button));
+                assert_eq!(closed.role(), Some(gpui_kit::Role::Button));
+                assert_eq!(open.bounds().size.width, gpui_kit::px(26.));
+                assert_eq!(
+                    closed.bounds().origin.x,
+                    open.bounds().origin.x,
+                    "{prefix} at {width}"
+                );
+                assert!(open.bounds().origin.x > prev);
+                assert!(open.bounds().origin.x + gpui_kit::px(26.) < gpui_kit::px(width));
+                prev = open.bounds().origin.x;
+            }
+        });
+    }
+
+    ui.simulate_resize(gpui_kit::size(gpui_kit::px(1120.), gpui_kit::px(900.)));
+    ui.update(|window, cx| {
+        window.render_frame(cx);
+        window.click("group-filter:Work", cx);
+        window.render_frame(cx);
+        assert!(paw.read(cx).expanded_groups.contains("Work"));
+        let filter = paw.read(cx).group_route_tools["Work"]
+            .filter
+            .as_ref()
+            .unwrap()
+            .input
+            .clone();
+        filter.update(cx, |input, cx| input.set_value("DIRECT", window, cx));
+        window.render_frame(cx);
+        assert!(window.find_all("proxy:Work:1").is_empty());
+        assert!(window.find("proxy:Work:0").visible());
+        assert!(!window.find_all("proxy:Daily Proxy:1").is_empty());
+        window.click("group-details:Work", cx);
+        assert!(paw.read(cx).group_route_tools["Work"].hide_details);
+        assert!(!paw.read(cx).group_route_tools.contains_key("Daily Proxy"));
+        window.click("group-probe-url:Work", cx);
+        window.render_frame(cx);
+        assert!(paw.read(cx).group_route_tools["Work"].open == Some(GroupRouteField::Url));
+        assert!(paw.read(cx).snapshot.group_probe.is_none());
+        window.click("group-compare:Daily Proxy", cx);
+        window.render_frame(cx);
+        assert!(paw.read(cx).group_route_tools["Daily Proxy"].open == Some(GroupRouteField::Url));
+        assert!(paw.read(cx).snapshot.group_probe.is_none());
+    });
+}
+
+#[gpui_kit::test]
 fn profile_forget_has_context_and_leaves_the_original_file(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let dir = tempfile::tempdir().unwrap();
