@@ -227,6 +227,8 @@ pub struct Controller {
     secret: String,
 }
 
+pub(crate) const LOG_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
 impl Controller {
     pub fn new(address: SocketAddr, secret: String) -> Result<Self, ControllerError> {
         if !address.ip().is_loopback() || address.port() == 0 {
@@ -471,7 +473,7 @@ impl Controller {
         let config = ureq::Agent::config_builder()
             .proxy(None)
             .max_redirects(0)
-            .timeout_connect(Some(Duration::from_secs(2)))
+            .timeout_connect(Some(LOG_CONNECT_TIMEOUT))
             .timeout_per_read(Some(Duration::from_secs(4)))
             .build();
         let agent: ureq::Agent = config.into();

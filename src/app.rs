@@ -699,8 +699,12 @@ fn run_log_worker(
             break;
         }
         history.set_state(LogStreamState::Reconnecting);
-        thread::park_timeout(Duration::from_millis(250 * (1 << (failures - 1))));
+        thread::park_timeout(log_retry_delay(failures));
     }
+}
+
+fn log_retry_delay(failures: usize) -> Duration {
+    Duration::from_millis(250 * (1 << (failures - 1)))
 }
 
 impl Drop for LogWorker {
@@ -3655,7 +3659,10 @@ mod tests {
     }
 
     fn wait_for_log_state(history: &LogHistory, state: LogStreamState) {
-        let deadline = Instant::now() + Duration::from_secs(8);
+        wait_for_log_state_until(history, state, Instant::now() + Duration::from_secs(8));
+    }
+
+    fn wait_for_log_state_until(history: &LogHistory, state: LogStreamState, deadline: Instant) {
         while history.state() != state {
             assert!(
                 Instant::now() < deadline,
@@ -3829,8 +3836,11 @@ mod tests {
     }
 
     fn log_fixture_request(listener: &std::net::TcpListener) -> std::net::TcpStream {
+        read_log_fixture_request(listener.accept().unwrap().0)
+    }
+
+    fn read_log_fixture_request(stream: std::net::TcpStream) -> std::net::TcpStream {
         use std::io::{BufRead, BufReader};
-        let (stream, _) = listener.accept().unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -3840,7 +3850,11 @@ mod tests {
         assert!(line.starts_with("GET /logs?format=structured HTTP/"));
         loop {
             line.clear();
-            reader.read_line(&mut line).unwrap();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "incomplete request"
+            );
             if line == "\r\n" {
                 break;
             }
@@ -3964,8 +3978,8 @@ mod tests {
     }
 
     #[test]
-    fn log_worker_bounds_refused_connections_and_empty_eof_retries() {
-        use std::io::Write;
+    fn log_worker_exhausts_refused_connections() {
+        use crate::engine::controller::LOG_CONNECT_TIMEOUT;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let controller = crate::engine::controller::Controller::new(
             listener.local_addr().unwrap(),
@@ -3974,20 +3988,43 @@ mod tests {
         .unwrap();
         drop(listener);
         let history = LogHistory::default();
+        // Windows can take the entire connect timeout even on a closed loopback port.
+        // Budget all five connects and the actual delays, plus room for scheduling.
+        let deadline = Instant::now()
+            + LOG_CONNECT_TIMEOUT * (LOG_RETRY_LIMIT as u32)
+            + (1..LOG_RETRY_LIMIT).map(log_retry_delay).sum::<Duration>()
+            + Duration::from_secs(3);
         let worker = LogWorker::start(controller, history.clone());
-        wait_for_log_state(&history, LogStreamState::Reconnecting);
-        wait_for_log_state(&history, LogStreamState::Unavailable);
+        wait_for_log_state_until(&history, LogStreamState::Unavailable, deadline);
+        assert!(history.recent().is_empty());
         drop(worker);
+    }
 
+    #[test]
+    fn log_worker_bounds_empty_eof_retries() {
+        use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let controller = crate::engine::controller::Controller::new(
             listener.local_addr().unwrap(),
             String::new(),
         )
         .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
         let server = thread::spawn(move || {
             for _ in 0..LOG_RETRY_LIMIT {
-                let mut stream = log_fixture_request(&listener);
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "missing log retry");
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("could not accept log retry: {e}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                let mut stream = read_log_fixture_request(stream);
                 stream
                     .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                     .unwrap();
@@ -3995,7 +4032,7 @@ mod tests {
         });
         let history = LogHistory::default();
         let worker = LogWorker::start(controller, history.clone());
-        wait_for_log_state(&history, LogStreamState::Unavailable);
+        wait_for_log_state_until(&history, LogStreamState::Unavailable, deadline);
         assert!(history.recent().is_empty());
         drop(worker);
         server.join().unwrap();
