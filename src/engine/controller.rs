@@ -12,6 +12,7 @@ pub struct Proxy {
     #[serde(default)]
     pub hidden: bool,
     pub alive: Option<bool>,
+    pub udp: Option<bool>,
     #[serde(default)]
     pub history: Vec<DelaySample>,
 }

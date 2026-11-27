@@ -3156,8 +3156,8 @@ impl Paw {
             } else {
                 Default::default()
             };
-            let route_kinds = if ownership_available {
-                unambiguous_route_kinds(inventory)
+            let route_details = if ownership_available {
+                unambiguous_route_details(inventory)
             } else {
                 Default::default()
             };
@@ -3575,12 +3575,19 @@ impl Paw {
                                                             "Test unavailable".into()
                                                         }
                                                     });
-                                                let kind =
-                                                    route_kinds.get(member).copied().flatten();
-                                                let selection_label = match kind {
-                                                    Some(kind) => format!("{member} · {kind}"),
-                                                    None => member.to_owned(),
-                                                };
+                                                let details = route_details.get(member).copied().flatten();
+                                                let mut selection_label = member.to_owned();
+                                                if let Some(details) = details {
+                                                    if let Some(current) = details.current {
+                                                        selection_label.push_str(" · ");
+                                                        selection_label.push_str(current);
+                                                    }
+                                                    selection_label.push_str(" · ");
+                                                    selection_label.push_str(details.kind);
+                                                    if details.udp {
+                                                        selection_label.push_str(" · UDP");
+                                                    }
+                                                }
                                                 let selection =
                                                     SemanticButton::new(SharedString::from(
                                                         format!("proxy:{name}:{index}"),
@@ -3634,8 +3641,13 @@ impl Paw {
                                                                     .truncate()
                                                                     .child(member.to_owned()),
                                                             )
-                                                            .when_some(kind.filter(|_| !hide_details), |detail, kind| {
-                                                                detail.child(route_type_badge(kind))
+                                                            .when_some(details.filter(|_| !hide_details), |detail, details| {
+                                                                detail.child(div().mt(px(3.)).flex().items_center().gap_1().min_w_0()
+                                                                    .when_some(details.current, |row, current| {
+                                                                        row.child(div().min_w_0().truncate().text_xs().text_color(rgb(FAINT)).child(current.to_owned()))
+                                                                    })
+                                                                    .child(route_type_badge(details.kind))
+                                                                    .when(details.udp, |row| row.child(route_type_badge("UDP"))))
                                                             }),
                                                     )
                                                     .when_some(
@@ -4997,6 +5009,12 @@ impl Paw {
             ]
             .iter()
             .any(|input| input.focus_handle(cx).is_focused(window))
+            || self.group_route_tools.values().any(|tools| {
+                [tools.url.as_ref(), tools.filter.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|field| field.input.focus_handle(cx).is_focused(window))
+            })
         {
             return false;
         }
@@ -5586,9 +5604,17 @@ impl ProxyOrder {
 type RouteDelayMap<'a> = std::collections::HashMap<&'a str, Option<u32>>;
 
 #[cfg(any(target_os = "linux", windows))]
-fn unambiguous_route_kinds(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RouteDetails<'a> {
+    kind: &'a str,
+    udp: bool,
+    current: Option<&'a str>,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn unambiguous_route_details(
     inventory: &meow_paw::engine::controller::Inventory,
-) -> HashMap<&str, Option<&str>> {
+) -> HashMap<&str, Option<RouteDetails<'_>>> {
     let mut kinds = HashMap::new();
     for (name, proxy) in inventory
         .groups
@@ -5610,7 +5636,11 @@ fn unambiguous_route_kinds(
         kinds
             .entry(name)
             .and_modify(|kind| *kind = None)
-            .or_insert(valid.then_some(kind));
+            .or_insert(valid.then_some(RouteDetails {
+                kind,
+                udp: proxy.udp == Some(true),
+                current: proxy.now.as_deref().filter(|name| !name.trim().is_empty()),
+            }));
     }
     kinds
 }
@@ -7001,7 +7031,7 @@ mod tests {
 
     #[test]
     #[cfg(any(target_os = "linux", windows))]
-    fn route_kinds_require_a_unique_known_controller_entry() {
+    fn route_details_require_a_unique_known_controller_entry() {
         use meow_paw::engine::controller::{Inventory, Node, Origin, Proxy};
         let proxy = |kind: &str| Proxy {
             kind: kind.into(),
@@ -7028,9 +7058,40 @@ mod tests {
             ],
             ..Inventory::default()
         };
-        let kinds = super::unambiguous_route_kinds(&inventory);
-        assert_eq!(kinds["Tokyo"], Some("Socks5"));
-        assert_eq!(kinds["Group"], Some("Selector"));
+        let kinds = super::unambiguous_route_details(&inventory);
+        assert_eq!(kinds["Tokyo"].unwrap().kind, "Socks5");
+        assert!(!kinds["Tokyo"].unwrap().udp);
+        assert_eq!(kinds["Group"].unwrap().kind, "Selector");
+
+        let direct: Proxy = serde_json::from_str(r#"{"type":"Direct","udp":true}"#).unwrap();
+        let explicit_no: Proxy = serde_json::from_str(r#"{"type":"Socks5","udp":false}"#).unwrap();
+        let inventory = Inventory {
+            nodes: vec![
+                Node {
+                    name: "DIRECT".into(),
+                    origin: Origin::Local,
+                    proxy: direct,
+                },
+                Node {
+                    name: "No UDP".into(),
+                    origin: Origin::Local,
+                    proxy: explicit_no,
+                },
+            ],
+            groups: [(
+                "Group".into(),
+                Proxy {
+                    now: Some("DIRECT".into()),
+                    ..proxy("Selector")
+                },
+            )]
+            .into(),
+            ..Inventory::default()
+        };
+        let details = super::unambiguous_route_details(&inventory);
+        assert!(details["DIRECT"].unwrap().udp);
+        assert!(!details["No UDP"].unwrap().udp);
+        assert_eq!(details["Group"].unwrap().current, Some("DIRECT"));
         for name in ["Collision", "Duplicate", "Bad", "Empty", "Missing"] {
             assert_eq!(kinds.get(name).copied().flatten(), None, "{name}");
         }
@@ -7071,6 +7132,18 @@ mod tests {
             "icons/chevron-down.svg",
             "icons/chevron-right.svg",
             "icons/circle-check.svg",
+            "icons/target.svg",
+            "icons/gauge.svg",
+            "icons/square.svg",
+            "icons/list-filter.svg",
+            "icons/clock.svg",
+            "icons/arrow-down-a-z.svg",
+            "icons/radio-tower.svg",
+            "icons/wifi-off.svg",
+            "icons/eye.svg",
+            "icons/eye-off.svg",
+            "icons/search.svg",
+            "icons/search-x.svg",
         ]);
         for path in paths {
             assert!(assets.load(path).unwrap().is_some(), "missing SVG: {path}");
