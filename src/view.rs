@@ -4409,6 +4409,7 @@ impl Paw {
                                 ProviderPanel {
                                     owner: owner.clone(),
                                     close_focus: content_close_focus,
+                                    bulk_focus: cx.focus_handle(),
                                     refresh_focus: HashMap::new(),
                                 }
                             });
@@ -5551,6 +5552,7 @@ fn install_provider_panel_keys(cx: &mut App) {
 struct ProviderPanel {
     owner: Entity<Paw>,
     close_focus: FocusHandle,
+    bulk_focus: FocusHandle,
     refresh_focus: HashMap<String, FocusHandle>,
 }
 
@@ -5597,7 +5599,25 @@ impl Render for ProviderPanel {
         let stale = paw.snapshot.inventory_stale;
         let inventory = paw.snapshot.inventory.as_deref();
         let unavailable = inventory.is_none_or(|inventory| inventory.provider_error.is_some());
-        let busy = paw.snapshot.refreshing_provider.is_some();
+        let batch = paw.snapshot.provider_batch.as_ref();
+        let batch_active = batch.is_some_and(|job| job.active());
+        let busy = paw.snapshot.refreshing_provider.is_some() || batch_active;
+        let epoch = paw.snapshot.probe_epoch;
+        let http_count = inventory.map_or(0, |inventory| {
+            inventory
+                .providers
+                .values()
+                .filter(|p| p.vehicle_type.eq_ignore_ascii_case("http"))
+                .count()
+        });
+        let bulk_enabled = !busy
+            && !stale
+            && !unavailable
+            && matches!(
+                paw.snapshot.engine,
+                meow_paw::app::EngineStatus::Running { .. }
+            )
+            && (1..=meow_paw::app::MAX_PROVIDER_REFRESH_BATCH).contains(&http_count);
         let now = std::time::UNIX_EPOCH
             .elapsed()
             .ok()
@@ -5616,6 +5636,67 @@ impl Render for ProviderPanel {
             .flex()
             .flex_col()
             .gap_3();
+        let owner = self.owner.clone();
+        let bulk_label = locale.message(if batch_active {
+            Message::ProviderRefreshing
+        } else {
+            Message::ProviderRefreshAll
+        });
+        content = content.child(
+            semantic_secondary_button("provider-refresh-all", bulk_label)
+                .track_focus(&self.bulk_focus)
+                .disabled(!bulk_enabled)
+                .when(bulk_enabled, |button| {
+                    button.on_click(move |event, _, cx| {
+                        if matches!(event, ClickEvent::Keyboard(_)) {
+                            cx.stop_propagation();
+                        }
+                        owner.update(cx, |paw, cx| {
+                            paw.error = paw.desktop.as_ref().and_then(|desktop| {
+                                desktop
+                                    .refresh_all_http_providers(epoch)
+                                    .err()
+                                    .map(|e| e.to_string())
+                            });
+                            cx.notify();
+                        });
+                    })
+                }),
+        );
+        if http_count > meow_paw::app::MAX_PROVIDER_REFRESH_BATCH {
+            content = content.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(FAINT))
+                    .child(locale.message(Message::ProviderRefreshBatchLimit)),
+            );
+        }
+        if let Some(job) = batch {
+            content = content.child(div().text_sm().text_color(rgb(FAINT)).child(format!(
+                "{}: {}/{}",
+                locale.message(Message::ProviderRefreshProgress),
+                job.results.len(),
+                job.total,
+            )));
+            for (name, outcome) in &job.results {
+                use meow_paw::app::ProviderRefreshOutcome::*;
+                let label = locale.message(match outcome {
+                    Refreshed => Message::ProviderRefreshSucceeded,
+                    Failed => Message::ProviderRefreshFailed,
+                    Unknown => Message::ProviderRefreshUnknown,
+                    Unavailable => Message::ProviderRefreshUnavailable,
+                });
+                content = content.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child(format!("{name}: {label}")),
+                );
+            }
+        }
+        if let Some(error) = &paw.snapshot.provider_error {
+            content = content.child(div().text_sm().text_color(rgb(FAINT)).child(error.clone()));
+        }
         if stale || unavailable {
             content = content.child(
                 div()
@@ -5779,7 +5860,7 @@ impl Render for ProviderPanel {
                                     owner.update(cx, |paw, cx| {
                                         paw.error = paw.desktop.as_ref().and_then(|desktop| {
                                             desktop
-                                                .refresh_provider(label.clone())
+                                                .refresh_provider(epoch, label.clone())
                                                 .err()
                                                 .map(|e| e.to_string())
                                         });

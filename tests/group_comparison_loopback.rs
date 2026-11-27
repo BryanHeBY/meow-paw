@@ -1,7 +1,10 @@
 #![cfg(target_os = "linux")]
 
 use meow_paw::{
-    app::{Desktop, EngineStatus, GROUP_PROBE_TARGET_LIMIT, ProxyProbeStatus, Snapshot},
+    app::{
+        Desktop, EngineStatus, GROUP_PROBE_TARGET_LIMIT, ProviderRefreshOutcome, ProxyProbeStatus,
+        Snapshot,
+    },
     engine::controller::Origin,
 };
 use std::{
@@ -59,22 +62,100 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"))
 }
 
-#[test]
-fn explicit_group_comparison_uses_bounded_unambiguous_requests_and_ignores_stale_results() {
-    let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("fake-meow");
+fn setup_fixture(dir: &Path) -> (Desktop, PathBuf) {
+    let binary = dir.join("fake-meow");
     let executable = std::env::current_exe().unwrap();
     // The managed launcher performs two preflight invocations before the actual child.
     let script = format!(
         "#!/bin/sh\nconfig=\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -t) exit 0 ;;\n    -f) shift; config=$1 ;;\n  esac\n  shift\ndone\nPAW_FAKE_CONFIG=\"$config\" PAW_FAKE_DIR={} exec {} --ignored --exact fake_controller_child\n",
-        shell_quote(dir.path()),
+        shell_quote(dir),
         shell_quote(&executable)
     );
     fs::write(&binary, script).unwrap();
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
-    let profile = dir.path().join("fixture.yaml");
+    let profile = dir.join("fixture.yaml");
     fs::write(&profile, "mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
     let desktop = Desktop::with_mixed_port(binary, 0).unwrap();
+    (desktop, profile)
+}
+
+#[test]
+fn provider_batch_is_explicit_serial_partial_and_session_fenced() {
+    let dir = tempfile::tempdir().unwrap();
+    let (desktop, profile) = setup_fixture(dir.path());
+    fs::write(dir.path().join("provider-batch"), "enabled").unwrap();
+    desktop.start(profile.clone()).unwrap();
+    let epoch = wait_for(&desktop, |s| {
+        matches!(s.engine, EngineStatus::Running { .. }) && s.inventory.is_some()
+    })
+    .probe_epoch;
+    assert!(
+        desktop
+            .refresh_all_http_providers(epoch.wrapping_sub(1))
+            .is_err()
+    );
+    assert!(
+        !requests(dir.path())
+            .iter()
+            .any(|line| line.starts_with("PUT "))
+    );
+    desktop.refresh_all_http_providers(epoch).unwrap();
+    wait_for_request(dir.path(), "PUT /providers/proxies/A%20HTTP ");
+    assert!(desktop.refresh_provider(epoch, "B".into()).is_err());
+    desktop.apply_profile(profile.clone()).unwrap();
+    wait_for(&desktop, |s| {
+        s.action_error
+            .as_deref()
+            .is_some_and(|e| e.contains("provider refresh is still finishing"))
+    });
+    assert!(
+        !requests(dir.path())
+            .iter()
+            .any(|line| line.contains("PUT /providers/proxies/B "))
+    );
+    fs::write(dir.path().join("release-helpers"), "go").unwrap();
+    let done = wait_for(&desktop, |s| {
+        s.provider_batch.as_ref().is_some_and(|job| !job.active())
+    });
+    assert_eq!(done.probe_epoch, epoch);
+    let results = done.provider_batch.unwrap().results;
+    assert_eq!(results.len(), 2);
+    assert_eq!(results["A HTTP"], ProviderRefreshOutcome::Refreshed);
+    assert_eq!(results["B"], ProviderRefreshOutcome::Failed);
+    let writes: Vec<_> = requests(dir.path())
+        .into_iter()
+        .filter(|line| line.starts_with("PUT "))
+        .collect();
+    assert_eq!(
+        writes,
+        [
+            "PUT /providers/proxies/A%20HTTP HTTP/1.1",
+            "PUT /providers/proxies/B HTTP/1.1"
+        ]
+    );
+
+    fs::remove_file(dir.path().join("release-helpers")).unwrap();
+    desktop.refresh_all_http_providers(epoch).unwrap();
+    wait_for(&desktop, |s| {
+        s.refreshing_provider.as_deref() == Some("A HTTP")
+    });
+    desktop.stop();
+    let stopped = wait_for(&desktop, |s| matches!(s.engine, EngineStatus::Stopped));
+    assert!(stopped.provider_batch.is_none());
+    assert!(desktop.refresh_all_http_providers(epoch).is_err());
+    assert_eq!(
+        requests(dir.path())
+            .iter()
+            .filter(|line| line.contains("PUT /providers/proxies/B "))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn explicit_group_comparison_uses_bounded_unambiguous_requests_and_ignores_stale_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let (desktop, profile) = setup_fixture(dir.path());
     desktop.start(profile).unwrap();
     let started = wait_for(&desktop, |s| {
         matches!(s.engine, EngineStatus::Running { .. }) && s.inventory.is_some()
@@ -277,6 +358,27 @@ fn serve(mut stream: TcpStream, secret: &str, dir: &Path) {
             serde_json::json!({"type":"Selector", "all":names}),
         );
         ("200 OK", serde_json::json!({"proxies":routes}))
+    } else if path == "/providers/proxies" && dir.join("provider-batch").exists() {
+        (
+            "200 OK",
+            serde_json::json!({"providers":{
+                "A HTTP":{"vehicleType":"HTTP","proxies":[]},
+                "B":{"vehicleType":"http","proxies":[]},
+                "Local":{"vehicleType":"File","proxies":[]}
+            }}),
+        )
+    } else if request.starts_with("PUT ") && path == "/providers/proxies/A%20HTTP" {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !dir.join("release-helpers").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = write!(
+            stream,
+            "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        );
+        return;
+    } else if request.starts_with("PUT ") && path == "/providers/proxies/B" {
+        ("503 Service Unavailable", serde_json::json!({}))
     } else if path == "/providers/proxies" {
         (
             "200 OK",

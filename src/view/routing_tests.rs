@@ -273,6 +273,8 @@ fn provider_panel_tracks_stale_empty_and_busy_inventory(cx: &mut TestAppContext)
         window.click("proxy-providers-toggle", cx);
         window.render_frame(cx);
         let id = "provider-refresh:示例供应商";
+        let bulk = "provider-refresh-all";
+        assert_eq!(window.find(bulk).label(), Some("刷新所有 HTTP 代理集合"));
         assert_ne!(window.find(id).disabled(), Some(true));
         assert!(window.try_find("provider-refresh:本地").is_none());
         let texts = gpui_kit::base::test_support::texts(window);
@@ -280,7 +282,15 @@ fn provider_panel_tracks_stale_empty_and_busy_inventory(cx: &mut TestAppContext)
         assert!(texts.iter().any(|text| text.text().contains("10 B")
             && text.text().contains("20 B")
             && text.text().contains("100 B")));
-        paw.update(cx, |paw, _| paw.error = Some("sentinel".into()));
+        paw.update(cx, |paw, cx| {
+            paw.error = Some("sentinel".into());
+            paw.snapshot.engine = meow_paw::app::EngineStatus::Running { mixed_port: 7890 };
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert_ne!(window.find(bulk).disabled(), Some(true));
+        window.press("tab", cx);
+        assert_eq!(window.find(bulk).focused(), Some(true));
         window.press("tab", cx);
         assert_eq!(window.find(id).focused(), Some(true));
         window.press("enter", cx);
@@ -290,6 +300,7 @@ fn provider_panel_tracks_stale_empty_and_busy_inventory(cx: &mut TestAppContext)
             cx.notify();
         });
         window.render_frame(cx);
+        assert_eq!(window.find(bulk).disabled(), Some(true));
         assert_eq!(window.find(id).disabled(), Some(true));
         assert_eq!(window.find(id).label(), Some("正在刷新…: 示例供应商"));
         paw.update(cx, |paw, cx| {
@@ -299,6 +310,7 @@ fn provider_panel_tracks_stale_empty_and_busy_inventory(cx: &mut TestAppContext)
         });
         window.render_frame(cx);
         assert!(window.try_find("provider-panel-warning").is_some());
+        assert_eq!(window.find(bulk).disabled(), Some(true));
         assert_eq!(window.find(id).disabled(), Some(true));
         assert_eq!(window.find(id).label(), Some("刷新不可用: 示例供应商"));
         paw.update(cx, |paw, cx| {
@@ -318,6 +330,7 @@ fn provider_panel_tracks_stale_empty_and_busy_inventory(cx: &mut TestAppContext)
         window.render_frame(cx);
         assert!(window.try_find("provider-panel-warning").is_none());
         assert!(window.try_find("provider-panel-empty").is_some());
+        assert_eq!(window.find(bulk).disabled(), Some(true));
         assert_eq!(window.find("provider-panel-close").focused(), Some(true));
         window.press("escape", cx);
         window.render_frame(cx);

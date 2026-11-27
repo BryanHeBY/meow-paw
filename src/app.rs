@@ -399,6 +399,72 @@ impl GroupProbeResults {
     }
 }
 
+pub const MAX_PROVIDER_REFRESH_BATCH: usize = 32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderRefreshOutcome {
+    Refreshed,
+    Failed,
+    Unknown,
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProviderBatchStatus {
+    pub total: usize,
+    pub results: BTreeMap<String, ProviderRefreshOutcome>,
+}
+
+impl ProviderBatchStatus {
+    pub fn active(&self) -> bool {
+        self.results.len() < self.total
+    }
+}
+
+struct ProviderRefreshJob {
+    epoch: u64,
+    pending: VecDeque<String>,
+}
+
+fn provider_session_ready(snapshot: &Snapshot, epoch: u64) -> bool {
+    snapshot.probe_epoch == epoch
+        && matches!(snapshot.engine, EngineStatus::Running { .. })
+        && snapshot.apply_reservation.is_none()
+        && snapshot.applying_profile.is_none()
+}
+
+fn fresh_http_providers(snapshot: &Snapshot) -> impl Iterator<Item = &String> {
+    snapshot
+        .inventory
+        .as_deref()
+        .filter(|inventory| !snapshot.inventory_stale && inventory.provider_error.is_none())
+        .into_iter()
+        .flat_map(|inventory| &inventory.providers)
+        .filter(|(_, p)| p.vehicle_type.eq_ignore_ascii_case("http"))
+        .map(|(name, _)| name)
+}
+
+fn provider_refresh_targets(snapshot: &Snapshot, name: Option<String>) -> Option<VecDeque<String>> {
+    if let Some(name) = name {
+        return fresh_http_providers(snapshot)
+            .any(|p| p == &name)
+            .then(|| VecDeque::from([name]));
+    }
+    let names: VecDeque<_> = fresh_http_providers(snapshot)
+        .take(MAX_PROVIDER_REFRESH_BATCH + 1)
+        .cloned()
+        .collect();
+    (!names.is_empty() && names.len() <= MAX_PROVIDER_REFRESH_BATCH).then_some(names)
+}
+
+fn provider_refresh_outcome(result: &Result<(), ControllerError>) -> ProviderRefreshOutcome {
+    match result {
+        Ok(()) => ProviderRefreshOutcome::Refreshed,
+        Err(ControllerError::Unreachable) => ProviderRefreshOutcome::Unknown,
+        Err(_) => ProviderRefreshOutcome::Failed,
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub revision: u64,
@@ -431,6 +497,7 @@ pub struct Snapshot {
     pub action_error: Option<String>,
     pub refreshing_provider: Option<String>,
     pub provider_error: Option<String>,
+    pub provider_batch: Option<ProviderBatchStatus>,
     pub probe_epoch: u64,
     pub probes: ProxyProbeResults,
     pub probe_busy: bool,
@@ -789,7 +856,10 @@ enum Command {
     SetMode(RoutingMode),
     ReadRules,
     ReadRuleProviders,
-    RefreshProvider(String),
+    RefreshProviders {
+        epoch: u64,
+        name: Option<String>,
+    },
     ProbeProxy {
         epoch: u64,
         target: ProxyProbeTarget,
@@ -1014,8 +1084,36 @@ impl Desktop {
         change(&self.snapshot, |s| s.unlock.cancel());
     }
 
-    pub fn refresh_provider(&self, name: String) -> io::Result<()> {
-        self.send(Command::RefreshProvider(name))
+    pub fn refresh_provider(&self, epoch: u64, name: String) -> io::Result<()> {
+        self.submit_provider_refresh(epoch, Some(name))
+    }
+
+    pub fn refresh_all_http_providers(&self, epoch: u64) -> io::Result<()> {
+        self.submit_provider_refresh(epoch, None)
+    }
+
+    fn submit_provider_refresh(&self, epoch: u64, name: Option<String>) -> io::Result<()> {
+        let s = self.snapshot.lock().expect("snapshot poisoned");
+        if self.stop.load(Ordering::Acquire)
+            || self.quit.load(Ordering::Acquire)
+            || !provider_session_ready(&s, epoch)
+            || s.refreshing_provider.is_some()
+            || s.provider_batch
+                .as_ref()
+                .is_some_and(ProviderBatchStatus::active)
+        {
+            return Err(Error::new(
+                ErrorKind::WouldBlock,
+                "Provider refresh is busy or the session changed",
+            ));
+        }
+        if provider_refresh_targets(&s, name.clone()).is_none() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "No eligible HTTP provider refresh is available",
+            ));
+        }
+        self.send(Command::RefreshProviders { epoch, name })
     }
 
     pub fn read_rules(&self) -> io::Result<()> {
@@ -1147,7 +1245,8 @@ fn run(
     // Do not block Stop/Quit on a slow remote provider fetch.
     let (refresh_tx, refresh_rx) = mpsc::channel();
     let mut generation = 0_u64;
-    let mut refresh_inflight = false;
+    let mut refresh_inflight: Option<u64> = None;
+    let mut refresh_job: Option<ProviderRefreshJob> = None;
     let (rule_provider_tx, rule_provider_rx) = mpsc::channel();
     let mut rule_provider_inflight = None;
     let (probe_tx, probe_rx) = mpsc::channel();
@@ -1359,6 +1458,19 @@ fn run(
                 let path = input.key();
                 {
                     let mut s = snapshot.lock().expect("snapshot poisoned");
+                    // In-place config apply keeps the same controller credential.
+                    // An already-issued PUT cannot be recalled safely, so refuse
+                    // apply rather than let it cross into the new config.
+                    if refresh_inflight == Some(generation)
+                        && s.apply_reservation.as_ref() == Some(&reservation)
+                    {
+                        s.apply_reservation = None;
+                        s.action_error = Some(
+                            "A provider refresh is still finishing; try applying again.".into(),
+                        );
+                        s.revision = s.revision.wrapping_add(1);
+                        continue;
+                    }
                     if !begin_apply(
                         &mut s,
                         reservation,
@@ -1375,6 +1487,7 @@ fn run(
                 change(snapshot, |s| {
                     s.refreshing_provider = None;
                     s.provider_error = None;
+                    s.provider_batch = None;
                     clear_rule_provider_state(s);
                     s.probe_epoch = generation;
                     s.probes = ProxyProbeResults::default();
@@ -1435,57 +1548,33 @@ fn run(
                     next_sample = Instant::now();
                 }
             }
-            Ok(Command::RefreshProvider(name)) => {
-                if let Some(active) = &session {
-                    let already_busy = snapshot
-                        .lock()
-                        .expect("snapshot poisoned")
-                        .refreshing_provider
-                        .is_some();
-                    if already_busy || refresh_inflight {
-                        change(snapshot, |s| {
-                            s.provider_error =
-                                Some("A previous provider refresh is still finishing".into());
-                        });
-                        continue;
-                    }
-                    let available = {
-                        let s = snapshot.lock().expect("snapshot poisoned");
-                        !s.inventory_stale
-                            && s.inventory
-                                .as_ref()
-                                .filter(|inv| inv.provider_error.is_none())
-                                .and_then(|inv| inv.providers.get(&name))
-                                .is_some_and(|p| p.vehicle_type.eq_ignore_ascii_case("http"))
-                    };
-                    if !available {
-                        change(snapshot, |s| {
-                            s.provider_error = Some("Provider is no longer refreshable".into())
-                        });
-                        continue;
-                    }
-                    let controller = active.controller.clone();
-                    let tx = refresh_tx.clone();
-                    let epoch = generation;
-                    change(snapshot, |s| {
-                        s.refreshing_provider = Some(name.clone());
-                        s.provider_error = None;
+            Ok(Command::RefreshProviders { epoch, name }) => {
+                if session.is_none() || epoch != generation || cancelled() {
+                    continue;
+                }
+                let mut s = snapshot.lock().expect("snapshot poisoned");
+                if !provider_session_ready(&s, epoch) {
+                    continue;
+                }
+                if refresh_job.is_some() || refresh_inflight.is_some() {
+                    s.provider_error =
+                        Some("A previous provider refresh is still finishing".into());
+                    s.revision = s.revision.wrapping_add(1);
+                    continue;
+                }
+                let bulk = name.is_none();
+                if let Some(pending) = provider_refresh_targets(&s, name) {
+                    s.provider_error = None;
+                    s.provider_batch = bulk.then(|| ProviderBatchStatus {
+                        total: pending.len(),
+                        results: BTreeMap::new(),
                     });
-                    refresh_inflight = true;
-                    if thread::Builder::new()
-                        .name("paw-provider-refresh".into())
-                        .spawn(move || {
-                            let result = controller.refresh_provider(&name);
-                            let _ = tx.send((epoch, result));
-                        })
-                        .is_err()
-                    {
-                        refresh_inflight = false;
-                        change(snapshot, |s| {
-                            s.refreshing_provider = None;
-                            s.provider_error = Some("Could not start provider refresh".into());
-                        });
-                    }
+                    s.revision = s.revision.wrapping_add(1);
+                    refresh_job = Some(ProviderRefreshJob { epoch, pending });
+                } else {
+                    s.provider_error =
+                        Some("No eligible HTTP provider refresh is available".into());
+                    s.revision = s.revision.wrapping_add(1);
                 }
             }
             Ok(Command::ProbeProxy { epoch, target, url }) => {
@@ -1554,13 +1643,82 @@ fn run(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        while let Ok((epoch, result)) = refresh_rx.try_recv() {
-            refresh_inflight = false;
+        while let Ok((epoch, name, result)) = refresh_rx.try_recv() {
+            if refresh_inflight != Some(epoch) {
+                continue;
+            }
+            refresh_inflight = None;
             if epoch != generation {
                 continue;
             }
-            change(snapshot, |s| finish_provider_refresh(s, result));
+            change(snapshot, |s| {
+                if s.probe_epoch != epoch {
+                    return;
+                }
+                if let Some(batch) = &mut s.provider_batch {
+                    batch
+                        .results
+                        .insert(name, provider_refresh_outcome(&result));
+                    s.refreshing_provider = None;
+                } else {
+                    finish_provider_refresh(s, result);
+                }
+            });
             next_sample = Instant::now();
+        }
+
+        if refresh_job
+            .as_ref()
+            .is_some_and(|job| job.epoch != generation)
+        {
+            refresh_job = None;
+        }
+        if let Some(active) = &session
+            && refresh_inflight.is_none()
+            && let Some(job) = &mut refresh_job
+            && !cancelled()
+        {
+            let mut s = snapshot.lock().expect("snapshot poisoned");
+            if provider_session_ready(&s, job.epoch) {
+                if let Some(name) = job.pending.pop_front() {
+                    if !fresh_http_providers(&s).any(|p| p == &name) {
+                        if let Some(batch) = &mut s.provider_batch {
+                            batch
+                                .results
+                                .insert(name, ProviderRefreshOutcome::Unavailable);
+                        } else {
+                            s.provider_error = Some("Provider is no longer refreshable".into());
+                        }
+                    } else {
+                        let controller = active.controller.clone();
+                        let tx = refresh_tx.clone();
+                        let epoch = job.epoch;
+                        let requested = name.clone();
+                        s.refreshing_provider = Some(name.clone());
+                        refresh_inflight = Some(epoch);
+                        if thread::Builder::new()
+                            .name("paw-provider-refresh".into())
+                            .spawn(move || {
+                                let result = controller.refresh_provider(&requested);
+                                let _ = tx.send((epoch, requested, result));
+                            })
+                            .is_err()
+                        {
+                            refresh_inflight = None;
+                            s.refreshing_provider = None;
+                            if let Some(batch) = &mut s.provider_batch {
+                                batch.results.insert(name, ProviderRefreshOutcome::Failed);
+                            } else {
+                                s.provider_error = Some("Could not start provider refresh".into());
+                            }
+                        }
+                    }
+                    s.revision = s.revision.wrapping_add(1);
+                }
+                if job.pending.is_empty() && refresh_inflight.is_none() {
+                    refresh_job = None;
+                }
+            }
         }
 
         while let Ok(completion) = unlock_rx.try_recv() {
@@ -2036,6 +2194,7 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64, engine: EngineSt
         s.inventory_stale = false;
         s.refreshing_provider = None;
         s.provider_error = None;
+        s.provider_batch = None;
         set_confirmed_mode(s, None);
         s.rules = None;
         clear_rule_provider_state(s);
@@ -3605,6 +3764,46 @@ mod tests {
         );
         retain_inventory(&mut snapshot, Some(Arc::new(Inventory::default())));
         assert!(!snapshot.inventory_stale);
+    }
+
+    #[test]
+    fn provider_batch_targets_are_bounded_fresh_and_http_only() {
+        use crate::engine::controller::ProviderStatus;
+        let status = |vehicle: &str| ProviderStatus {
+            vehicle_type: vehicle.into(),
+            updated_at: None,
+            subscription_info: None,
+        };
+        let mut s = Snapshot {
+            engine: EngineStatus::Running { mixed_port: 1234 },
+            probe_epoch: 8,
+            inventory: Some(Arc::new(Inventory::default())),
+            ..Default::default()
+        };
+        assert!(provider_session_ready(&s, 8));
+        assert!(!provider_session_ready(&s, 9));
+        assert!(provider_refresh_targets(&s, None).is_none());
+        let inventory = Arc::make_mut(s.inventory.as_mut().unwrap());
+        inventory.providers.insert("local".into(), status("File"));
+        inventory.providers.insert("http".into(), status("hTtP"));
+        assert_eq!(provider_refresh_targets(&s, None).unwrap(), ["http"]);
+        assert!(provider_refresh_targets(&s, Some("local".into())).is_none());
+        s.inventory_stale = true;
+        assert!(provider_refresh_targets(&s, None).is_none());
+        s.inventory_stale = false;
+        let inventory = Arc::make_mut(s.inventory.as_mut().unwrap());
+        for i in 0..MAX_PROVIDER_REFRESH_BATCH {
+            inventory
+                .providers
+                .insert(format!("Http {i}"), status("HTTP"));
+        }
+        assert!(provider_refresh_targets(&s, None).is_none());
+        assert_eq!(
+            provider_refresh_targets(&s, Some("http".into())).unwrap(),
+            ["http"]
+        );
+        Arc::make_mut(s.inventory.as_mut().unwrap()).provider_error = Some("test".into());
+        assert!(provider_refresh_targets(&s, None).is_none());
     }
 
     #[test]
