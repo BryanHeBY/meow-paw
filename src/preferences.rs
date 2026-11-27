@@ -44,12 +44,15 @@ struct Selections {
     language: LanguagePreference,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     reduce_motion: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mixed_port: Option<std::num::NonZeroU16>,
 }
 
 #[derive(Default)]
 pub struct Preferences {
     file: Option<PathBuf>,
     selected: Selections,
+    mixed_port_override: Option<std::num::NonZeroU16>,
 }
 
 impl Preferences {
@@ -114,7 +117,22 @@ impl Preferences {
         Ok(Self {
             file: Some(file),
             selected,
+            mixed_port_override: None,
         })
+    }
+
+    pub fn set_mixed_port_override(&mut self, port: Option<std::num::NonZeroU16>) {
+        self.mixed_port_override = port;
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    pub fn mixed_port(&self) -> u16 {
+        self.mixed_port_override
+            .or(self.selected.mixed_port)
+            .map_or(
+                meow_paw::engine::session::DEFAULT_MIXED_PORT,
+                std::num::NonZeroU16::get,
+            )
     }
 
     pub fn resolve(
@@ -322,6 +340,25 @@ fn default_file() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn mixed_port_defaults_and_override_is_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("preferences.json");
+        fs::write(&file, "{}").unwrap();
+        assert_eq!(Preferences::open(file.clone()).unwrap().mixed_port(), 7890);
+
+        fs::write(&file, r#"{"mixed_port":18790}"#).unwrap();
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        assert_eq!(prefs.mixed_port(), 18790);
+        prefs.set_mixed_port_override(std::num::NonZeroU16::new(28790));
+        assert_eq!(prefs.mixed_port(), 28790);
+        prefs.set_reduce_motion(true).unwrap();
+        assert_eq!(Preferences::open(file.clone()).unwrap().mixed_port(), 18790);
+        fs::write(&file, r#"{"mixed_port":0}"#).unwrap();
+        assert!(Preferences::open(file).is_err());
+    }
 
     #[test]
     fn reduced_motion_defaults_off_and_round_trips_without_changing_language() {

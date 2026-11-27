@@ -308,7 +308,7 @@ mod tests {
         let dir = std::path::PathBuf::from(std::env::var_os("PAW_FIXTURE_DIR").unwrap());
         let binary = std::path::PathBuf::from(std::env::var_os("MEOW_BIN").unwrap());
         let profile = Profile::parse("mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
-        let session = match Session::launch(&binary, &profile, || false) {
+        let session = match Session::launch_with_mixed_port(&binary, &profile, 0, || false) {
             Ok(session) => session,
             Err(error) => {
                 std::fs::write(dir.join("launch-error"), error.to_string()).unwrap();

@@ -21,6 +21,12 @@ and execute the headless test suite with locked dependencies. They do not
 build or publish the kernel submodule or run a graphical tray session.
 See the [Windows packaging and visual acceptance runbook](docs/windows-packaging-visual-acceptance.md)
 for local provenance checks and isolated synthetic captures.
+Paw listens on `127.0.0.1:7890` for its mixed proxy. The authenticated controller
+still uses a dynamically allocated loopback port. To use a different mixed port,
+launch with `--mixed-port PORT` (temporary) or set `"mixed_port": PORT` in Paw's
+`preferences.json`. If the port is occupied, Paw reports the conflict without
+stopping the listener or choosing a different port automatically.
+
 To run the real managed-kernel test separately, set `MEOW_BIN` to the local
 kernel executable and run:
 

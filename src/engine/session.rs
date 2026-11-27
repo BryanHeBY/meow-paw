@@ -28,6 +28,26 @@ use linux::OwnedChild;
 #[cfg(windows)]
 use windows::OwnedChild;
 
+pub const DEFAULT_MIXED_PORT: u16 = 7890;
+
+fn reserve_mixed_port(port: u16) -> io::Result<TcpListener> {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|error| {
+        if error.kind() == ErrorKind::AddrInUse {
+            Error::new(ErrorKind::AddrInUse, format!(
+                "Paw mixed proxy port 127.0.0.1:{port} is already in use; choose another port with --mixed-port"
+            ))
+        } else {
+            error
+        }
+    })
+}
+
+fn reserve_listener_ports(mixed_port: u16) -> io::Result<(TcpListener, TcpListener)> {
+    let mixed = reserve_mixed_port(mixed_port)?;
+    let controller = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    Ok((mixed, controller))
+}
+
 pub struct Session {
     pub controller: Controller,
     pub mixed_port: u16,
@@ -44,11 +64,21 @@ impl Session {
         profile: &Profile,
         cancelled: impl Fn() -> bool,
     ) -> io::Result<Self> {
+        Self::launch_with_mixed_port(binary, profile, DEFAULT_MIXED_PORT, cancelled)
+    }
+
+    /// A port of zero requests an ephemeral listener for isolated fixtures.
+    pub fn launch_with_mixed_port(
+        binary: &Path,
+        profile: &Profile,
+        requested_port: u16,
+        cancelled: impl Fn() -> bool,
+    ) -> io::Result<Self> {
         let binary = binary.canonicalize()?;
         let directory = session_directory()?;
         let config = directory.path().join("config.yaml");
-        let control_slot = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-        let mixed_slot = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        // Reserve the requested port first so the dynamic controller cannot take it.
+        let (mixed_slot, control_slot) = reserve_listener_ports(requested_port)?;
         let mixed_port = mixed_slot.local_addr()?.port();
         let controller_addr =
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, control_slot.local_addr()?.port());
@@ -328,5 +358,47 @@ impl ApplyError {
             Self::Reload(error) if self.rejected() => format!("Meow rejected the profile: {error}"),
             Self::Reload(_) => "Meow did not confirm the change. Apply a profile again to confirm which configuration is running.".into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod mixed_port_tests {
+    use super::*;
+
+    #[test]
+    fn ephemeral_fixture_reserves_distinct_loopback_proxy_and_controller() -> io::Result<()> {
+        let (mixed, controller) = reserve_listener_ports(0)?;
+        let (mixed, controller) = (mixed.local_addr()?, controller.local_addr()?);
+        assert!(mixed.ip().is_loopback() && controller.ip().is_loopback());
+        assert_ne!(mixed.port(), 0);
+        assert_ne!(controller.port(), 0);
+        assert_ne!(mixed.port(), controller.port());
+        Ok(())
+    }
+
+    #[test]
+    fn occupied_mixed_port_is_not_stolen_or_replaced() -> io::Result<()> {
+        assert_eq!(DEFAULT_MIXED_PORT, 7890);
+        let existing = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let port = existing.local_addr()?.port();
+        let binary = std::env::current_exe()?;
+        let profile = Profile::parse(
+            "mode: direct
+rules: ['MATCH,DIRECT']
+",
+        )
+        .map_err(Error::other)?;
+        let error = match Session::launch_with_mixed_port(&binary, &profile, port, || false) {
+            Ok(_) => return Err(Error::other("occupied port was accepted")),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::AddrInUse);
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("127.0.0.1:{port} is already in use"))
+        );
+        assert_eq!(existing.local_addr()?.port(), port);
+        Ok(())
     }
 }

@@ -240,7 +240,7 @@ fn owner_exit_stops_managed_core() {
             "mode: direct\nipv6: false\ndns: {enable: false}\nrules: ['MATCH,DIRECT']\n",
         )
         .unwrap();
-        let session = Session::launch(&binary, &profile, || false).unwrap();
+        let session = Session::launch_with_mixed_port(&binary, &profile, 0, || false).unwrap();
         session.controller.verify().unwrap();
         fs::write(root.join("ready.tmp"), session.mixed_port.to_string()).unwrap();
         fs::rename(root.join("ready.tmp"), root.join("ready")).unwrap();

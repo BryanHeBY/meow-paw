@@ -74,7 +74,7 @@ fn explicit_group_comparison_uses_bounded_unambiguous_requests_and_ignores_stale
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
     let profile = dir.path().join("fixture.yaml");
     fs::write(&profile, "mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
-    let desktop = Desktop::new(binary).unwrap();
+    let desktop = Desktop::with_mixed_port(binary, 0).unwrap();
     desktop.start(profile).unwrap();
     let started = wait_for(&desktop, |s| {
         matches!(s.engine, EngineStatus::Running { .. }) && s.inventory.is_some()

@@ -864,7 +864,7 @@ fn routing_keyboard_activates_once_and_selected_segments_are_inert(cx: &mut Test
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         let profile = dir.path().join("synthetic.yaml");
         fs::write(&profile, "mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
-        let desktop = Desktop::new(binary).unwrap();
+        let desktop = Desktop::with_mixed_port(binary, 0).unwrap();
         desktop.start(profile).unwrap();
         wait_for(|| {
             let snapshot = desktop.snapshot();

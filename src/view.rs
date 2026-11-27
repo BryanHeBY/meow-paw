@@ -743,9 +743,9 @@ pub fn open(
             locale,
             profile,
             #[cfg(any(target_os = "linux", windows))]
-            desktop: binary
-                .as_ref()
-                .and_then(|path| meow_paw::app::Desktop::new(path.clone()).ok()),
+            desktop: binary.as_ref().and_then(|path| {
+                meow_paw::app::Desktop::with_mixed_port(path.clone(), preferences.mixed_port()).ok()
+            }),
             binary,
             #[cfg(any(target_os = "linux", windows))]
             expanded_groups: Default::default(),
@@ -4269,7 +4269,10 @@ impl Paw {
                 self.error = Some("Select an existing local Meow executable.".into());
                 return;
             }
-            match meow_paw::app::Desktop::new(path.clone()) {
+            match meow_paw::app::Desktop::with_mixed_port(
+                path.clone(),
+                self.preferences.mixed_port(),
+            ) {
                 Ok(desktop) => {
                     self.desktop = Some(desktop);
                     self.remember_selection(true, &path);

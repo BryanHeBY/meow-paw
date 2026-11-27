@@ -20,7 +20,7 @@ fn isolated_session_proxies_loopback_traffic_and_cleans_up() {
     let profile = Profile::parse(
         "mode: rule\nipv6: false\ndns: {enable: false}\nproxy-groups:\n  - {name: Test, type: select, proxies: [DIRECT, REJECT]}\nrules: ['MATCH,Test']\n",
     ).unwrap();
-    let session = Session::launch(&binary, &profile, || false).unwrap();
+    let session = Session::launch_with_mixed_port(&binary, &profile, 0, || false).unwrap();
     assert_eq!(session.controller.mode().unwrap(), RoutingMode::Rule);
     for mode in [RoutingMode::Global, RoutingMode::Direct, RoutingMode::Rule] {
         session.controller.set_mode(mode).unwrap();
@@ -102,7 +102,7 @@ fn isolated_session_proxies_loopback_traffic_and_cleans_up() {
 fn closes_only_the_selected_loopback_connection() {
     let binary = PathBuf::from(std::env::var_os("MEOW_BIN").expect("set MEOW_BIN"));
     let profile = Profile::parse("mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
-    let session = Session::launch(&binary, &profile, || false).unwrap();
+    let session = Session::launch_with_mixed_port(&binary, &profile, 0, || false).unwrap();
     let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let endpoint = origin.local_addr().unwrap();
     let mixed = (Ipv4Addr::LOCALHOST, session.mixed_port);
@@ -175,7 +175,8 @@ fn applies_local_profile_without_rebinding_and_preserves_it_on_rejection() {
         }
     }
 
-    let desktop = Desktop::new(PathBuf::from(std::env::var_os("MEOW_BIN").unwrap())).unwrap();
+    let desktop =
+        Desktop::with_mixed_port(PathBuf::from(std::env::var_os("MEOW_BIN").unwrap()), 0).unwrap();
     let fixtures = tempfile::tempdir().unwrap();
     let original = fixtures.path().join("original.yaml");
     let candidate = fixtures.path().join("candidate.yaml");
@@ -281,7 +282,7 @@ fn subscription_refresh_only_changes_disk_until_the_user_applies() {
     }
 
     let binary = PathBuf::from(std::env::var_os("MEOW_BIN").unwrap());
-    let desktop = Desktop::new(binary).unwrap();
+    let desktop = Desktop::with_mixed_port(binary, 0).unwrap();
     let fixtures = tempfile::tempdir().unwrap();
     let store_dir = fixtures.path().to_path_buf();
     let mut store = SubscriptionStore::new(store_dir.clone());
@@ -348,7 +349,7 @@ fn isolated_session_loads_inline_proxy_and_rule_providers() {
          rules: ['RULE-SET,Domains,Select', 'MATCH,DIRECT']\n",
     )
     .unwrap();
-    let session = Session::launch(&binary, &profile, || false).unwrap();
+    let session = Session::launch_with_mixed_port(&binary, &profile, 0, || false).unwrap();
     let inventory = session.controller.inventory().unwrap();
     assert!(inventory.nodes.iter().any(|node| {
         node.name == "ProviderNode" && node.origin == Origin::Provider("Embedded".to_owned())
@@ -364,25 +365,25 @@ fn provider_policy_is_compatible_with_older_engines_without_unsafe_fallback() {
     let new = PathBuf::from(std::env::var_os("MEOW_BIN").unwrap());
     let old = PathBuf::from(std::env::var_os("MEOW_OLD_BIN").unwrap());
     let local = Profile::parse("mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
-    Session::launch(&old, &local, || false)
+    Session::launch_with_mixed_port(&old, &local, 0, || false)
         .unwrap()
         .stop()
         .unwrap();
-    Session::launch(&new, &local, || false)
+    Session::launch_with_mixed_port(&new, &local, 0, || false)
         .unwrap()
         .stop()
         .unwrap();
     let remote = Profile::parse(
         "mode: direct\nproxy-providers: {P: {type: http, url: 'https://127.0.0.1:9/nodes', path: /tmp/unsafe.yaml}}\nrules: ['MATCH,DIRECT']\n",
     ).unwrap();
-    let error = match Session::launch(&old, &remote, || false) {
+    let error = match Session::launch_with_mixed_port(&old, &remote, 0, || false) {
         Ok(_) => panic!("old engine must reject HTTPS provider profiles"),
         Err(error) => error,
     };
     assert!(error.to_string().contains("not supported"));
     // No server listens at this endpoint. A new engine may start with an
     // initially empty provider, but it must not fall back to an old engine.
-    let session = Session::launch(&new, &remote, || false).unwrap();
+    let session = Session::launch_with_mixed_port(&new, &remote, 0, || false).unwrap();
     session.stop().unwrap();
 }
 
@@ -420,7 +421,7 @@ fn slow_provider_does_not_block_guarded_engine_startup() {
         "mode: direct\nproxy-providers: {{P: {{type: http, url: 'https://{address}/nodes'}}}}\nrules: ['MATCH,DIRECT']\n"
     )).unwrap();
     let start = Instant::now();
-    let session = Session::launch(&binary, &profile, || false).unwrap();
+    let session = Session::launch_with_mixed_port(&binary, &profile, 0, || false).unwrap();
     assert!(start.elapsed() < Duration::from_secs(5));
     connected.recv_timeout(Duration::from_secs(3)).unwrap();
     assert!(
@@ -473,7 +474,7 @@ fn slow_provider_does_not_block_live_profile_apply() {
     std::fs::write(&after, format!(
         "mode: direct\nproxy-providers: {{P: {{type: http, url: 'https://{address}/nodes'}}}}\nrules: ['MATCH,DIRECT']\n"
     )).unwrap();
-    let desktop = Desktop::new(binary).unwrap();
+    let desktop = Desktop::with_mixed_port(binary, 0).unwrap();
     desktop.start(before).unwrap();
     let end = Instant::now() + Duration::from_secs(8);
     while !matches!(desktop.snapshot().engine, EngineStatus::Running { .. }) {
@@ -514,7 +515,7 @@ fn guarded_https_provider_fetches_and_refreshes_over_trusted_local_tls() {
     let profile = Profile::parse(&format!(
         "mode: direct\nproxy-providers: {{P: {{type: http, url: '{url}'}}}}\nproxy-groups: [{{name: G, type: select, use: [P]}}]\nrules: ['MATCH,DIRECT']\n"
     )).unwrap();
-    let session = Session::launch(&binary, &profile, || false).unwrap();
+    let session = Session::launch_with_mixed_port(&binary, &profile, 0, || false).unwrap();
     let end = Instant::now() + Duration::from_secs(8);
     loop {
         let inventory = session.controller.inventory().unwrap();
@@ -589,7 +590,7 @@ fn saved_profile_provider_cache_is_stable_and_isolated_on_live_apply() {
     std::fs::write(&state, "online").unwrap();
     std::fs::write(&first, format!("mode: rule\n{profile}")).unwrap();
     std::fs::write(&second, format!("mode: direct\n{profile}")).unwrap();
-    let desktop = Desktop::new(binary).unwrap();
+    let desktop = Desktop::with_mixed_port(binary, 0).unwrap();
     desktop.start(first.clone()).unwrap();
     wait_for(&desktop, |s| {
         matches!(s.engine, EngineStatus::Running { .. }) && has_fixture(s)

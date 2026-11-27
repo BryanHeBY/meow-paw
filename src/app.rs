@@ -619,6 +619,10 @@ pub struct Desktop {
 
 impl Desktop {
     pub fn new(meow: PathBuf) -> io::Result<Self> {
+        Self::with_mixed_port(meow, crate::engine::session::DEFAULT_MIXED_PORT)
+    }
+
+    pub fn with_mixed_port(meow: PathBuf, mixed_port: u16) -> io::Result<Self> {
         let (command, receiver) = mpsc::sync_channel(8);
         let snapshot = Arc::new(Mutex::new(Snapshot::default()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -628,7 +632,7 @@ impl Desktop {
             thread::Builder::new()
                 .name("paw-meow-owner".into())
                 .spawn(move || {
-                    run(meow, receiver, &snapshot, &stop, &quit);
+                    run(meow, mixed_port, receiver, &snapshot, &stop, &quit);
                 })?
         };
         Ok(Self {
@@ -871,6 +875,7 @@ enum ProbeCompletion {
 
 fn run(
     binary: PathBuf,
+    mixed_port: u16,
     receiver: Receiver<Command>,
     snapshot: &Mutex<Snapshot>,
     stop: &AtomicBool,
@@ -986,7 +991,7 @@ fn run(
                 });
                 let result = input.load().and_then(|profile| {
                     change(snapshot, |s| s.diagnostics = profile.diagnostics());
-                    Session::launch(&binary, &profile, cancelled)
+                    Session::launch_with_mixed_port(&binary, &profile, mixed_port, cancelled)
                 });
                 match result {
                     Ok(active) => {

@@ -18,6 +18,7 @@ fn main() {
     let mut remember = true;
     let mut use_tray = true;
     let mut locale_override = None;
+    let mut mixed_port = None;
     #[cfg(feature = "visual-test")]
     let mut screenshot = None;
     #[cfg(feature = "visual-test")]
@@ -40,6 +41,15 @@ fn main() {
                 };
                 locale_override = Some(value.to_string_lossy().into_owned());
             }
+            Some("--mixed-port") => {
+                mixed_port = args
+                    .next()
+                    .and_then(|value| value.to_str()?.parse::<std::num::NonZeroU16>().ok());
+                if mixed_port.is_none() {
+                    eprintln!("--mixed-port requires a port from 1 to 65535");
+                    std::process::exit(2);
+                }
+            }
             Some("--start") => start = true,
             Some("--no-tray") => use_tray = false,
             Some("--no-preferences") => remember = false,
@@ -49,7 +59,7 @@ fn main() {
             Some("--fixture-proxies") => proxy_fixture = true,
             _ => {
                 eprintln!(
-                    "Usage: meow-paw [--profile FILE] [--start] [--page PAGE] [--locale LOCALE] [--no-preferences] [--no-tray]"
+                    "Usage: meow-paw [--profile FILE] [--mixed-port PORT] [--start] [--page PAGE] [--locale LOCALE] [--no-preferences] [--no-tray]"
                 );
                 std::process::exit(2);
             }
@@ -78,8 +88,9 @@ fn main() {
     if capturing {
         use_tray = false;
     }
-    let (prefs, warning) =
+    let (mut prefs, warning) =
         preferences::Preferences::discover(preferences_enabled(remember, capturing));
+    prefs.set_mixed_port_override(mixed_port);
     let locale = select_locale(
         &prefs,
         locale_override.as_deref(),
