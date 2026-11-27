@@ -2376,7 +2376,12 @@ impl Paw {
                         div()
                             .min_w_0()
                             .flex_1()
-                            .child(div().font_weight(FontWeight::BOLD).truncate().child(name))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::BOLD)
+                                    .truncate()
+                                    .child(name.clone()),
+                            )
                             .child(
                                 div()
                                     .mt_1()
@@ -2535,17 +2540,22 @@ impl Paw {
                                         && !self.subscription_entry_open
                                 }),
                                 |el, id| {
+                                    let label = self.locale.message(if unreadable {
+                                        Message::CheckSavedSubscription
+                                    } else {
+                                        Message::Refresh
+                                    });
                                     el.child(
-                                        secondary_button(
+                                        profile_action_button(
                                             action_id("profile-refresh"),
-                                            self.locale.message(if unreadable {
-                                                Message::CheckSavedSubscription
-                                            } else {
-                                                Message::Refresh
-                                            }),
+                                            label,
+                                            &name,
                                         )
                                         .on_click(
-                                            cx.listener(move |paw, _, _, cx| {
+                                            cx.listener(move |paw, event, _, cx| {
+                                                if matches!(event, ClickEvent::Keyboard(_)) {
+                                                    cx.stop_propagation();
+                                                }
                                                 if unreadable {
                                                     paw.check_saved_subscription(id, cx);
                                                 } else {
@@ -2567,26 +2577,30 @@ impl Paw {
                                         .is_some_and(Option::is_some),
                                 |el| {
                                     let rename_path = profile.clone();
-                                    let name = self
+                                    let saved_name = self
                                         .subscription_metadata
                                         .get(profile)
                                         .and_then(Option::as_ref)
                                         .and_then(|metadata| metadata.name.clone())
                                         .unwrap_or_default();
                                     el.child(
-                                        secondary_button(
+                                        profile_action_button(
                                             action_id("profile-rename"),
                                             self.locale.message(Message::RenameSubscription),
+                                            &name,
                                         )
                                         .on_click(
-                                            cx.listener(move |paw, _, window, cx| {
+                                            cx.listener(move |paw, event, window, cx| {
+                                                if matches!(event, ClickEvent::Keyboard(_)) {
+                                                    cx.stop_propagation();
+                                                }
                                                 if paw.subscription_busy
                                                     || paw.subscription_rename.is_some()
                                                 {
                                                     return;
                                                 }
                                                 paw.subscription_name.update(cx, |input, cx| {
-                                                    input.set_value(name.clone(), window, cx)
+                                                    input.set_value(saved_name.clone(), window, cx)
                                                 });
                                                 paw.subscription_rename = Some(rename_path.clone());
                                                 paw.subscription_notice = None;
@@ -2623,12 +2637,16 @@ impl Paw {
                                     && self.preferences.profiles().contains(profile),
                                 |el| {
                                     el.child(
-                                        secondary_button(
+                                        profile_action_button(
                                             action_id("profile-forget"),
                                             self.locale.message(Message::Forget),
+                                            &name,
                                         )
                                         .on_click(
-                                            cx.listener(move |paw, _, _, cx| {
+                                            cx.listener(move |paw, event, _, cx| {
+                                                if matches!(event, ClickEvent::Keyboard(_)) {
+                                                    cx.stop_propagation();
+                                                }
                                                 match paw.preferences.forget_profile(&forget_path) {
                                                     Ok(()) => {
                                                         if paw.profile.as_ref()
@@ -3749,7 +3767,7 @@ impl Paw {
                 (false, false, Locale::ZhCn) => "设置延迟测试地址",
             };
             let probe_control =
-                proxy_disclosure_button("proxy-probe-settings-toggle", probe_caption).on_click(
+                semantic_secondary_button("proxy-probe-settings-toggle", probe_caption).on_click(
                     cx.listener(|paw, event, _, cx| {
                         if matches!(event, ClickEvent::Keyboard(_)) {
                             cx.stop_propagation();
@@ -3789,7 +3807,7 @@ impl Paw {
                         };
                         let caption = format!("{label} ({})", inventory.providers.len());
                         row.child(
-                            proxy_disclosure_button("proxy-providers-toggle", caption).on_click(
+                            semantic_secondary_button("proxy-providers-toggle", caption).on_click(
                                 cx.listener(|paw, event, _, cx| {
                                     if matches!(event, ClickEvent::Keyboard(_)) {
                                         cx.stop_propagation();
@@ -5016,8 +5034,21 @@ fn subscription_button(
         .py_2()
 }
 
-#[cfg(any(target_os = "linux", windows))]
-fn proxy_disclosure_button(id: &'static str, caption: impl Into<SharedString>) -> SemanticButton {
+fn profile_action_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    profile: &str,
+) -> SemanticButton {
+    semantic_secondary_button(id, label)
+        .accessibility_label(format!("{label}: {profile}"))
+        .px_4()
+        .py_2()
+}
+
+fn semantic_secondary_button(
+    id: impl Into<ElementId>,
+    caption: impl Into<SharedString>,
+) -> SemanticButton {
     let caption = caption.into();
     SemanticButton::new(id)
         .accessibility_label(caption.clone())

@@ -167,6 +167,47 @@ fn proxy_disclosures_preserve_settings_and_do_not_refresh_or_probe(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn profile_forget_has_context_and_leaves_the_original_file(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("example.yaml");
+    fs::write(&path, "mode: rule\\n").unwrap();
+    let profile = path.clone();
+    let holder = Rc::new(RefCell::new(None));
+    let holder2 = holder.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let mut preferences = Preferences::discover(false).0;
+        preferences.remember(false, &profile).unwrap();
+        let paw = open(
+            None,
+            None,
+            (Page::Profiles, Locale::En),
+            false,
+            (preferences, None),
+            window,
+            cx,
+        );
+        *holder2.borrow_mut() = Some(paw.clone());
+        gpui_kit::base::Root::new(paw, window, cx)
+    });
+    let paw = holder.borrow_mut().take().unwrap();
+    ui.update(|window, cx| {
+        window.activate_window();
+        window.render_frame(cx);
+        let id = gpui_kit::SharedString::from(format!("profile-forget:{path:?}"));
+        let button = window.find(id.clone());
+        assert_eq!(button.role(), Some(gpui_kit::Role::Button));
+        assert_eq!(
+            button.label().unwrap(),
+            format!("{}: example.yaml", Locale::En.message(Message::Forget))
+        );
+        window.click(id, cx);
+        assert!(paw.read(cx).preferences.profiles().is_empty());
+    });
+    assert_eq!(fs::read_to_string(&path).unwrap(), "mode: rule\\n");
+}
+
+#[gpui_kit::test]
 fn locating_the_selected_route_expands_its_group_and_scrolls(cx: &mut TestAppContext) {
     use meow_paw::engine::controller::{Inventory, Proxy};
 
