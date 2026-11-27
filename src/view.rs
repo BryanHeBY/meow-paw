@@ -1853,6 +1853,7 @@ impl Paw {
         let (phase, color, port) = self.state();
         let metric_row = || div().flex().gap_3().when(!wide, |el| el.flex_col());
         let width = |card: Div| card.w_full().min_w_0().when(wide, |el| el.flex_1());
+        let raw_phase = phase;
         let phase = self.locale.message(match phase {
             "Running" => Message::Running,
             "Starting" => Message::OverviewStarting,
@@ -1862,7 +1863,11 @@ impl Paw {
         });
         let session_state = chip(phase, color, if port.is_some() { 0xe2f6ec } else { BG });
         let address = port.map_or_else(
-            || self.locale.message(Message::OverviewNoListener).into(),
+            || {
+                self.locale
+                    .message(overview_missing_listener_message(raw_phase))
+                    .into()
+            },
             |p| format!("127.0.0.1:{p}"),
         );
         let copy = if let Some(port) = port {
@@ -1895,11 +1900,7 @@ impl Paw {
         let current_label = current.map_or_else(
             || {
                 self.locale
-                    .message(if running {
-                        Message::OverviewUnconfirmedProfile
-                    } else {
-                        Message::OverviewNoRunningProfile
-                    })
+                    .message(overview_missing_profile_message(raw_phase, running))
                     .to_owned()
             },
             |path| self.display_profile_name(path),
@@ -1914,7 +1915,7 @@ impl Paw {
         });
         let profile = form_card(self.locale.message(Message::OverviewCurrentProfile))
             .child(form_row(
-                self.locale.message(Message::Running),
+                self.locale.message(Message::OverviewAppliedProfile),
                 current_label,
                 subscription_button(
                     "home-profiles",
@@ -1992,32 +1993,87 @@ impl Paw {
             );
         let route = self.overview_route(cx);
         #[cfg(any(target_os = "linux", windows))]
-        let proxy_active = matches!(self.snapshot.system_proxy, meow_paw::app::ProxyState::On(_));
+        let (proxy_status, proxy_port) = {
+            use meow_paw::app::ProxyState;
+            let state = if self.desktop.is_some() {
+                self.snapshot.system_proxy
+            } else {
+                ProxyState::Unavailable
+            };
+            let port = match state {
+                ProxyState::On(port) => Some(port),
+                _ => None,
+            };
+            (
+                overview_proxy_status(
+                    state,
+                    self.desktop
+                        .as_ref()
+                        .and(self.snapshot.system_proxy_error.as_deref()),
+                ),
+                port,
+            )
+        };
         #[cfg(not(any(target_os = "linux", windows)))]
-        let proxy_active = false;
-        let network = form_card(self.locale.message(Message::Network))
-            .child(form_row(
+        let (proxy_status, proxy_port): (
+            (Message, Option<Message>),
+            Option<std::num::NonZeroU16>,
+        ) = ((Message::SystemProxyUnavailable, None), None);
+        let (proxy_status, proxy_error) = proxy_status;
+        let proxy_action = overview_proxy_action(proxy_status, proxy_error);
+        let mut proxy_text = self.locale.message(proxy_status).to_owned();
+        if let Some(port) = proxy_port {
+            proxy_text.push_str(&format!(" · 127.0.0.1:{port}"));
+        }
+        if let Some(error) = proxy_error {
+            proxy_text.push_str(" · ");
+            proxy_text.push_str(self.locale.message(error));
+        }
+        let status_row = |label: &'static str, value: Div, action: AnyElement| {
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .min_h(px(32.))
+                .child(
+                    div()
+                        .w(px(112.))
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child(label),
+                )
+                .child(div().min_w_0().flex_1().text_sm().child(value))
+                .child(action)
+        };
+        let summary = card()
+            .py_2()
+            .flex()
+            .flex_col()
+            .child(status_row(
                 self.locale.message(Message::MeowEngine),
-                self.locale.message(Message::ManagedSession),
                 session_state,
+                div().into_any_element(),
             ))
-            .child(form_row(
+            .child(status_row(
                 self.locale.message(Message::LocalListener),
-                address,
+                div().child(address),
                 copy,
             ))
-            .child(form_row(
+            .child(status_row(
                 self.locale.message(Message::SystemProxy),
-                self.locale.message(Message::SystemProxyDescription),
-                chip(
-                    self.locale.message(if proxy_active {
-                        Message::SystemProxyActive
-                    } else {
-                        Message::Unmanaged
-                    }),
-                    if proxy_active { GREEN } else { FAINT },
-                    BG,
-                ),
+                div().child(proxy_text),
+                subscription_button(
+                    "home-proxy-settings",
+                    self.locale.message(proxy_action),
+                    false,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.page = Page::Settings;
+                    cx.notify();
+                }))
+                .into_any_element(),
             ));
         let usage_toggle = secondary_button(
             "home-toggle-usage",
@@ -2036,8 +2092,8 @@ impl Paw {
             .flex()
             .flex_col()
             .gap_3()
+            .child(summary)
             .child(metric_row().child(width(profile)).child(width(route)))
-            .child(network)
             .child(
                 card()
                     .flex()
@@ -5816,6 +5872,56 @@ fn empty_state(title: &'static str, detail: &'static str) -> Div {
         .child(div().text_sm().text_color(rgb(FAINT)).child(detail))
 }
 
+fn overview_missing_profile_message(phase: &str, running: bool) -> Message {
+    if phase == "Starting" {
+        Message::OverviewAwaitingProfile
+    } else if phase == "Stopping" {
+        Message::Stopping
+    } else if running {
+        Message::OverviewUnconfirmedProfile
+    } else {
+        Message::OverviewNoRunningProfile
+    }
+}
+
+fn overview_missing_listener_message(phase: &str) -> Message {
+    if phase == "Stopping" {
+        Message::Stopping
+    } else {
+        Message::OverviewNoListener
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn overview_proxy_status(
+    state: meow_paw::app::ProxyState,
+    error: Option<&str>,
+) -> (Message, Option<Message>) {
+    use meow_paw::app::ProxyState;
+    let status = match state {
+        ProxyState::Checking => Message::OverviewProxyChecking,
+        ProxyState::Unavailable => Message::SystemProxyUnavailable,
+        ProxyState::Off => Message::OverviewProxyOff,
+        ProxyState::On(_) => Message::OverviewProxyOwned,
+        ProxyState::Recovery => Message::OverviewProxyRecovery,
+        ProxyState::Blocked => Message::OverviewProxyUnknown,
+    };
+    let unsupported = meow_paw::system_proxy::ProxyError::Unsupported.to_string();
+    let actionable =
+        error.is_some_and(|error| state != ProxyState::Unavailable || error != unsupported);
+    (status, actionable.then_some(Message::OverviewProxyError))
+}
+
+fn overview_proxy_action(status: Message, error: Option<Message>) -> Message {
+    if status == Message::OverviewProxyRecovery {
+        Message::OverviewProxyReviewRecovery
+    } else if error.is_some() {
+        Message::OverviewProxyReviewError
+    } else {
+        Message::Settings
+    }
+}
+
 fn overview_current_profile(
     running: bool,
     applying: bool,
@@ -6761,6 +6867,116 @@ mod tests {
             super::subscription_display_name(super::Locale::ZhCn, id, None),
             "订阅 01234567"
         );
+    }
+
+    #[test]
+    fn overview_missing_profile_is_truthful_across_engine_states() {
+        use super::{
+            Message, overview_current_profile, overview_missing_listener_message,
+            overview_missing_profile_message,
+        };
+        for (phase, running, expected) in [
+            ("Starting", false, Message::OverviewAwaitingProfile),
+            ("Running", true, Message::OverviewUnconfirmedProfile),
+            ("Stopped", false, Message::OverviewNoRunningProfile),
+            ("Stopping", false, Message::Stopping),
+            ("Needs attention", false, Message::OverviewNoRunningProfile),
+        ] {
+            assert_eq!(overview_current_profile(running, false, None), None);
+            assert_eq!(overview_missing_profile_message(phase, running), expected);
+        }
+        assert_eq!(
+            overview_missing_listener_message("Stopping"),
+            Message::Stopping
+        );
+        assert_eq!(
+            overview_missing_listener_message("Stopped"),
+            Message::OverviewNoListener
+        );
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn overview_proxy_status_preserves_ownership_and_errors() {
+        use super::{Message, overview_proxy_action, overview_proxy_status};
+        use meow_paw::app::{EngineStatus, ProxyState, Snapshot};
+        use meow_paw::system_proxy::ProxyError;
+        use std::num::NonZeroU16;
+        for (state, expected) in [
+            (ProxyState::Checking, Message::OverviewProxyChecking),
+            (ProxyState::Unavailable, Message::SystemProxyUnavailable),
+            (ProxyState::Off, Message::OverviewProxyOff),
+            (
+                ProxyState::On(NonZeroU16::new(7890).unwrap()),
+                Message::OverviewProxyOwned,
+            ),
+            (ProxyState::Recovery, Message::OverviewProxyRecovery),
+            (ProxyState::Blocked, Message::OverviewProxyUnknown),
+        ] {
+            assert_eq!(overview_proxy_status(state, None), (expected, None));
+            assert_eq!(
+                overview_proxy_status(state, Some("Actual failure")),
+                (expected, Some(Message::OverviewProxyError))
+            );
+        }
+
+        let mut unsupported = Snapshot::default();
+        unsupported.system_proxy = ProxyState::Unavailable;
+        unsupported.system_proxy_error = Some(ProxyError::Unsupported.to_string());
+        let mut failure = Snapshot::default();
+        failure.system_proxy = ProxyState::Unavailable;
+        failure.system_proxy_error = Some("Actual failure".into());
+        let mut stopping = Snapshot::default();
+        stopping.engine = EngineStatus::Stopping;
+        stopping.system_proxy = ProxyState::Recovery;
+        stopping.profile = Some("active.yaml".into());
+        let mut stopping_owned = stopping.clone();
+        stopping_owned.system_proxy = ProxyState::On(NonZeroU16::new(7890).unwrap());
+        let fixtures = [
+            (
+                unsupported,
+                (Message::SystemProxyUnavailable, None),
+                Message::Settings,
+            ),
+            (
+                failure,
+                (
+                    Message::SystemProxyUnavailable,
+                    Some(Message::OverviewProxyError),
+                ),
+                Message::OverviewProxyReviewError,
+            ),
+            (
+                stopping,
+                (Message::OverviewProxyRecovery, None),
+                Message::OverviewProxyReviewRecovery,
+            ),
+            (
+                stopping_owned,
+                (Message::OverviewProxyOwned, None),
+                Message::Settings,
+            ),
+        ];
+        for (fixture, expected, action) in fixtures {
+            let status =
+                overview_proxy_status(fixture.system_proxy, fixture.system_proxy_error.as_deref());
+            assert_eq!(status, expected);
+            assert_eq!(overview_proxy_action(status.0, status.1), action);
+            if matches!(fixture.engine, EngineStatus::Stopping) {
+                assert_eq!(
+                    super::overview_current_profile(false, false, fixture.profile.as_deref()),
+                    None
+                );
+                assert_eq!(
+                    super::overview_missing_profile_message("Stopping", false),
+                    Message::Stopping
+                );
+                assert_eq!(
+                    super::overview_missing_listener_message("Stopping"),
+                    Message::Stopping
+                );
+            }
+        }
     }
 
     #[test]
