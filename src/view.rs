@@ -2968,16 +2968,20 @@ impl Paw {
                                 ))
                             })
                             .when(live && applying.is_none() && !unreadable, |el| {
+                                let action = if active {
+                                    Message::Reload
+                                } else {
+                                    Message::ApplyLive
+                                };
                                 el.child(
                                     subscription_button(
                                         action_id("profile-apply"),
-                                        self.locale.message(if active {
-                                            Message::Reload
-                                        } else {
-                                            Message::ApplyLive
-                                        }),
+                                        self.locale.message(action),
                                         false,
                                         cx,
+                                    )
+                                    .accessibility_label(
+                                        self.locale.profile_action_label(action, &name),
                                     )
                                     .on_click(cx.listener(
                                         move |paw, _, _, cx| {
@@ -3072,9 +3076,13 @@ impl Paw {
                                 el.child(
                                     subscription_button(
                                         action_id("profile-use"),
-                                        self.locale.message(Message::Use),
+                                        self.locale.message(Message::UseOnNextStart),
                                         false,
                                         cx,
+                                    )
+                                    .accessibility_label(
+                                        self.locale
+                                            .profile_action_label(Message::UseOnNextStart, &name),
                                     )
                                     .on_click(cx.listener(
                                         move |paw, _, _, cx| {

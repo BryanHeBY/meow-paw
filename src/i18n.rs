@@ -228,6 +228,7 @@ pub enum Message {
     Reload,
     ApplyLive,
     Use,
+    UseOnNextStart,
     Forget,
     LastStartDiagnostics,
     ChooseYaml,
@@ -443,6 +444,15 @@ impl Locale {
         match self {
             Self::En => format!("{rate} shared peak · now"),
             Self::ZhCn => format!("共用峰值 {rate} · 现在"),
+        }
+    }
+
+    /// Qualify a profile-row action with the name displayed on that row.
+    pub fn profile_action_label(self, action: Message, profile: &str) -> String {
+        let action = self.message(action);
+        match self {
+            Self::En => format!("{action}: {profile}"),
+            Self::ZhCn => format!("{action}：{profile}"),
         }
     }
 
@@ -722,6 +732,7 @@ fn english(key: Message) -> &'static str {
         Message::Reload => "Reload",
         Message::ApplyLive => "Apply live",
         Message::Use => "Use",
+        Message::UseOnNextStart => "Use on next start",
         Message::Forget => "Forget",
         Message::LastStartDiagnostics => "Diagnostics from the last start attempt",
         Message::ChooseYaml => "Choose Meow YAML",
@@ -1069,6 +1080,7 @@ fn chinese(key: Message) -> &'static str {
         Message::Reload => "重新加载",
         Message::ApplyLive => "实时应用",
         Message::Use => "使用",
+        Message::UseOnNextStart => "下次启动时使用",
         Message::Forget => "移除",
         Message::LastStartDiagnostics => "上次启动尝试的诊断信息",
         Message::ChooseYaml => "选择 Meow YAML",
@@ -1306,6 +1318,35 @@ mod tests {
         assert_eq!(Locale::En.message(Message::Home), "Home");
         assert_eq!(Locale::ZhCn.message(Message::Home), "首页");
     }
+    #[test]
+    fn profile_action_names_distinguish_staging_from_live_changes() {
+        let profile = "Travel";
+        for (action, en, zh) in [
+            (
+                Message::UseOnNextStart,
+                "Use on next start",
+                "下次启动时使用",
+            ),
+            (Message::ApplyLive, "Apply live", "实时应用"),
+            (Message::Reload, "Reload", "重新加载"),
+        ] {
+            assert_eq!(Locale::En.message(action), en);
+            assert_eq!(Locale::ZhCn.message(action), zh);
+            assert_eq!(
+                Locale::En.profile_action_label(action, profile),
+                format!("{en}: {profile}")
+            );
+            assert_eq!(
+                Locale::ZhCn.profile_action_label(action, profile),
+                format!("{zh}：{profile}")
+            );
+        }
+        assert_ne!(
+            Locale::En.profile_action_label(Message::UseOnNextStart, profile),
+            Locale::En.profile_action_label(Message::UseOnNextStart, "Home")
+        );
+    }
+
     #[test]
     fn file_picker_controls_and_failure_are_localized() {
         assert_eq!(
