@@ -1130,3 +1130,100 @@ fn serve(mut stream: TcpStream, secret: &str, dir: &Path, state: &Mutex<String>,
         body.len()
     );
 }
+
+struct SecondaryAction(Rc<RefCell<usize>>);
+
+impl Render for SecondaryAction {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let activations = self.0.clone();
+        div().size_full().tab_group().child(
+            super::secondary_button("secondary-action", "本地操作")
+                .on_click(move |_, _, _| *activations.borrow_mut() += 1),
+        )
+    }
+}
+
+#[gpui_kit::test]
+fn secondary_action_is_named_and_activates_with_tab_enter_and_space(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let activations = Rc::new(RefCell::new(0));
+    let counter = activations.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let controls = cx.new(|_| SecondaryAction(counter));
+        gpui_kit::base::Root::new(controls, window, cx)
+    });
+    ui.update(|window, cx| {
+        window.activate_window();
+        window.render_frame(cx);
+        let button = window.find("secondary-action");
+        assert_eq!(button.role(), Some(gpui_kit::Role::Button));
+        assert_eq!(button.label(), Some("本地操作"));
+        window.press("tab", cx);
+        assert!(window.focused(cx).is_some());
+        window.press("enter", cx);
+        window.press("space", cx);
+    });
+    assert_eq!(*activations.borrow(), 2);
+}
+
+#[gpui_kit::test]
+fn profile_file_picker_and_pending_rule_read_publish_native_semantics(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let holder = Rc::new(RefCell::new(None));
+    let result = holder.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let paw = open(
+            None,
+            None,
+            (Page::Profiles, Locale::ZhCn),
+            false,
+            (Preferences::discover(false).0, None),
+            window,
+            cx,
+        );
+        *result.borrow_mut() = Some(paw.clone());
+        gpui_kit::base::Root::new(paw, window, cx)
+    });
+    let paw = holder.borrow_mut().take().unwrap();
+    ui.update(|window, cx| {
+        window.activate_window();
+        window.render_frame(cx);
+        let browse = window.find("select-profile");
+        assert_eq!(browse.role(), Some(gpui_kit::Role::Button));
+        assert_eq!(
+            browse.label(),
+            Some(Locale::ZhCn.message(Message::ImportLocalYaml))
+        );
+
+        paw.update(cx, |paw, cx| {
+            paw.page = Page::Rules;
+            paw.snapshot.engine = EngineStatus::Running { mixed_port: 7898 };
+            paw.rule_sets_open = true;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let ready = window.find("read-rule-sets");
+        assert_eq!(ready.role(), Some(gpui_kit::Role::Button));
+        assert_ne!(ready.disabled(), Some(true));
+        let focus = paw.read(cx).rule_sets_read_focus.clone();
+        focus.focus(window, cx);
+        window.render_frame(cx);
+        assert!(focus.is_focused(window));
+
+        paw.update(cx, |paw, cx| {
+            paw.snapshot.rule_provider_pending = true;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let pending = window.find("read-rule-sets");
+        assert_eq!(pending.disabled(), Some(true));
+        assert_eq!(
+            pending.label(),
+            Some(Locale::ZhCn.message(Message::ReadingRuleSets))
+        );
+        window.press("enter", cx);
+        assert!(!paw.read(cx).rule_sets_read_failed);
+        window.press("shift-tab", cx);
+        assert!(!focus.is_focused(window));
+    });
+}

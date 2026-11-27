@@ -1514,6 +1514,7 @@ impl Paw {
             cx,
         )
         .track_focus(&self.rule_sets_read_focus)
+        .disabled(pending)
         .when(pending, |read| read.opacity(0.65))
         .on_click(cx.listener(|this, _, _, cx| {
             if this.snapshot.rule_provider_pending {
@@ -3924,6 +3925,11 @@ impl Paw {
                                                                 )),
                                                                 self.locale.message(Message::Test),
                                                             )
+                                                            .accessibility_label(format!(
+                                                                "{}: {member}",
+                                                                self.locale.message(Message::Test),
+                                                            ))
+                                                            .disabled(probe_busy)
                                                             .on_click(cx.listener(
                                                                 move |paw, _, _, cx| {
                                                                     cx.stop_propagation();
@@ -5728,19 +5734,6 @@ fn line_icon(path: &'static str, color: u32, side: f32) -> impl IntoElement {
         .flex_shrink_0()
 }
 
-fn action_button_base(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(0xb5cafa))
-        .font_weight(FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .px_4()
-        .py_2()
-        .child(label)
-}
-
 fn subscription_button(
     id: impl Into<ElementId>,
     label: &'static str,
@@ -5839,11 +5832,12 @@ fn provider_refresh_button(
         })
 }
 
-fn secondary_button(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
-    action_button_base(id, label)
-        .bg(rgb(SOFT_BLUE))
-        .text_color(rgb(BLUE))
-        .hover(|style| style.bg(rgb(0xd8e7ff)))
+fn secondary_button(id: impl Into<ElementId>, label: &'static str) -> SemanticButton {
+    semantic_secondary_button(id, label)
+        .font_weight(FontWeight::SEMIBOLD)
+        .line_height(phi())
+        .px_4()
+        .py_2()
 }
 
 fn section_label(label: impl Into<SharedString>) -> Div {
