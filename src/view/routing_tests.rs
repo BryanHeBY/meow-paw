@@ -1,5 +1,5 @@
 //! Headless routing controls, backed only by a test-owned fake controller.
-use super::{Page, Paw, open};
+use super::{Page, Paw, open, provider_refresh_button};
 use crate::preferences::Preferences;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -32,6 +32,60 @@ impl Render for Header {
         let header = self.0.update(cx, |paw, cx| paw.proxy_header(cx));
         div().size_full().tab_group().child(header)
     }
+}
+
+struct ProviderControls(Rc<RefCell<usize>>);
+
+impl Render for ProviderControls {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let activations = self.0.clone();
+        div()
+            .size_full()
+            .tab_group()
+            .child(
+                provider_refresh_button(Locale::En, "ready", false, false)
+                    .on_click(move |_, _, _| *activations.borrow_mut() += 1),
+            )
+            .child(provider_refresh_button(Locale::ZhCn, "current", true, true))
+            .child(provider_refresh_button(Locale::ZhCn, "queued", false, true))
+    }
+}
+
+#[gpui_kit::test]
+fn provider_refresh_exposes_keyboard_action_and_busy_labels(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let activations = Rc::new(RefCell::new(0));
+    let counter = activations.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let controls = cx.new(|_| ProviderControls(counter));
+        gpui_kit::base::Root::new(controls, window, cx)
+    });
+    ui.update(|window, _| window.activate_window());
+    ui.update(|window, cx| {
+        window.render_frame(cx);
+        for (name, locale, message) in [
+            ("ready", Locale::En, Message::Refresh),
+            ("current", Locale::ZhCn, Message::ProviderRefreshing),
+            ("queued", Locale::ZhCn, Message::ProviderRefreshBusy),
+        ] {
+            let id = gpui_kit::SharedString::from(format!("provider-refresh:{name}"));
+            let button = window.find(id);
+            assert_eq!(button.role(), Some(gpui_kit::Role::Button));
+            assert_eq!(
+                button.label().unwrap(),
+                format!("{}: {name}", locale.message(message))
+            );
+        }
+        window.press("tab", cx);
+        let focus = window
+            .focused(cx)
+            .expect("refresh button can receive focus");
+        window.press("enter", cx);
+        window.press("tab", cx);
+        assert_eq!(window.focused(cx).as_ref(), Some(&focus));
+        window.press("space", cx);
+    });
+    assert_eq!(*activations.borrow(), 2);
 }
 
 fn quote(path: &Path) -> String {

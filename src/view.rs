@@ -3573,27 +3573,23 @@ impl Paw {
                         )
                         .when(status.vehicle_type.eq_ignore_ascii_case("http"), |row| {
                             row.child(
-                                secondary_button(
-                                    SharedString::from(format!("provider-refresh:{label}")),
-                                    self.locale.message(if pending {
-                                        Message::ProviderRefreshing
-                                    } else if busy {
-                                        Message::ProviderRefreshBusy
-                                    } else {
-                                        Message::Refresh
-                                    }),
-                                )
-                                .when(!busy, |button| {
-                                    button.on_click(cx.listener(move |paw, _, _, cx| {
-                                        paw.error = paw.desktop.as_ref().and_then(|desktop| {
-                                            desktop
-                                                .refresh_provider(label.clone())
-                                                .err()
-                                                .map(|e| e.to_string())
-                                        });
-                                        cx.notify();
-                                    }))
-                                }),
+                                provider_refresh_button(self.locale, &label, pending, busy).when(
+                                    !busy,
+                                    |button| {
+                                        button.on_click(cx.listener(move |paw, event, _, cx| {
+                                            if matches!(event, ClickEvent::Keyboard(_)) {
+                                                cx.stop_propagation();
+                                            }
+                                            paw.error = paw.desktop.as_ref().and_then(|desktop| {
+                                                desktop
+                                                    .refresh_provider(label.clone())
+                                                    .err()
+                                                    .map(|e| e.to_string())
+                                            });
+                                            cx.notify();
+                                        }))
+                                    },
+                                ),
                             )
                         })
                 })
@@ -4840,6 +4836,40 @@ fn subscription_button(
         .font_weight(FontWeight::SEMIBOLD)
         .px_4()
         .py_2()
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn provider_refresh_button(
+    locale: Locale,
+    name: &str,
+    pending: bool,
+    busy: bool,
+) -> SemanticButton {
+    let label = locale.message(if pending {
+        Message::ProviderRefreshing
+    } else if busy {
+        Message::ProviderRefreshBusy
+    } else {
+        Message::Refresh
+    });
+    SemanticButton::new(SharedString::from(format!("provider-refresh:{name}")))
+        .accessibility_label(format!("{label}: {name}"))
+        .disabled(busy)
+        .rounded_md()
+        .px_4()
+        .py_2()
+        .font_weight(FontWeight::SEMIBOLD)
+        .border_1()
+        .border_color(rgb(0xb5cafa))
+        .bg(rgb(if busy { BG } else { SOFT_BLUE }))
+        .text_color(rgb(if busy { FAINT } else { BLUE }))
+        .child(label)
+        .when(!busy, |button| {
+            button
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(0xd8e7ff)))
+                .focus_visible(|style| style.border_color(rgb(BLUE)))
+        })
 }
 
 fn secondary_button(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
