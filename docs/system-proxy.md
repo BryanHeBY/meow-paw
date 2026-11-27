@@ -29,7 +29,8 @@ restore before shutting down a listener on the user's behalf, and surface any
 failure. If Paw crashed, offer explicit recovery; there is no proxy mutation on
 the next normal launch.
 
-The backend holds a per-directory OS file lock during each operation. It saves a
+The backend holds a per-directory OS file lease through an owned session, and
+locks independent recovery/status transactions. It saves a
 versioned, synced snapshot and its intended result before the first system
 write. Restore rechecks the current settings and overwrites only a complete
 match of Paw's expected state. If the original state is already present, it
@@ -42,4 +43,16 @@ against concurrent unrelated applications; the backend rechecks immediately
 before each native write and verifies results afterward.
 
 The backend unit tests simulate restart and conflict without writing the
-running desktop proxy. The backend itself does not add a GUI control.
+running desktop proxy. Use **Settings → Meow Engine → System proxy** in the desktop app. Enabling
+is never remembered as a launch preference. The control checks the currently
+owned Meow process, authenticated loopback controller, and actual mixed port
+before applying and rechecks after applying. Stop and explicit Quit attempt
+restoration before shutting down the listener; a restoration conflict keeps the
+session running and is shown in Settings. If the owned core exits unexpectedly,
+Paw attempts the same guarded restoration. An old journal is only restored by
+the separate explicit recovery action.
+
+A Linux smoke test drives the real desktop worker with a local Meow process and
+private fake GSettings commands (never the running user's desktop):
+
+    MEOW_BIN=/absolute/path/to/meow cargo test --test system_proxy_worker -- --ignored

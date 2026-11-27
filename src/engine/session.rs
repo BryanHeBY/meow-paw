@@ -252,6 +252,19 @@ impl Session {
             .map_err(ApplyError::Reload)
     }
 
+    pub(crate) fn ready_mixed_listener(&mut self) -> Option<std::num::NonZeroU16> {
+        let port = std::num::NonZeroU16::new(self.mixed_port)?;
+        if self.process.try_wait().ok()?.is_some() || self.controller.verify().is_err() {
+            return None;
+        }
+        TcpStream::connect_timeout(
+            &(Ipv4Addr::LOCALHOST, port.get()).into(),
+            Duration::from_millis(100),
+        )
+        .ok()?;
+        self.process.try_wait().ok()?.is_none().then_some(port)
+    }
+
     pub fn status(&mut self) -> io::Result<Option<ExitStatus>> {
         self.process.try_wait()
     }

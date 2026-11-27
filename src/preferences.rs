@@ -167,6 +167,11 @@ impl Preferences {
         )
     }
 
+    #[cfg(any(target_os = "linux", windows))]
+    pub fn proxy_state_dir(&self) -> Option<PathBuf> {
+        Some(self.file.as_ref()?.parent()?.to_path_buf())
+    }
+
     pub fn subscription_dir(&self) -> Option<PathBuf> {
         Some(self.file.as_ref()?.parent()?.join("subscriptions"))
     }

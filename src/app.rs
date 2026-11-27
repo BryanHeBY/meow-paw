@@ -1,5 +1,9 @@
 //! Window-independent application state for the first managed desktop workflow.
 
+mod system_proxy;
+pub use system_proxy::ProxyState;
+use system_proxy::{ProxyAction, ProxyControl};
+
 use crate::subscription_store::{SubscriptionId, SubscriptionStore};
 use crate::{
     engine::{
@@ -399,6 +403,9 @@ impl GroupProbeResults {
 pub struct Snapshot {
     pub revision: u64,
     pub engine: EngineStatus,
+    pub system_proxy: ProxyState,
+    pub system_proxy_error: Option<String>,
+    pub stop_result: Option<bool>,
     pub profile: Option<PathBuf>,
     pub applying_profile: Option<PathBuf>,
     // Submission is reserved before the worker confirms that an apply has begun.
@@ -590,6 +597,7 @@ impl ProfileInput {
 }
 
 enum Command {
+    SystemProxy(ProxyAction),
     Start(ProfileInput),
     ApplyProfile(ProfileInput, ApplyReservation),
     Select {
@@ -624,6 +632,14 @@ impl Desktop {
     }
 
     pub fn with_mixed_port(meow: PathBuf, mixed_port: u16) -> io::Result<Self> {
+        Self::with_desktop_proxy(Some(meow), mixed_port, None)
+    }
+
+    pub fn with_desktop_proxy(
+        meow: Option<PathBuf>,
+        mixed_port: u16,
+        proxy_dir: Option<PathBuf>,
+    ) -> io::Result<Self> {
         let (command, receiver) = mpsc::sync_channel(8);
         let snapshot = Arc::new(Mutex::new(Snapshot::default()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -635,7 +651,16 @@ impl Desktop {
             thread::Builder::new()
                 .name("paw-meow-owner".into())
                 .spawn(move || {
-                    run(meow, &next_mixed_port, receiver, &snapshot, &stop, &quit);
+                    let proxy = ProxyControl::discover(proxy_dir.as_deref());
+                    run(
+                        meow,
+                        proxy,
+                        &next_mixed_port,
+                        receiver,
+                        &snapshot,
+                        &stop,
+                        &quit,
+                    );
                 })?
         };
         Ok(Self {
@@ -802,9 +827,22 @@ impl Desktop {
         self.send(Command::CloseConnection(id))
     }
 
+    pub fn enable_system_proxy(&self, consent: crate::system_proxy::Consent) -> io::Result<()> {
+        self.send(Command::SystemProxy(ProxyAction::Enable(consent)))
+    }
+
+    pub fn restore_system_proxy(&self) -> io::Result<()> {
+        self.send(Command::SystemProxy(ProxyAction::Restore))
+    }
+
+    pub fn refresh_system_proxy(&self) -> io::Result<()> {
+        self.send(Command::SystemProxy(ProxyAction::Refresh))
+    }
+
     pub fn stop(&self) {
         change(&self.snapshot, |s| {
             self.stop.store(true, Ordering::Release);
+            s.stop_result = None;
             s.apply_reservation = None;
             s.group_probe = None;
             s.unlock.reset();
@@ -883,13 +921,15 @@ enum ProbeCompletion {
 }
 
 fn run(
-    binary: PathBuf,
+    binary: Option<PathBuf>,
+    proxy: ProxyControl,
     next_mixed_port: &AtomicU16,
     receiver: Receiver<Command>,
     snapshot: &Mutex<Snapshot>,
     stop: &AtomicBool,
     quit: &AtomicBool,
 ) {
+    proxy.publish(snapshot, None);
     let mut logs = None;
     let mut session: Option<Session> = None;
     let mut next_sample = Instant::now();
@@ -919,6 +959,20 @@ fn run(
             }
         };
         if stopping {
+            if !proxy.restore_current(snapshot) {
+                change(snapshot, |s| {
+                    s.stop_result = Some(false);
+                    s.action_error = s.system_proxy_error.clone();
+                    if let Some(active) = &session {
+                        s.engine = EngineStatus::Running {
+                            mixed_port: active.mixed_port,
+                        };
+                    } else {
+                        s.engine = EngineStatus::Stopped;
+                    }
+                });
+                continue;
+            }
             generation = generation.wrapping_add(1);
             // Retire already queued actions from the old session.
             while let Ok(command) = receiver.try_recv() {
@@ -938,7 +992,9 @@ fn run(
                 EngineStatus::Stopped
             };
             logs.take();
+            let stopped = matches!(engine, EngineStatus::Stopped);
             clear_telemetry(snapshot, generation, engine);
+            change(snapshot, |s| s.stop_result = Some(stopped));
             continue;
         }
 
@@ -946,6 +1002,7 @@ fn run(
             match active.status() {
                 Ok(None) => {}
                 Ok(Some(code)) => {
+                    proxy.restore_current(snapshot);
                     generation = generation.wrapping_add(1);
                     session.take();
                     logs.take();
@@ -956,6 +1013,7 @@ fn run(
                     );
                 }
                 Err(error) => {
+                    proxy.restore_current(snapshot);
                     generation = generation.wrapping_add(1);
                     session.take();
                     logs.take();
@@ -977,7 +1035,19 @@ fn run(
                 }
             }
             Ok(_) if cancelled() => continue,
+            Ok(Command::SystemProxy(action)) => {
+                proxy.handle(action, snapshot, || {
+                    let active = session.as_mut()?;
+                    active.ready_mixed_listener().filter(|_| !cancelled())
+                });
+            }
             Ok(Command::Start(input)) => {
+                let Some(binary) = &binary else {
+                    change(snapshot, |s| {
+                        s.action_error = Some("Choose a Meow executable before starting.".into())
+                    });
+                    continue;
+                };
                 let path = input.key();
                 if session.is_some() {
                     change(snapshot, |s| {
@@ -1001,7 +1071,7 @@ fn run(
                 let mixed_port = next_mixed_port.load(Ordering::Acquire);
                 let result = input.load().and_then(|profile| {
                     change(snapshot, |s| s.diagnostics = profile.diagnostics());
-                    Session::launch_with_mixed_port(&binary, &profile, mixed_port, cancelled)
+                    Session::launch_with_mixed_port(binary, &profile, mixed_port, cancelled)
                 });
                 match result {
                     Ok(active) => {
@@ -1417,6 +1487,10 @@ fn run(
             next_sample = Instant::now() + Duration::from_millis(250);
         }
     }
+    // Destruction (including tray/window quit) joins this worker. Attempt
+    // exact restoration while the owned core still listens, never restore a
+    // stale journal encountered at launch without a user action.
+    proxy.restore_current(snapshot);
     change(snapshot, |s| {
         s.apply_reservation = None;
         s.applying_profile = None;

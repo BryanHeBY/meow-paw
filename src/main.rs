@@ -203,12 +203,9 @@ fn retain_when_tray_is_ready(
                 .timer(Duration::from_millis(160))
                 .await;
             cx.update(|cx| {
-                if signals.take_quit() {
-                    cx.quit();
-                    return;
-                }
+                let quit = signals.take_quit();
                 let available = signals.ready();
-                let show = signals.take_show() && available;
+                let show = (signals.take_show() && available) || (quit && visible.get().is_none());
                 let restore = retained && !available && visible.get().is_none();
                 if available && !retained {
                     cx.set_quit_mode(QuitMode::Explicit);
@@ -238,6 +235,9 @@ fn retain_when_tray_is_ready(
                     cx.set_quit_mode(QuitMode::Default);
                 }
                 retained = available;
+                if quit {
+                    paw.update(cx, |view, cx| view.request_quit(cx));
+                }
             });
         }
     })

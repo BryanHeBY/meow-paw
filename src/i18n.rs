@@ -133,6 +133,19 @@ pub enum Message {
     LanguageSystem,
     LanguageRestart,
     MixedProxyPort,
+    SystemProxyHelp,
+    SystemProxyChecking,
+    SystemProxyUnavailable,
+    SystemProxyOff,
+    SystemProxyOn,
+    SystemProxyActive,
+    SystemProxyRecovery,
+    SystemProxyBlocked,
+    SystemProxyEnable,
+    SystemProxyDisable,
+    SystemProxyRestore,
+    SystemProxyRefresh,
+
     MixedProxyPortHelp,
     MixedProxyPortCli,
     MixedProxyPortSave,
@@ -472,6 +485,23 @@ fn english(key: Message) -> &'static str {
         Message::Test => "Test",
         Message::Refresh => "Refresh",
         Message::MixedProxyPort => "Mixed proxy port",
+        Message::SystemProxyHelp => {
+            "Changes this account’s desktop HTTP/HTTPS proxy. Only apps that use desktop proxy settings are affected."
+        }
+        Message::SystemProxyChecking => "Checking desktop support…",
+        Message::SystemProxyUnavailable => "Not supported in this desktop session.",
+        Message::SystemProxyOff => "Off. Start Meow before enabling.",
+        Message::SystemProxyOn => "On for this Paw session.",
+        Message::SystemProxyActive => "On",
+        Message::SystemProxyRecovery => {
+            "A recovery record is present. Paw will restore it only if the desktop settings still match."
+        }
+        Message::SystemProxyBlocked => "Could not confirm desktop proxy ownership.",
+        Message::SystemProxyEnable => "Enable system proxy",
+        Message::SystemProxyDisable => "Disable and restore",
+        Message::SystemProxyRestore => "Restore previous settings",
+        Message::SystemProxyRefresh => "Check again",
+
         Message::MixedProxyPortHelp => {
             "Listens on 127.0.0.1. Applies the next time you start the engine."
         }
@@ -509,7 +539,9 @@ fn english(key: Message) -> &'static str {
         Message::Node => "node",
         Message::Nodes => "nodes",
         Message::System => "System",
-        Message::SystemProxyDescription => "Paw does not change the operating system’s proxy.",
+        Message::SystemProxyDescription => {
+            "Paw only changes the desktop proxy if you explicitly enable it in Settings."
+        }
         Message::TunMode => "TUN mode",
         Message::TunDescription => "A virtual network interface is not available in this build.",
         Message::ListenerDescription => "Only apps configured to use Paw are routed through it.",
@@ -781,6 +813,21 @@ fn chinese(key: Message) -> &'static str {
         Message::Test => "测试",
         Message::Refresh => "刷新",
         Message::MixedProxyPort => "混合代理端口",
+        Message::SystemProxyHelp => {
+            "修改当前账号的桌面 HTTP/HTTPS 代理，仅影响遵循桌面代理设置的应用。"
+        }
+        Message::SystemProxyChecking => "正在检查桌面支持…",
+        Message::SystemProxyUnavailable => "当前桌面会话不支持。",
+        Message::SystemProxyOff => "已关闭。启用前请先启动 Meow。",
+        Message::SystemProxyOn => "已为当前 Paw 会话启用。",
+        Message::SystemProxyActive => "已启用",
+        Message::SystemProxyRecovery => "发现恢复记录。仅在系统设置仍匹配时才会恢复。",
+        Message::SystemProxyBlocked => "无法确认桌面代理归属。",
+        Message::SystemProxyEnable => "启用系统代理",
+        Message::SystemProxyDisable => "关闭并恢复",
+        Message::SystemProxyRestore => "恢复之前的设置",
+        Message::SystemProxyRefresh => "重新检查",
+
         Message::MixedProxyPortHelp => "仅监听 127.0.0.1，下次启动内核时生效。",
         Message::MixedProxyPortCli => "本次启动参数优先；重启 Paw 后使用保存的端口。",
         Message::MixedProxyPortSave => "保存端口",
@@ -808,7 +855,7 @@ fn chinese(key: Message) -> &'static str {
         Message::Node => "个节点",
         Message::Nodes => "个节点",
         Message::System => "系统",
-        Message::SystemProxyDescription => "Paw 不会更改操作系统的代理设置。",
+        Message::SystemProxyDescription => "仅在你于设置中主动启用时，Paw 才会修改桌面代理。",
         Message::TunMode => "TUN 模式",
         Message::TunDescription => "此版本不支持虚拟网络接口。",
         Message::ListenerDescription => "只有配置为使用 Paw 的应用才会通过它连接。",
@@ -1753,8 +1800,8 @@ mod tests {
             (Message::System, "System", "系统"),
             (
                 Message::SystemProxyDescription,
-                "Paw does not change the operating system’s proxy.",
-                "Paw 不会更改操作系统的代理设置。",
+                "Paw only changes the desktop proxy if you explicitly enable it in Settings.",
+                "仅在你于设置中主动启用时，Paw 才会修改桌面代理。",
             ),
             (Message::TunMode, "TUN mode", "TUN 模式"),
             (

@@ -1,6 +1,7 @@
 //! Explicitly managed desktop proxy for one ready Paw listener.
 //! Never start or recover this automatically during UI construction.
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::num::NonZeroU16;
@@ -49,6 +50,7 @@ pub enum Status {
     Off,
     Owned(NonZeroU16),
     InterruptedOrChanged,
+    RecoveryPending,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -77,6 +79,7 @@ struct Journal {
 pub struct SystemProxy {
     dir: PathBuf,
     backend: Box<dyn Backend>,
+    owner: RefCell<Option<File>>,
 }
 
 impl SystemProxy {
@@ -100,6 +103,7 @@ impl SystemProxy {
             Ok(Self {
                 dir: state_dir.join("system-proxy"),
                 backend,
+                owner: RefCell::new(None),
             })
         }
     }
@@ -110,7 +114,11 @@ impl SystemProxy {
         if consent != Consent::GrantedByUser {
             return Err(ProxyError::ConsentRequired);
         }
-        let _lock = self.lock()?;
+        if self.owns_operation() {
+            return Err(ProxyError::Conflict);
+        }
+        fs::create_dir_all(self.dir.parent().ok_or(ProxyError::InvalidJournal)?)?;
+        let lock = self.lock()?;
         if self.journal()?.is_some() {
             return Err(ProxyError::Conflict);
         }
@@ -128,6 +136,7 @@ impl SystemProxy {
             expected,
         };
         self.save(&journal)?;
+        self.owner.replace(Some(lock));
         self.backend.apply(&journal.original, &journal.expected)?;
         if self.backend.read()? != journal.expected {
             return Err(ProxyError::Conflict);
@@ -138,8 +147,12 @@ impl SystemProxy {
     /// Also usable for explicit post-crash recovery. A journal whose current
     /// settings exactly equal neither snapshot is retained without writing.
     pub fn restore(&self) -> Result<(), ProxyError> {
-        let _lock = self.lock()?;
+        if !self.dir.exists() && !self.owns_operation() {
+            return Ok(());
+        }
+        let _lock = self.borrow_or_lock()?;
         let Some(journal) = self.journal()? else {
+            self.owner.replace(None);
             return Ok(());
         };
         let observed = self.backend.read()?;
@@ -153,11 +166,16 @@ impl SystemProxy {
             }
         }
         fs::remove_file(self.dir.join("recovery.json"))?;
-        self.sync_dir()
+        self.sync_dir()?;
+        self.owner.replace(None);
+        Ok(())
     }
 
     pub fn status(&self) -> Result<Status, ProxyError> {
-        let _lock = self.lock()?;
+        if !self.dir.exists() && !self.owns_operation() {
+            return Ok(Status::Off);
+        }
+        let _lock = self.borrow_or_lock()?;
         let Some(journal) = self.journal()? else {
             return Ok(Status::Off);
         };
@@ -165,10 +183,24 @@ impl SystemProxy {
         Ok(if observed == journal.expected {
             Status::Owned(journal.port)
         } else if observed == journal.original {
-            Status::Off
+            Status::RecoveryPending
         } else {
             Status::InterruptedOrChanged
         })
+    }
+
+    /// Whether this instance durably recorded its own operation and still
+    /// holds the OS lease, even if the subsequent write returned an error.
+    pub fn owns_operation(&self) -> bool {
+        self.owner.borrow().is_some()
+    }
+
+    fn borrow_or_lock(&self) -> Result<Option<File>, ProxyError> {
+        if self.owns_operation() {
+            Ok(None)
+        } else {
+            self.lock().map(Some)
+        }
     }
 
     fn lock(&self) -> Result<File, ProxyError> {

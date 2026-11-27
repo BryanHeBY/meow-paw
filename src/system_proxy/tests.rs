@@ -57,6 +57,7 @@ fn instance(dir: &tempfile::TempDir, fake: &Fake) -> SystemProxy {
     SystemProxy {
         dir: dir.path().join("proxy"),
         backend: Box::new(fake.clone()),
+        owner: RefCell::new(None),
     }
 }
 fn port() -> NonZeroU16 {
@@ -82,6 +83,10 @@ fn explicit_enable_persists_then_restart_can_restore_exact_original() {
     assert!(p.dir.join("recovery.json").is_file());
     assert_eq!(p.status().unwrap(), Status::Owned(port()));
     assert_eq!(f.writes.get(), 1);
+    assert!(matches!(
+        instance(&dir, &f).restore(),
+        Err(ProxyError::Busy)
+    ));
     drop(p);
     let restarted = instance(&dir, &f);
     assert_eq!(restarted.status().unwrap(), Status::Owned(port()));

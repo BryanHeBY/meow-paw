@@ -457,6 +457,8 @@ pub struct Paw {
     mixed_port_input: Entity<InputState>,
     #[cfg(any(target_os = "linux", windows))]
     mixed_port_notice: Option<Message>,
+    #[cfg(any(target_os = "linux", windows))]
+    quit_after_stop: bool,
     language_choice_focus: [FocusHandle; 3],
     engine_browse_focus: FocusHandle,
     engine_reveal_focus: FocusHandle,
@@ -757,9 +759,16 @@ pub fn open(
             locale,
             profile,
             #[cfg(any(target_os = "linux", windows))]
-            desktop: binary.as_ref().and_then(|path| {
-                meow_paw::app::Desktop::with_mixed_port(path.clone(), preferences.mixed_port()).ok()
-            }),
+            desktop: if binary.is_some() || preferences.proxy_state_dir().is_some() {
+                meow_paw::app::Desktop::with_desktop_proxy(
+                    binary.clone(),
+                    preferences.mixed_port(),
+                    preferences.proxy_state_dir(),
+                )
+                .ok()
+            } else {
+                None
+            },
             binary,
             #[cfg(any(target_os = "linux", windows))]
             expanded_groups: Default::default(),
@@ -801,6 +810,8 @@ pub fn open(
             mixed_port_input,
             #[cfg(any(target_os = "linux", windows))]
             mixed_port_notice: None,
+            #[cfg(any(target_os = "linux", windows))]
+            quit_after_stop: false,
             language_choice_focus: std::array::from_fn(|_| cx.focus_handle()),
             engine_browse_focus: cx.focus_handle(),
             engine_reveal_focus: cx.focus_handle(),
@@ -855,6 +866,18 @@ pub fn open(
                         if paw.refresh() {
                             cx.notify();
                         }
+                        #[cfg(any(target_os = "linux", windows))]
+                        if paw.quit_after_stop
+                            && let Some(stopped) = paw.snapshot.stop_result
+                        {
+                            paw.quit_after_stop = false;
+                            if stopped {
+                                cx.quit();
+                            } else {
+                                paw.page = Page::Settings;
+                                cx.notify();
+                            }
+                        }
                     })
                     .is_err()
                 {
@@ -868,12 +891,29 @@ pub fn open(
 }
 
 impl Paw {
+    pub fn request_quit(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(desktop) = &self.desktop {
+            if !self.quit_after_stop {
+                self.quit_after_stop = true;
+                self.snapshot.stop_result = None;
+                desktop.stop();
+            }
+            return;
+        }
+        cx.quit();
+    }
+
     fn start(&mut self) {
         self.error = None;
         self.copied_listener = None;
         #[cfg(any(target_os = "linux", windows))]
         {
-            let Some(desktop) = self.desktop.as_ref() else {
+            let Some(desktop) = self
+                .desktop
+                .as_ref()
+                .filter(|_| self.binary.is_some() && !self.quit_after_stop)
+            else {
                 self.error = Some("Choose a Meow executable in Settings before starting.".into());
                 return;
             };
@@ -1879,6 +1919,10 @@ impl Paw {
                 },
             );
         let route = self.overview_route(cx);
+        #[cfg(any(target_os = "linux", windows))]
+        let proxy_active = matches!(self.snapshot.system_proxy, meow_paw::app::ProxyState::On(_));
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let proxy_active = false;
         let network = form_card(self.locale.message(Message::Network))
             .child(form_row(
                 self.locale.message(Message::MeowEngine),
@@ -1893,7 +1937,15 @@ impl Paw {
             .child(form_row(
                 self.locale.message(Message::SystemProxy),
                 self.locale.message(Message::SystemProxyDescription),
-                chip(self.locale.message(Message::Unmanaged), FAINT, BG),
+                chip(
+                    self.locale.message(if proxy_active {
+                        Message::SystemProxyActive
+                    } else {
+                        Message::Unmanaged
+                    }),
+                    if proxy_active { GREEN } else { FAINT },
+                    BG,
+                ),
             ));
         let usage_toggle = secondary_button(
             "home-toggle-usage",
@@ -4287,9 +4339,10 @@ impl Paw {
                 self.error = Some("Select an existing local Meow executable.".into());
                 return;
             }
-            match meow_paw::app::Desktop::with_mixed_port(
-                path.clone(),
+            match meow_paw::app::Desktop::with_desktop_proxy(
+                Some(path.clone()),
                 self.preferences.mixed_port(),
+                self.preferences.proxy_state_dir(),
             ) {
                 Ok(desktop) => {
                     self.desktop = Some(desktop);
@@ -4318,8 +4371,102 @@ impl Paw {
         }
     }
 
+    #[cfg(any(target_os = "linux", windows))]
+    fn system_proxy_settings(&self, cx: &mut Context<Self>) -> Div {
+        use meow_paw::app::{EngineStatus, ProxyState};
+        use meow_paw::system_proxy::Consent;
+
+        let state = if self.desktop.is_some() {
+            self.snapshot.system_proxy
+        } else {
+            ProxyState::Unavailable
+        };
+        let status = match state {
+            ProxyState::Checking => Message::SystemProxyChecking,
+            ProxyState::Unavailable => Message::SystemProxyUnavailable,
+            ProxyState::Off => Message::SystemProxyOff,
+            ProxyState::On(_) => Message::SystemProxyOn,
+            ProxyState::Recovery => Message::SystemProxyRecovery,
+            ProxyState::Blocked => Message::SystemProxyBlocked,
+        };
+        let ready =
+            matches!(self.snapshot.engine, EngineStatus::Running { .. }) && !self.quit_after_stop;
+        let action = match state {
+            ProxyState::Off if ready => Some((Message::SystemProxyEnable, 0)),
+            ProxyState::On(_) => Some((Message::SystemProxyDisable, 1)),
+            ProxyState::Recovery => Some((Message::SystemProxyRestore, 1)),
+            ProxyState::Blocked => Some((Message::SystemProxyRefresh, 2)),
+            _ => None,
+        };
+        div()
+            .mx_4()
+            .py_3()
+            .border_t_1()
+            .border_color(rgb(LINE))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.locale.message(Message::SystemProxy)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(FAINT))
+                    .child(self.locale.message(Message::SystemProxyHelp)),
+            )
+            .child(div().text_sm().child(self.locale.message(status)))
+            .when_some(
+                match state {
+                    ProxyState::On(port) => Some(port),
+                    _ => None,
+                },
+                |row, port| row.child(div().text_xs().child(format!("127.0.0.1:{port}"))),
+            )
+            .when_some(action, |row, (label, action)| {
+                row.child(
+                    div().child(
+                        subscription_button(
+                            "managed-system-proxy-action",
+                            self.locale.message(label),
+                            false,
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(desktop) = &this.desktop {
+                                let result = match action {
+                                    0 => desktop.enable_system_proxy(Consent::GrantedByUser),
+                                    1 => desktop.restore_system_proxy(),
+                                    _ => desktop.refresh_system_proxy(),
+                                };
+                                if let Err(error) = result {
+                                    this.snapshot.system_proxy_error = Some(error.to_string());
+                                }
+                            }
+                            cx.notify();
+                        })),
+                    ),
+                )
+            })
+            .when_some(self.snapshot.system_proxy_error.as_ref(), |row, error| {
+                row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0xb42318))
+                        .child(error.clone()),
+                )
+            })
+    }
+
     fn can_change_binary(&self) -> bool {
         let phase = self.state().0;
+        #[cfg(any(target_os = "linux", windows))]
+        if self.quit_after_stop {
+            return false;
+        }
         cfg!(any(target_os = "linux", windows))
             && !matches!(phase, "Starting" | "Running" | "Stopping")
     }
@@ -4656,11 +4803,6 @@ impl Paw {
                     .child(self.locale.message(Message::SettingsReadOnly)),
             )
             .child(form_row(
-                self.locale.message(Message::SystemProxy),
-                self.locale.message(Message::SystemProxyDescription),
-                chip(self.locale.message(Message::Unmanaged), FAINT, BG),
-            ))
-            .child(form_row(
                 self.locale.message(Message::TunMode),
                 self.locale.message(Message::TunDescription),
                 chip(self.locale.message(Message::Unavailable), FAINT, BG),
@@ -4825,6 +4967,8 @@ impl Paw {
                     row.child(div().text_xs().child(self.locale.message(notice)))
                 }),
         );
+        #[cfg(any(target_os = "linux", windows))]
+        let engine = engine.child(self.system_proxy_settings(cx));
         let reduce_motion = self.preferences.reduce_motion();
         let app = settings_card("Meow Paw", "icons/house.svg")
             .child(form_row(
@@ -4872,7 +5016,7 @@ impl Paw {
                 self.locale.message(Message::QuitApplication),
                 self.locale.message(Message::QuitDescription),
                 subscription_button("quit-paw", self.locale.message(Message::QuitPaw), false, cx)
-                    .on_click(cx.listener(|_, _, _, cx| cx.quit())),
+                    .on_click(cx.listener(|this, _, _, cx| this.request_quit(cx))),
             ));
         div()
             .flex()
