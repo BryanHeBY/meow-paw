@@ -3,32 +3,88 @@
 This is a local, opt-in runbook. The CI workflow remains the formatting,
 Clippy and headless test matrix on `ubuntu-24.04` and `windows-2025`; it does
 not initialize or build the core, create a release package, or capture a GUI.
-The steps below require a Windows GUI session and local build prerequisites.
-They are not evidence of a successful Windows run by themselves.
+Building requires local prerequisites; GUI checks also require a Windows GUI
+session. These instructions are not evidence of a successful Windows run.
 
-## Package provenance
+## Portable package and provenance
 
-1. Check the Paw commit and the recorded core gitlink with `git rev-parse HEAD`
-   and `git ls-tree HEAD vendor/meow-rs`. Initialize the submodule locally with
-   `git submodule update --init --recursive` when dependencies are available,
-   then compare `git -C vendor/meow-rs rev-parse HEAD` with the gitlink and
-   check both worktrees are clean. Do not record local paths or private data in
-   evidence.
-2. When builds are appropriate, `python tools/build-with-core.py` builds the
-   pinned core `meow-app`/`meow` and Paw with `--locked --release`, and copies
-   `meow.exe` beside `meow-paw.exe` in `target/release`. The script requires an
-   initialized core checkout whose repository root and HEAD match the parent
-   commit's gitlink, with no tracked, staged, or non-ignored untracked changes.
-   It checks these before either build; a staged parent gitlink does not change
-   the required pin. Check the Paw worktree separately. The gitlink identifies the core,
-   not a verified core version or binary signature. Record both commits and
-   SHA-256 hashes of the two resulting binaries for the candidate package.
-3. Copy both executables together to a clean package directory. Paw looks for
-   adjacent `meow.exe` only after an explicit `MEOW_BIN` and saved engine
-   selection; the sidecar is a separate process. Do not include preferences,
-   profiles, subscriptions, credentials, build caches or local paths in the
-   package or evidence. Verify hashes after copying. There is no installer,
-   signing, artifact upload or release job in the current workflow.
+The packaging tool creates a ZIP containing exactly `meow-paw.exe`, `meow.exe`,
+and `manifest.json`. The manifest identifies the clean Paw commit and its core
+gitlink, and records the size and SHA-256 of each executable. It contains no
+build paths, preferences, profiles, subscriptions, credentials, or signing keys.
+The core remains a separate executable; this workflow does not copy its source or
+assets into Paw. Check the applicable licenses and distribution obligations of
+both binaries and their dependencies before any eventual distribution.
+
+On a Windows build machine, start from a clean, committed Paw checkout with an
+initialized core checkout at its committed gitlink. Check both worktrees and
+record the commits independently. The baseline for this work is Paw
+`5e5fbc4645c009c5d30491d6ca5a6eb983d22044`, whose core gitlink is
+`e3bfb51ea8b07935cb95126dbf755581470eb2cd`; a checkout containing the packaging
+tool must have its own committed Paw revision. With prerequisites and locked
+dependencies already available, build the pinned pair and create the package:
+
+```powershell
+git rev-parse HEAD
+git ls-tree HEAD vendor/meow-rs
+git status --porcelain
+git -C vendor/meow-rs rev-parse HEAD
+git -C vendor/meow-rs status --porcelain
+python tools/build-with-core.py --jobs 1
+python tools/package-windows.py create --output .paw-local/meow-paw-portable.zip
+python tools/package-windows.py verify .paw-local/meow-paw-portable.zip
+```
+
+Create the output parent before invoking the packaging tool; the output ZIP
+must not already exist. The build script checks that the core is initialized, clean, and matches the *committed* gitlink;
+the packaging tool also requires a clean Paw checkout. Use an output location
+outside the checkout or ignored by Git. The Python standard library is sufficient for the packaging tool. Its verification
+command checks package contents and hashes without extracting or running either
+executable. Run the
+synthetic contract tests with `python -m unittest discover -s tests -p
+"test_package_windows.py"` on Windows or a neutral host.
+
+The manifest binds the supplied bytes to their recorded hashes and records source
+revisions; it cannot prove that the binaries were built from those revisions,
+that they are Windows executables, or that they contain no secrets. Build inputs,
+toolchain and environment need independent review. No signature or trust chain
+is supplied, and byte-for-byte reproducible builds are not established. Do not
+include local paths or private data in evidence. The offline contract tests
+do not establish a native Windows build or GUI launch. The package is local
+only: no installer, signing,
+upload, delivery, or release job is provided.
+
+## Clean-machine and first-launch validation
+
+Verification above is an offline, no-launch path that changes no system settings. It
+checks the ZIP as an artifact, not whether the programs work on a clean Windows
+machine. A clean-machine run is still pending. For a future authorized test, use a
+disposable Windows VM with a fresh user and no production configuration, secrets,
+or connectivity, and compare the VM state before and after. Verify the ZIP,
+extract it into a disposable user-owned directory, and keep the two executables
+adjacent. In a process-local PowerShell environment, remove `MEOW_BIN`; use
+`meow-paw.exe --no-preferences --no-tray` without `--profile` or `--start`, and
+close the window. Confirm a stopped, empty state, adjacent engine discovery, and
+process exit. Do not start an engine, import a profile, connect to a subscription,
+or change proxy or network settings. Record the OS, commits, package and binary
+hashes, commands, results, and unexpected changes without paths or private data.
+The flags prevent Paw preference and tray use; they do not prove that Windows or
+other dependencies make no changes. Normal launches may read saved preferences
+from `%LOCALAPPDATA%\meow-paw` and a saved engine or `MEOW_BIN` overrides the
+adjacent executable. Do not use a real user profile for this test.
+
+## Installer and upgrade status
+
+There is currently no installer to validate. Installation, uninstall, upgrade,
+rollback, interrupted upgrade, locked/running executable, and prior-version
+migration behavior have not been implemented or tested. If an installer is later
+proposed, validate it in disposable Windows environments with synthetic data,
+including fresh install, first launch, upgrade and uninstall, preservation of
+user data, and process cleanup. It must not self-elevate or modify registry,
+system proxy, Clash, DNS, VPN, routes or other machine-wide network state under
+this scope. Treat installer and upgrade validation as pending until an actual
+implementation and evidence exist; a portable ZIP verification is not that
+validation.
 
 ## Synthetic Chinese window captures
 
