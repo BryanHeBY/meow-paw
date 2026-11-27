@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = []
-desktop = ["dep:gpui-kit", "dep:zbus"]
+desktop = ["dep:gpui-kit", "dep:unicode-segmentation", "dep:zbus"]
 visual-test = ["desktop", "gpui-kit/test-support"]
 
 [[bin]]
@@ -25,6 +25,7 @@ url = "2"
 getrandom = "0.4"
 tempfile = "3"
 unicase = "2.10"
+unicode-segmentation = { version = "1.13", optional = true }
 sha2 = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]

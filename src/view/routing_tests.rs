@@ -415,6 +415,114 @@ fn proxy_cards_keep_equal_tracks_and_expose_selected_protocol(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+fn jump_navigation_stays_reachable_and_scrolls_only_on_activation(cx: &mut TestAppContext) {
+    use meow_paw::engine::controller::{Inventory, Proxy};
+
+    cx.update(gpui_kit::init);
+    let holder = Rc::new(RefCell::new(None));
+    let result = holder.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let paw = open(
+            None,
+            None,
+            (Page::Proxies, Locale::En),
+            false,
+            (Preferences::discover(false).0, None),
+            window,
+            cx,
+        );
+        paw.update(cx, |paw, _| {
+            let large = Proxy {
+                kind: "Selector".into(),
+                all: Some((0..80).map(|i| format!("Node {i}")).collect()),
+                ..Proxy::default()
+            };
+            let small = Proxy {
+                kind: "Selector".into(),
+                all: Some(vec!["DIRECT".into()]),
+                ..Proxy::default()
+            };
+            paw.snapshot.mode = Some(RoutingMode::Rule);
+            paw.snapshot.inventory = Some(Arc::new(Inventory {
+                groups: [
+                    ("Daily".into(), large),
+                    ("Weekend".into(), small.clone()),
+                    ("Work".into(), small),
+                ]
+                .into(),
+                ..Inventory::default()
+            }));
+            paw.expanded_groups.insert("Daily".into());
+        });
+        *result.borrow_mut() = Some(paw.clone());
+        gpui_kit::base::Root::new(paw, window, cx)
+    });
+    let paw = holder.borrow_mut().take().unwrap();
+    let px = gpui_kit::px;
+    ui.simulate_resize(gpui_kit::size(px(1120.), px(540.)));
+    ui.update(|window, cx| {
+        window.activate_window();
+        window.render_frame(cx);
+        assert!(window.try_find("proxy-jump-menu").is_none());
+        let rail = window.find("jump-group:Work");
+        assert_eq!(rail.role(), Some(gpui_kit::Role::Button));
+        assert_eq!(rail.label(), Some("Jump to group: Work"));
+        assert_eq!(
+            window.find("jump-group:Weekend").label(),
+            Some("Jump to group: Weekend")
+        );
+        assert!(rail.bounds().origin.x > px(1080.));
+        let scroll = paw.read(cx).proxy_group_scroll.clone();
+        window.hover("jump-group:Work", cx);
+        assert_eq!(
+            scroll.offset().y,
+            px(0.),
+            "hover must not move the main pane"
+        );
+        window.click("jump-group:Daily", cx);
+        window.press("tab", cx);
+        window.press("tab", cx);
+        assert!(window.find("jump-group:Work").focused().unwrap());
+        window.press("enter", cx);
+        window.simulate_next_frame(cx);
+        window.render_frame(cx);
+        assert!(scroll.offset().y < px(-200.));
+        assert!(
+            window.find("jump-group:Work").visible(),
+            "nav rail must not scroll away"
+        );
+        assert!(
+            !paw.read(cx).expanded_groups.contains("Work"),
+            "jump is not expansion"
+        );
+        scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
+        window.render_frame(cx);
+    });
+
+    ui.simulate_resize(gpui_kit::size(px(760.), px(540.)));
+    ui.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("jump-group:Work").is_none());
+        assert!(window.find("proxy-jump-menu").visible());
+        window.click("proxy-jump-menu", cx);
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+        window.simulate_next_frame(cx);
+        window.render_frame(cx);
+        assert!(paw.read(cx).proxy_group_scroll.offset().y < px(-200.));
+        assert!(!paw.read(cx).expanded_groups.contains("Work"));
+        let search = paw.read(cx).search.clone();
+        search.update(cx, |input, cx| {
+            input.set_value("no matching group", window, cx)
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("proxy-jump-menu").is_none());
+    });
+}
+
+#[gpui_kit::test]
 fn locating_the_selected_route_expands_its_group_and_scrolls(cx: &mut TestAppContext) {
     use meow_paw::engine::controller::{Inventory, Proxy};
 

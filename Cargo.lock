@@ -4287,6 +4287,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "unicase",
+ "unicode-segmentation",
  "ureq",
  "url",
  "windows-sys 0.61.2",

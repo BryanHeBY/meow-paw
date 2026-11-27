@@ -17,6 +17,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(any(target_os = "linux", windows))]
+mod proxy_group_navigation;
+
 const BG: u32 = 0xeff2f6;
 const CHROME: u32 = 0xf8faff;
 const SURFACE: u32 = 0xffffff;
@@ -3136,7 +3139,12 @@ impl Paw {
         cx.notify();
     }
 
-    fn proxies(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn proxies(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        navigator: &mut Option<Div>,
+    ) -> Div {
         #[cfg(any(target_os = "linux", windows))]
         let locate_route = self.locate_route.take();
         #[cfg(any(target_os = "linux", windows))]
@@ -3940,6 +3948,23 @@ impl Paw {
                         cx.notify();
                     }),
                 );
+            let viewport = window.viewport_size();
+            let jump_menu = if group_anchors.is_empty() {
+                None
+            } else if viewport.width < px(820.) {
+                Some(proxy_group_navigation::menu(
+                    self.locale,
+                    group_anchors,
+                    false,
+                ))
+            } else {
+                *navigator = Some(proxy_group_navigation::rail(
+                    self.locale,
+                    viewport.height,
+                    group_anchors,
+                ));
+                None
+            };
             let page = div()
                 .flex()
                 .flex_col()
@@ -3961,7 +3986,8 @@ impl Paw {
                         .flex_wrap()
                         .items_center()
                         .gap_2()
-                        .child(probe_control);
+                        .child(probe_control)
+                        .children(jump_menu);
                     controls.when(ownership_available && !inventory.providers.is_empty(), |row| {
                         let label = match (self.proxy_providers_open, self.locale) {
                             (false, Locale::En) => "Show providers",
@@ -3997,38 +4023,10 @@ impl Paw {
                     self.locale.message(Message::TryAnotherRoute),
                 ))
             } else {
-                let navigator = div()
-                    .id("proxy-group-navigator")
-                    .w_full()
-                    .min_w_0()
-                    .overflow_x_scroll()
-                    .flex()
-                    .gap_2()
-                    .children(group_anchors.into_iter().map(|(name, anchor)| {
-                        Button::new(SharedString::from(format!("jump-group:{name}")))
-                            .label(name.clone())
-                            .tooltip(name)
-                            .custom(
-                                ButtonCustomVariant::new(cx)
-                                    .color(rgb(BLUE).into())
-                                    .foreground(rgb(BLUE).into())
-                                    .hover(rgb(0xd8e8ff).into())
-                                    .active(rgb(0xc8deff).into()),
-                            )
-                            .max_w(px(180.))
-                            .on_click(move |_, window, cx| anchor.scroll_to(window, cx))
-                    }));
-                page.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(FAINT))
-                        .child(self.locale.message(Message::JumpToGroup)),
-                )
-                .child(navigator)
-                .children(groups)
+                page.children(groups)
             };
         }
-        let _ = (window, cx);
+        let _ = (window, cx, navigator);
         #[cfg(any(target_os = "linux", windows))]
         if self.snapshot.inventory_stale {
             return empty_state(
@@ -4891,9 +4889,10 @@ impl Render for Paw {
         if self.page != Page::Proxies {
             self.locate_route = None;
         }
+        let mut proxy_navigator = None;
         let body = match self.page {
             Page::Overview => self.overview(window.viewport_size().width >= px(960.), cx),
-            Page::Proxies => self.proxies(window, cx),
+            Page::Proxies => self.proxies(window, cx, &mut proxy_navigator),
             Page::Profiles => self.profiles(cx),
             Page::Connections => self.connections(cx),
             Page::Rules => self.rules(cx),
@@ -4946,33 +4945,42 @@ impl Render for Paw {
                             }),
                     )
                     .child(
-                        pane.flex_1()
+                        div()
+                            .flex()
+                            .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
-                            .p_4()
-                            .when_some(self.issue(), |pane, issue| {
-                                pane.child(
-                                    div()
-                                        .p_3()
-                                        .mb_3()
-                                        .rounded_md()
-                                        .bg(rgb(0xffece9))
-                                        .text_color(rgb(0xa83a33))
-                                        .child(issue),
-                                )
-                            })
-                            .when_some(self.preference_warning.as_ref(), |pane, warning| {
-                                pane.child(
-                                    div()
-                                        .p_3()
-                                        .mb_3()
-                                        .rounded_md()
-                                        .bg(rgb(0xfff4d5))
-                                        .text_color(rgb(0x76571b))
-                                        .child(warning.clone()),
-                                )
-                            })
-                            .child(body),
+                            .min_w_0()
+                            .child(
+                                pane.flex_1()
+                                    .min_h_0()
+                                    .min_w_0()
+                                    .overflow_y_scroll()
+                                    .p_4()
+                                    .when_some(self.issue(), |pane, issue| {
+                                        pane.child(
+                                            div()
+                                                .p_3()
+                                                .mb_3()
+                                                .rounded_md()
+                                                .bg(rgb(0xffece9))
+                                                .text_color(rgb(0xa83a33))
+                                                .child(issue),
+                                        )
+                                    })
+                                    .when_some(self.preference_warning.as_ref(), |pane, warning| {
+                                        pane.child(
+                                            div()
+                                                .p_3()
+                                                .mb_3()
+                                                .rounded_md()
+                                                .bg(rgb(0xfff4d5))
+                                                .text_color(rgb(0x76571b))
+                                                .child(warning.clone()),
+                                        )
+                                    })
+                                    .child(body),
+                            )
+                            .children(proxy_navigator),
                     ),
             )
     }
