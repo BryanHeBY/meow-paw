@@ -496,6 +496,8 @@ pub struct Paw {
     #[cfg(any(target_os = "linux", windows))]
     proxy_group_scroll: ScrollHandle,
     #[cfg(any(target_os = "linux", windows))]
+    proxy_providers_open: bool,
+    #[cfg(any(target_os = "linux", windows))]
     locate_route: Option<(String, String)>,
     #[cfg(any(target_os = "linux", windows))]
     snapshot: meow_paw::app::Snapshot,
@@ -731,6 +733,8 @@ pub fn open(
             proxy_order: Default::default(),
             #[cfg(any(target_os = "linux", windows))]
             proxy_group_scroll: ScrollHandle::new(),
+            #[cfg(any(target_os = "linux", windows))]
+            proxy_providers_open: false,
             #[cfg(any(target_os = "linux", windows))]
             locate_route: None,
             error: None,
@@ -3612,15 +3616,17 @@ impl Paw {
                     SOFT_BLUE,
                 ));
             let mut node_counts = std::collections::HashMap::new();
-            for node in &inventory.nodes {
-                if let meow_paw::engine::controller::Origin::Provider(origin) = &node.origin {
-                    *node_counts.entry(origin.as_str()).or_insert(0_usize) += 1;
+            if self.proxy_providers_open && ownership_available {
+                for node in &inventory.nodes {
+                    if let meow_paw::engine::controller::Origin::Provider(origin) = &node.origin {
+                        *node_counts.entry(origin.as_str()).or_insert(0_usize) += 1;
+                    }
                 }
             }
             let providers = inventory
                 .providers
                 .iter()
-                .filter(|_| ownership_available)
+                .filter(|_| ownership_available && self.proxy_providers_open)
                 .map(|(name, status)| {
                     let label = name.clone();
                     let pending =
@@ -3744,13 +3750,48 @@ impl Paw {
                     ))
                 })
                 .child(probe_settings)
-                .when(!providers.is_empty(), |page| {
+                .when(ownership_available && !inventory.providers.is_empty(), |page| {
+                    let expanded = self.proxy_providers_open;
+                    let label = match (expanded, self.locale) {
+                        (false, Locale::En) => "Show providers",
+                        (true, Locale::En) => "Hide providers",
+                        (false, Locale::ZhCn) => "展开提供者",
+                        (true, Locale::ZhCn) => "收起提供者",
+                    };
+                    let caption = format!("{label} ({})", inventory.providers.len());
+                    let control = SemanticButton::new("proxy-providers-toggle")
+                        .accessibility_label(caption.clone())
+                        .rounded_md()
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(rgb(0xb5cafa))
+                        .bg(rgb(SOFT_BLUE))
+                        .text_color(rgb(BLUE))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0xd8e7ff)))
+                        .focus_visible(|style| style.border_color(rgb(BLUE)))
+                        .child(caption)
+                        .on_click(cx.listener(|paw, event, _, cx| {
+                            if matches!(event, ClickEvent::Keyboard(_)) {
+                                cx.stop_propagation();
+                            }
+                            paw.proxy_providers_open = !paw.proxy_providers_open;
+                            cx.notify();
+                        }));
                     page.child(
                         div()
-                            .mt_2()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(self.locale.message(Message::Providers)),
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(control)
+                            .when_some(self.snapshot.refreshing_provider.as_ref(), |row, name| {
+                                row.child(div().text_sm().text_color(rgb(FAINT)).child(format!(
+                                    "{} {name}",
+                                    self.locale.message(Message::ProviderRefreshing),
+                                )))
+                            }),
                     )
                     .children(providers)
                 });

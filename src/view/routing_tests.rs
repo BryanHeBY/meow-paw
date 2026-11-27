@@ -89,6 +89,55 @@ fn provider_refresh_exposes_keyboard_action_and_busy_labels(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn provider_disclosure_is_closed_by_default_and_does_not_refresh(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let holder = Rc::new(RefCell::new(None));
+    let holder2 = holder.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let paw = open(
+            None,
+            None,
+            (Page::Proxies, Locale::En),
+            false,
+            (Preferences::discover(false).0, None),
+            window,
+            cx,
+        );
+        super::seed_proxy_fixture(&paw, cx);
+        paw.update(cx, |paw, _| paw.error = Some("unchanged".into()));
+        *holder2.borrow_mut() = Some(paw.clone());
+        gpui_kit::base::Root::new(paw, window, cx)
+    });
+    let paw = holder.borrow_mut().take().unwrap();
+    ui.update(|window, cx| {
+        window.activate_window();
+        window.render_frame(cx);
+        let control = window.find("proxy-providers-toggle");
+        assert_eq!(control.role(), Some(gpui_kit::Role::Button));
+        assert_eq!(control.label().unwrap(), "Show providers (1)");
+        assert!(!paw.read(cx).proxy_providers_open);
+        window.click("proxy-providers-toggle", cx);
+        window.render_frame(cx);
+        assert!(paw.read(cx).proxy_providers_open);
+        assert_eq!(
+            window.find("proxy-providers-toggle").label().unwrap(),
+            "Hide providers (1)"
+        );
+        assert_eq!(
+            window
+                .find("provider-refresh:Sample Provider")
+                .label()
+                .unwrap(),
+            "Refresh: Sample Provider"
+        );
+        window.click("proxy-providers-toggle", cx);
+        assert!(!paw.read(cx).proxy_providers_open);
+        assert_eq!(paw.read(cx).error.as_deref(), Some("unchanged"));
+        assert!(paw.read(cx).snapshot.refreshing_provider.is_none());
+    });
+}
+
+#[gpui_kit::test]
 fn locating_the_selected_route_expands_its_group_and_scrolls(cx: &mut TestAppContext) {
     use meow_paw::engine::controller::{Inventory, Proxy};
 
