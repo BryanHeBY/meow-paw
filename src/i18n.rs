@@ -231,6 +231,11 @@ pub enum Message {
     Forget,
     LastStartDiagnostics,
     ChooseYaml,
+    ChooseMeowExecutable,
+    FilePickerFailed,
+    FilePickerNoLocalFile,
+    FilePickerCancelWait,
+    FilePickerWaiting,
     ListSubscriptionsFailed,
     SubscriptionSaved,
     SubscriptionRefreshed,
@@ -720,6 +725,13 @@ fn english(key: Message) -> &'static str {
         Message::Forget => "Forget",
         Message::LastStartDiagnostics => "Diagnostics from the last start attempt",
         Message::ChooseYaml => "Choose Meow YAML",
+        Message::FilePickerNoLocalFile => "No local file selected. Choose a file on this device.",
+        Message::FilePickerCancelWait => "Cancel waiting",
+        Message::FilePickerWaiting => "Waiting for the system file picker…",
+        Message::ChooseMeowExecutable => "Choose Meow executable",
+        Message::FilePickerFailed => {
+            "Could not open the file picker. Check your system file chooser and try again."
+        }
         Message::ListSubscriptionsFailed => "Could not list saved subscriptions.",
         Message::SubscriptionSaved => "Subscription saved. Select Use or Apply live when ready.",
         Message::SubscriptionRefreshed => {
@@ -1060,6 +1072,11 @@ fn chinese(key: Message) -> &'static str {
         Message::Forget => "移除",
         Message::LastStartDiagnostics => "上次启动尝试的诊断信息",
         Message::ChooseYaml => "选择 Meow YAML",
+        Message::FilePickerNoLocalFile => "未选择本地文件。请选择此设备上的文件。",
+        Message::FilePickerCancelWait => "取消等待",
+        Message::FilePickerWaiting => "正在等待系统文件选择器…",
+        Message::ChooseMeowExecutable => "选择 Meow 可执行文件",
+        Message::FilePickerFailed => "无法打开文件选择器。请检查系统文件选择器后重试。",
         Message::ListSubscriptionsFailed => "无法列出已保存的订阅。",
         Message::SubscriptionSaved => "订阅已保存。准备就绪后请选择使用或实时应用。",
         Message::SubscriptionRefreshed => "订阅已刷新。正在运行的配置未更改。",
@@ -1289,6 +1306,30 @@ mod tests {
         assert_eq!(Locale::En.message(Message::Home), "Home");
         assert_eq!(Locale::ZhCn.message(Message::Home), "首页");
     }
+    #[test]
+    fn file_picker_controls_and_failure_are_localized() {
+        assert_eq!(
+            Locale::ZhCn.message(Message::FilePickerCancelWait),
+            "取消等待"
+        );
+        assert_eq!(
+            Locale::En.message(Message::FilePickerNoLocalFile),
+            "No local file selected. Choose a file on this device."
+        );
+        assert_eq!(
+            Locale::En.message(Message::ChooseMeowExecutable),
+            "Choose Meow executable"
+        );
+        assert_eq!(
+            Locale::ZhCn.message(Message::ChooseMeowExecutable),
+            "选择 Meow 可执行文件"
+        );
+        assert_eq!(
+            Locale::ZhCn.message(Message::FilePickerFailed),
+            "无法打开文件选择器。请检查系统文件选择器后重试。"
+        );
+    }
+
     #[test]
     fn overview_state_labels_are_localized() {
         let cases = [

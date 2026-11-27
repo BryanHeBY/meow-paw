@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod file_picker;
 #[cfg(any(target_os = "linux", windows))]
 mod proxy_group_navigation;
 
@@ -508,6 +509,8 @@ pub struct Paw {
     subscription_add_focus: FocusHandle,
     _subscription_url_changes: Subscription,
     preference_warning: Option<String>,
+    file_picker: file_picker::Picker,
+    file_picker_task: Option<Task<()>>,
     language_save_failed: bool,
     motion_save_failed: bool,
     #[cfg(any(target_os = "linux", windows))]
@@ -873,6 +876,8 @@ pub fn open(
             subscription_add_focus: cx.focus_handle(),
             _subscription_url_changes: subscription_url_changes,
             preference_warning: warning.map(str::to_owned),
+            file_picker: file_picker::Picker::default(),
+            file_picker_task: None,
             language_save_failed: false,
             motion_save_failed: false,
             #[cfg(any(target_os = "linux", windows))]
@@ -947,7 +952,7 @@ pub fn open(
                             if stopped {
                                 cx.quit();
                             } else {
-                                paw.page = Page::Settings;
+                                paw.navigate_to(Page::Settings);
                                 cx.notify();
                             }
                         }
@@ -1193,7 +1198,7 @@ impl Paw {
                         if matches!(event, ClickEvent::Keyboard(_)) {
                             cx.stop_propagation();
                         }
-                        this.page = page;
+                        this.navigate_to(page);
                         if page != Page::Profiles
                             && !this.subscription_busy
                             && this.subscription_rename.is_some()
@@ -1267,9 +1272,9 @@ impl Paw {
                             if running {
                                 this.stop();
                             } else if !ready {
-                                this.page = Page::Settings;
+                                this.navigate_to(Page::Settings);
                             } else if this.profile.is_none() {
-                                this.page = Page::Profiles;
+                                this.navigate_to(Page::Profiles);
                                 this.load_subscription_metadata(cx);
                             } else {
                                 this.start();
@@ -2081,7 +2086,7 @@ impl Paw {
                     cx,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.page = Page::Profiles;
+                    this.navigate_to(Page::Profiles);
                     this.load_subscription_metadata(cx);
                     cx.notify();
                 })),
@@ -2227,7 +2232,7 @@ impl Paw {
                     cx,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.page = Page::Settings;
+                    this.navigate_to(Page::Settings);
                     cx.notify();
                 }))
                 .into_any_element(),
@@ -2448,7 +2453,7 @@ impl Paw {
                 cx,
             )
             .on_click(cx.listener(|this, _, _, cx| {
-                this.page = Page::Proxies;
+                this.navigate_to(Page::Proxies);
                 cx.notify();
             })),
         ))
@@ -2467,9 +2472,9 @@ impl Paw {
         );
         let browse = secondary_button(
             "select-profile",
-            self.locale.message(Message::ImportLocalYaml),
+            self.file_picker_caption(file_picker::Kind::Profile, Message::ImportLocalYaml),
         )
-        .on_click(cx.listener(|this, _, _, cx| this.choose_file(false, cx)));
+        .on_click(cx.listener(|this, _, _, cx| this.choose_file(file_picker::Kind::Profile, cx)));
         let import = div()
             .flex()
             .gap_2()
@@ -2502,7 +2507,12 @@ impl Paw {
                 profiles.push(path);
             }
         }
-        let mut page = div().flex().flex_col().gap_3().child(import);
+        let mut page = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(import)
+            .children(self.file_picker_status(file_picker::Kind::Profile));
         if self.preferences.subscription_dir().is_some() {
             if self.subscription_entry_open {
                 page =
@@ -3203,39 +3213,91 @@ impl Paw {
         page
     }
 
-    fn choose_file(&mut self, binary: bool, cx: &mut Context<Self>) {
+    fn navigate_to(&mut self, page: Page) {
+        if self.page != page {
+            self.file_picker.leave_page();
+            self.file_picker_task = None;
+            self.page = page;
+        }
+    }
+
+    fn file_picker_status(&self, kind: file_picker::Kind) -> Option<impl IntoElement> {
+        let (message, color) = if self.file_picker.waiting(kind) {
+            (Message::FilePickerWaiting, FAINT)
+        } else {
+            (
+                match self.file_picker.failure(kind)? {
+                    file_picker::Failure::Backend => Message::FilePickerFailed,
+                    file_picker::Failure::NoLocalFile => Message::FilePickerNoLocalFile,
+                },
+                0xa83a33,
+            )
+        };
+        Some(
+            div()
+                .id("file-picker-status")
+                .test_support()
+                .text_sm()
+                .text_color(rgb(color))
+                .child(self.locale.message(message)),
+        )
+    }
+
+    fn file_picker_caption(&self, kind: file_picker::Kind, normal: Message) -> &'static str {
+        self.locale.message(if self.file_picker.waiting(kind) {
+            Message::FilePickerCancelWait
+        } else {
+            normal
+        })
+    }
+
+    fn choose_file(&mut self, kind: file_picker::Kind, cx: &mut Context<Self>) {
+        if self.file_picker.cancel_wait(kind) {
+            self.file_picker_task = None;
+            cx.notify();
+            return;
+        }
+        let Some(request) = self.file_picker.begin(kind) else {
+            return;
+        };
+        cx.notify();
+        let current = match kind {
+            file_picker::Kind::Engine => self.binary.clone(),
+            file_picker::Kind::Profile => self.profile.clone(),
+        };
         let selection = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
             prompt: Some(
-                if binary {
-                    "Choose Meow executable"
-                } else {
-                    self.locale.message(Message::ChooseYaml)
-                }
-                .into(),
+                self.locale
+                    .message(match kind {
+                        file_picker::Kind::Engine => Message::ChooseMeowExecutable,
+                        file_picker::Kind::Profile => Message::ChooseYaml,
+                    })
+                    .into(),
             ),
         });
-        cx.spawn(async move |weak, cx| {
-            let path = selection
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .flatten()
-                .and_then(|paths| paths.into_iter().next());
-            if let Some(path) = path {
-                let _ = weak.update(cx, |paw: &mut Paw, cx| {
-                    if binary {
-                        paw.choose_binary(path);
-                    } else {
-                        paw.select_local_profile(path);
+        self.file_picker_task = Some(cx.spawn(async move |weak, cx| {
+            let reply = file_picker::Completion::from_reply(selection.await);
+            let _ = weak.update(cx, |paw: &mut Paw, cx| {
+                let Some(reply) = paw.file_picker.finish(request, reply) else {
+                    return;
+                };
+                if let file_picker::Completion::Selected(path) = reply {
+                    match kind {
+                        file_picker::Kind::Engine if paw.binary == current => {
+                            paw.choose_binary(path)
+                        }
+                        file_picker::Kind::Profile if paw.profile == current => {
+                            paw.select_local_profile(path)
+                        }
+                        _ => {}
                     }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+                }
+                cx.notify();
+            });
+        }));
     }
 
     fn subscription_for(
@@ -5415,23 +5477,27 @@ impl Paw {
             .child(form_row_with_detail(
                 self.locale.message(Message::MeowExecutable),
                 path_detail,
-                if self.can_change_binary() {
+                if self.can_change_binary() || self.file_picker.waiting(file_picker::Kind::Engine) {
                     subscription_button(
                         "select-binary",
-                        self.locale.message(Message::Browse),
+                        self.file_picker_caption(file_picker::Kind::Engine, Message::Browse),
                         false,
                         cx,
                     )
                     .track_focus(&self.engine_browse_focus)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.engine_browse_focus.focus(window, cx);
-                        this.choose_file(true, cx);
+                        this.choose_file(file_picker::Kind::Engine, cx);
                     }))
                     .into_any_element()
                 } else {
                     chip(self.locale.message(Message::EngineLocked), FAINT, BG).into_any_element()
                 },
             ))
+            .when_some(
+                self.file_picker_status(file_picker::Kind::Engine),
+                |engine, notice| engine.child(div().px_4().pb_3().child(notice)),
+            )
             .when(self.binary.is_some(), |engine| {
                 engine.child(
                     div()
