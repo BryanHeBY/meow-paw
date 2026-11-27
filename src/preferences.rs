@@ -234,10 +234,21 @@ impl Preferences {
     }
 }
 
+struct WriteGuard(File);
+
+impl Drop for WriteGuard {
+    fn drop(&mut self) {
+        // On Unix, a concurrent fork can briefly keep a copy of the file
+        // descriptor alive even though it is marked close-on-exec. Release
+        // the lock when the transaction ends, not when the last copy closes.
+        let _ = self.0.unlock();
+    }
+}
+
 // The sidecar is stable across replacements and is never removed. Cooperating
 // writers require a local filesystem with working locks and atomic replacement;
 // older versions and external editors do not participate in this protocol.
-fn write_guard(file: &Path) -> io::Result<File> {
+fn write_guard(file: &Path) -> io::Result<WriteGuard> {
     let mut name = file
         .file_name()
         .ok_or_else(|| io::Error::other("Preferences filename is missing"))?
@@ -289,7 +300,7 @@ fn write_guard(file: &Path) -> io::Result<File> {
         ));
     }
     guard.try_lock()?;
-    Ok(guard)
+    Ok(WriteGuard(guard))
 }
 
 fn default_file() -> Option<PathBuf> {
@@ -564,6 +575,25 @@ mod tests {
             Preferences::open(file).unwrap().language(),
             LanguagePreference::ZhCn
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_guard_releases_lock_even_with_an_inherited_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let guard = write_guard(&file).unwrap();
+        // An open-file-description duplicate models a fork before exec,
+        // without starting a subprocess or depending on its scheduling.
+        let inherited = guard.0.try_clone().unwrap();
+        assert_eq!(
+            write_guard(&file).err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(guard);
+        let next = write_guard(&file).unwrap();
+        drop(inherited);
+        drop(next);
     }
 
     #[test]
