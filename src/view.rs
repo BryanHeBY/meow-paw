@@ -3784,27 +3784,6 @@ impl Paw {
                     )
                 })
                 .collect::<Vec<_>>();
-            let toolbar = div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(FAINT))
-                        .child(self.locale.message(Message::Filter)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(&self.search).cleanable(true)),
-                )
-                .child(chip(
-                    format!("{count} {}", self.locale.message(Message::Groups)),
-                    BLUE,
-                    SOFT_BLUE,
-                ));
             let mut node_counts = std::collections::HashMap::new();
             if self.proxy_providers_open && ownership_available {
                 for node in &inventory.nodes {
@@ -3965,30 +3944,40 @@ impl Paw {
                 ));
                 None
             };
-            let page = div()
+            let filter = div()
                 .flex()
-                .flex_col()
-                .gap_3()
-                .child(toolbar)
-                .when(self.snapshot.inventory_stale || inventory.provider_error.is_some(), |page| {
-                    page.child(div().text_sm().text_color(rgb(FAINT)).child(
-                        match (self.snapshot.inventory_stale, self.locale) {
-                            (true, Locale::En) => "Route and provider data may be stale; route selection, node tests and provider refresh are disabled.",
-                            (true, Locale::ZhCn) => "路线和提供者数据可能已过期；路线选择、节点测试和提供者刷新已停用。",
-                            (false, Locale::En) => "Provider data unavailable; node tests and provider refresh are disabled. Routes remain available.",
-                            (false, Locale::ZhCn) => "提供者数据不可用；节点测试和提供者刷新已停用。路线仍可使用。",
-                        },
-                    ))
-                })
-                .child({
-                    let controls = div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .child(probe_control)
-                        .children(jump_menu);
-                    controls.when(ownership_available && !inventory.providers.is_empty(), |row| {
+                .items_center()
+                .gap_2()
+                .min_w(px(230.))
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(FAINT))
+                        .child(self.locale.message(Message::Filter)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.search).cleanable(true)),
+                )
+                .child(chip(
+                    format!("{count} {}", self.locale.message(Message::Groups)),
+                    BLUE,
+                    SOFT_BLUE,
+                ));
+            let controls = {
+                let controls = div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(probe_control)
+                    .children(jump_menu);
+                controls.when(
+                    ownership_available && !inventory.providers.is_empty(),
+                    |row| {
                         let label = match (self.proxy_providers_open, self.locale) {
                             (false, Locale::En) => "Show providers",
                             (true, Locale::En) => "Hide providers",
@@ -4007,13 +3996,39 @@ impl Paw {
                                 }),
                             ),
                         )
-                        .when_some(self.snapshot.refreshing_provider.as_ref(), |row, name| {
-                            row.child(div().text_sm().text_color(rgb(FAINT)).child(format!(
-                                "{} {name}",
-                                self.locale.message(Message::ProviderRefreshing),
-                            )))
-                        })
-                    })
+                        .when_some(
+                            self.snapshot.refreshing_provider.as_ref(),
+                            |row, name| {
+                                row.child(div().text_sm().text_color(rgb(FAINT)).child(format!(
+                                    "{} {name}",
+                                    self.locale.message(Message::ProviderRefreshing),
+                                )))
+                            },
+                        )
+                    },
+                )
+            };
+            let toolbar = div()
+                .flex()
+                .gap_2()
+                .when(viewport.width < px(950.), |bar| bar.flex_col())
+                .when(viewport.width >= px(950.), |bar| bar.items_center())
+                .child(filter)
+                .child(controls);
+            let page = div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(toolbar)
+                .when(self.snapshot.inventory_stale || inventory.provider_error.is_some(), |page| {
+                    page.child(div().text_sm().text_color(rgb(FAINT)).child(
+                        match (self.snapshot.inventory_stale, self.locale) {
+                            (true, Locale::En) => "Route and provider data may be stale; route selection, node tests and provider refresh are disabled.",
+                            (true, Locale::ZhCn) => "路线和提供者数据可能已过期；路线选择、节点测试和提供者刷新已停用。",
+                            (false, Locale::En) => "Provider data unavailable; node tests and provider refresh are disabled. Routes remain available.",
+                            (false, Locale::ZhCn) => "提供者数据不可用；节点测试和提供者刷新已停用。路线仍可使用。",
+                        },
+                    ))
                 })
                 .when(self.proxy_probe_settings_open, |page| page.child(probe_settings()))
                 .children(providers);
