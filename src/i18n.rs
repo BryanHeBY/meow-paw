@@ -96,6 +96,8 @@ pub enum Message {
     ProviderRefreshSucceeded,
     ProviderRefreshFailed,
     ProviderRefreshUnknown,
+    ProviderRefreshNotAttempted,
+    ProviderRefreshRestartRequired,
     ProviderRefreshBusy,
     ProviderRefreshUnavailable,
     LatencyTestDescription,
@@ -565,7 +567,11 @@ fn english(key: Message) -> &'static str {
         Message::ProviderRefreshProgress => "Refresh results",
         Message::ProviderRefreshSucceeded => "Refreshed",
         Message::ProviderRefreshFailed => "Failed",
-        Message::ProviderRefreshUnknown => "Result unknown. Check before retrying.",
+        Message::ProviderRefreshUnknown => "Result unknown",
+        Message::ProviderRefreshNotAttempted => "Not attempted",
+        Message::ProviderRefreshRestartRequired => {
+            "The last refresh may still be running. Stop and start Meow before refreshing or applying a profile."
+        }
         Message::ProviderRefreshBusy => "Another provider is refreshing",
         Message::ProviderRefreshUnavailable => "Refresh unavailable",
         Message::LatencyTestDescription => {
@@ -921,7 +927,11 @@ fn chinese(key: Message) -> &'static str {
         Message::ProviderRefreshProgress => "刷新结果",
         Message::ProviderRefreshSucceeded => "已刷新",
         Message::ProviderRefreshFailed => "刷新失败",
-        Message::ProviderRefreshUnknown => "结果未知，请检查后再重试。",
+        Message::ProviderRefreshUnknown => "结果未知",
+        Message::ProviderRefreshNotAttempted => "未尝试",
+        Message::ProviderRefreshRestartRequired => {
+            "上一次刷新可能仍在进行。请停止并重新启动 Meow，再刷新或应用配置。"
+        }
         Message::ProviderRefreshBusy => "另一个代理集合正在刷新",
         Message::ProviderRefreshUnavailable => "刷新不可用",
         Message::LatencyTestDescription => "延迟测试 · Meow 通过所选代理访问此 HTTPS 地址。",

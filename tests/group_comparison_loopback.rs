@@ -153,6 +153,78 @@ fn provider_batch_is_explicit_serial_partial_and_session_fenced() {
 }
 
 #[test]
+fn uncertain_provider_write_fences_refresh_and_apply_until_fresh_controller() {
+    let dir = tempfile::tempdir().unwrap();
+    let (desktop, profile) = setup_fixture(dir.path());
+    fs::write(dir.path().join("provider-batch"), "enabled").unwrap();
+    fs::write(dir.path().join("disconnect-provider"), "enabled").unwrap();
+    desktop.start(profile.clone()).unwrap();
+    let epoch = wait_for(&desktop, |s| {
+        matches!(s.engine, EngineStatus::Running { .. }) && s.inventory.is_some()
+    })
+    .probe_epoch;
+    desktop.refresh_all_http_providers(epoch).unwrap();
+    let fenced = wait_for(&desktop, |s| s.provider_refresh_uncertain);
+    assert!(dir.path().join("server-write-still-running").exists());
+    assert!(!dir.path().join("server-write-finished").exists());
+    let job = fenced.provider_batch.unwrap();
+    assert!(!job.active());
+    assert_eq!(job.results["A HTTP"], ProviderRefreshOutcome::Unknown);
+    assert_eq!(job.results["B"], ProviderRefreshOutcome::NotAttempted);
+    for error in [
+        desktop.refresh_provider(epoch, "B".into()).unwrap_err(),
+        desktop.refresh_all_http_providers(epoch).unwrap_err(),
+        desktop.apply_profile(profile.clone()).unwrap_err(),
+    ] {
+        assert!(
+            error.to_string().contains("Stop Meow and start it again"),
+            "{error}"
+        );
+    }
+    assert!(
+        !requests(dir.path())
+            .iter()
+            .any(|line| line.contains("PUT /providers/proxies/B "))
+    );
+    assert!(
+        !requests(dir.path())
+            .iter()
+            .any(|line| line.starts_with("PUT /configs"))
+    );
+    let stop = Instant::now();
+    desktop.stop();
+    let stopped = wait_for(&desktop, |s| matches!(s.engine, EngineStatus::Stopped));
+    assert!(stop.elapsed() < Duration::from_secs(4));
+    assert!(!dir.path().join("server-write-finished").exists());
+    assert!(!stopped.provider_refresh_uncertain);
+    fs::remove_file(dir.path().join("disconnect-provider")).unwrap();
+    fs::write(dir.path().join("release-helpers"), "go").unwrap();
+    desktop.start(profile).unwrap();
+    let next = wait_for(&desktop, |s| {
+        matches!(s.engine, EngineStatus::Running { .. }) && s.inventory.is_some()
+    })
+    .probe_epoch;
+    assert_ne!(next, epoch);
+    assert!(desktop.refresh_all_http_providers(epoch).is_err());
+    desktop.refresh_all_http_providers(next).unwrap();
+    let resumed = wait_for(&desktop, |s| {
+        s.provider_batch.as_ref().is_some_and(|job| !job.active())
+    });
+    assert!(!resumed.provider_refresh_uncertain);
+    assert_eq!(
+        resumed.provider_batch.unwrap().results["A HTTP"],
+        ProviderRefreshOutcome::Refreshed
+    );
+    assert_eq!(
+        requests(dir.path())
+            .iter()
+            .filter(|line| line.contains("PUT /providers/proxies/B "))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn explicit_group_comparison_uses_bounded_unambiguous_requests_and_ignores_stale_results() {
     let dir = tempfile::tempdir().unwrap();
     let (desktop, profile) = setup_fixture(dir.path());
@@ -368,6 +440,14 @@ fn serve(mut stream: TcpStream, secret: &str, dir: &Path) {
             }}),
         )
     } else if request.starts_with("PUT ") && path == "/providers/proxies/A%20HTTP" {
+        if dir.join("disconnect-provider").exists() {
+            fs::write(dir.join("server-write-still-running"), "held").unwrap();
+            stream.shutdown(std::net::Shutdown::Both).unwrap();
+            // Simulate the server keeping work alive after the client has lost its reply.
+            thread::sleep(Duration::from_secs(8));
+            fs::write(dir.join("server-write-finished"), "done").unwrap();
+            return;
+        }
         let deadline = Instant::now() + Duration::from_secs(5);
         while !dir.join("release-helpers").exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));

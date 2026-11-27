@@ -400,12 +400,14 @@ impl GroupProbeResults {
 }
 
 pub const MAX_PROVIDER_REFRESH_BATCH: usize = 32;
+const PROVIDER_REFRESH_UNCERTAIN: &str = "The last provider refresh may still be running; its result is unknown. Stop Meow and start it again before refreshing or applying a profile.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderRefreshOutcome {
     Refreshed,
     Failed,
     Unknown,
+    NotAttempted,
     Unavailable,
 }
 
@@ -429,6 +431,7 @@ struct ProviderRefreshJob {
 fn provider_session_ready(snapshot: &Snapshot, epoch: u64) -> bool {
     snapshot.probe_epoch == epoch
         && matches!(snapshot.engine, EngineStatus::Running { .. })
+        && !snapshot.provider_refresh_uncertain
         && snapshot.apply_reservation.is_none()
         && snapshot.applying_profile.is_none()
 }
@@ -498,6 +501,9 @@ pub struct Snapshot {
     pub refreshing_provider: Option<String>,
     pub provider_error: Option<String>,
     pub provider_batch: Option<ProviderBatchStatus>,
+    /// The old controller may still be processing a PUT without a response.
+    /// Only retiring that controller clears this fence.
+    pub provider_refresh_uncertain: bool,
     pub probe_epoch: u64,
     pub probes: ProxyProbeResults,
     pub probe_busy: bool,
@@ -1094,6 +1100,12 @@ impl Desktop {
 
     fn submit_provider_refresh(&self, epoch: u64, name: Option<String>) -> io::Result<()> {
         let s = self.snapshot.lock().expect("snapshot poisoned");
+        if s.probe_epoch == epoch && s.provider_refresh_uncertain {
+            return Err(Error::new(
+                ErrorKind::WouldBlock,
+                PROVIDER_REFRESH_UNCERTAIN,
+            ));
+        }
         if self.stop.load(Ordering::Acquire)
             || self.quit.load(Ordering::Acquire)
             || !provider_session_ready(&s, epoch)
@@ -1168,6 +1180,12 @@ impl Desktop {
             return Err(Error::new(
                 ErrorKind::NotConnected,
                 "Start Meow before applying a live profile",
+            ));
+        }
+        if s.provider_refresh_uncertain {
+            return Err(Error::new(
+                ErrorKind::WouldBlock,
+                PROVIDER_REFRESH_UNCERTAIN,
             ));
         }
         if s.apply_reservation.is_some() {
@@ -1461,13 +1479,15 @@ fn run(
                     // In-place config apply keeps the same controller credential.
                     // An already-issued PUT cannot be recalled safely, so refuse
                     // apply rather than let it cross into the new config.
-                    if refresh_inflight == Some(generation)
-                        && s.apply_reservation.as_ref() == Some(&reservation)
+                    if (refresh_inflight == Some(generation) || s.provider_refresh_uncertain)
+                        && s.apply_reservation == Some(reservation)
                     {
                         s.apply_reservation = None;
-                        s.action_error = Some(
-                            "A provider refresh is still finishing; try applying again.".into(),
-                        );
+                        s.action_error = Some(if s.provider_refresh_uncertain {
+                            PROVIDER_REFRESH_UNCERTAIN.into()
+                        } else {
+                            "A provider refresh is still finishing; try applying again.".into()
+                        });
                         s.revision = s.revision.wrapping_add(1);
                         continue;
                     }
@@ -1651,14 +1671,31 @@ fn run(
             if epoch != generation {
                 continue;
             }
+            let outcome = provider_refresh_outcome(&result);
+            // Losing the reply is not server quiescence. Cancel all undispatched
+            // work and prevent further PUTs or a same-controller config apply.
+            let pending = if outcome == ProviderRefreshOutcome::Unknown {
+                refresh_job
+                    .take()
+                    .map(|job| job.pending)
+                    .unwrap_or_default()
+            } else {
+                VecDeque::new()
+            };
             change(snapshot, |s| {
                 if s.probe_epoch != epoch {
                     return;
                 }
+                if outcome == ProviderRefreshOutcome::Unknown {
+                    s.provider_refresh_uncertain = true;
+                }
                 if let Some(batch) = &mut s.provider_batch {
-                    batch
-                        .results
-                        .insert(name, provider_refresh_outcome(&result));
+                    batch.results.insert(name, outcome);
+                    for name in pending {
+                        batch
+                            .results
+                            .insert(name, ProviderRefreshOutcome::NotAttempted);
+                    }
                     s.refreshing_provider = None;
                 } else {
                     finish_provider_refresh(s, result);
@@ -2124,8 +2161,9 @@ fn finish_provider_refresh(
 ) {
     snapshot.refreshing_provider = None;
     snapshot.provider_error = result.err().map(|error| match error {
-        crate::engine::controller::ControllerError::Unreachable =>
-            "Provider refresh timed out or disconnected; result is unknown. Check its status before retrying.".into(),
+        crate::engine::controller::ControllerError::Unreachable => {
+            PROVIDER_REFRESH_UNCERTAIN.into()
+        }
         error => format!("Provider refresh failed: {error}"),
     });
 }
@@ -2195,6 +2233,7 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64, engine: EngineSt
         s.refreshing_provider = None;
         s.provider_error = None;
         s.provider_batch = None;
+        s.provider_refresh_uncertain = false;
         set_confirmed_mode(s, None);
         s.rules = None;
         clear_rule_provider_state(s);

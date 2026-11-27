@@ -5601,6 +5601,7 @@ impl Render for ProviderPanel {
         let unavailable = inventory.is_none_or(|inventory| inventory.provider_error.is_some());
         let batch = paw.snapshot.provider_batch.as_ref();
         let batch_active = batch.is_some_and(|job| job.active());
+        let uncertain = paw.snapshot.provider_refresh_uncertain;
         let busy = paw.snapshot.refreshing_provider.is_some() || batch_active;
         let epoch = paw.snapshot.probe_epoch;
         let http_count = inventory.map_or(0, |inventory| {
@@ -5611,6 +5612,7 @@ impl Render for ProviderPanel {
                 .count()
         });
         let bulk_enabled = !busy
+            && !uncertain
             && !stale
             && !unavailable
             && matches!(
@@ -5684,6 +5686,7 @@ impl Render for ProviderPanel {
                     Refreshed => Message::ProviderRefreshSucceeded,
                     Failed => Message::ProviderRefreshFailed,
                     Unknown => Message::ProviderRefreshUnknown,
+                    NotAttempted => Message::ProviderRefreshNotAttempted,
                     Unavailable => Message::ProviderRefreshUnavailable,
                 });
                 content = content.child(
@@ -5694,7 +5697,14 @@ impl Render for ProviderPanel {
                 );
             }
         }
-        if let Some(error) = &paw.snapshot.provider_error {
+        if uncertain {
+            content = content.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(FAINT))
+                    .child(locale.message(Message::ProviderRefreshRestartRequired)),
+            );
+        } else if let Some(error) = &paw.snapshot.provider_error {
             content = content.child(div().text_sm().text_color(rgb(FAINT)).child(error.clone()));
         }
         if stale || unavailable {
@@ -5777,7 +5787,7 @@ impl Render for ProviderPanel {
                 let usage = SharedString::from(usage);
                 let label = name.clone();
                 let owner = self.owner.clone();
-                let disabled = busy || stale || unavailable;
+                let disabled = busy || stale || unavailable || uncertain;
                 let row = card().px_3().py_3().flex().items_center().gap_3().child(
                     div()
                         .min_w_0()
@@ -5849,7 +5859,7 @@ impl Render for ProviderPanel {
                                 &label,
                                 pending,
                                 busy,
-                                stale || unavailable,
+                                stale || unavailable || uncertain,
                             )
                             .track_focus(&self.refresh_focus[name])
                             .when(!disabled, |button| {
