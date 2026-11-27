@@ -1037,8 +1037,18 @@ fn run(
             Ok(_) if cancelled() => continue,
             Ok(Command::SystemProxy(action)) => {
                 proxy.handle(action, snapshot, || {
-                    let active = session.as_mut()?;
-                    active.ready_mixed_listener().filter(|_| !cancelled())
+                    if cancelled() {
+                        return Err("The Paw session is stopping.".into());
+                    }
+                    let active = session.as_mut().ok_or("Start Paw's managed Meow first.")?;
+                    let address = active.verified_mixed_listener_addr().map_err(|e| {
+                        format!("Cannot verify Paw's mixed listener ownership: {e}")
+                    })?;
+                    if cancelled() {
+                        return Err("The Paw session is stopping.".into());
+                    }
+                    std::num::NonZeroU16::new(address.port())
+                        .ok_or_else(|| "Paw's verified mixed listener has no port.".into())
                 });
             }
             Ok(Command::Start(input)) => {

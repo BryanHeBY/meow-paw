@@ -70,7 +70,7 @@ impl ProxyControl {
         &self,
         action: ProxyAction,
         snapshot: &Mutex<Snapshot>,
-        mut ready: impl FnMut() -> Option<NonZeroU16>,
+        mut ready: impl FnMut() -> Result<NonZeroU16, String>,
     ) {
         let outcome = (|| {
             let manager = self.manager.as_ref().map_err(ToString::to_string)?;
@@ -84,14 +84,22 @@ impl ProxyControl {
                         Status::Owned(_) if manager.owns_operation() => return Ok(()),
                         _ => return Err(ProxyError::Conflict.to_string()),
                     }
-                    let port = ready().ok_or("Paw's loopback mixed listener is not ready.")?;
-                    manager.activate(port, consent).map_err(|e| e.to_string())?;
-                    if ready() != Some(port) {
-                        manager.restore().map_err(|e| e.to_string())?;
-                        return Err(
-                            "Paw restored the desktop proxy because its loopback listener stopped."
-                                .into(),
-                        );
+                    let port = ready()?;
+                    if let Err(error) = manager.activate(port, consent) {
+                        if manager.owns_operation()
+                            && let Err(restore) = manager.restore()
+                        {
+                            return Err(format!("{error} {restore}"));
+                        }
+                        return Err(error.to_string());
+                    }
+                    let after = ready();
+                    if after.as_ref().ok() != Some(&port) {
+                        let reason = after
+                            .err()
+                            .unwrap_or_else(|| "Paw's mixed listener changed.".into());
+                        manager.restore().map_err(|e| format!("{reason} {e}"))?;
+                        return Err(format!("{reason} Paw restored the desktop proxy."));
                     }
                     Ok(())
                 }
@@ -178,11 +186,13 @@ mod tests {
         worker.handle(ProxyAction::Enable(Consent::NotGranted), &snap, || {
             panic!("must not poll listener")
         });
-        worker.handle(ProxyAction::Enable(Consent::GrantedByUser), &snap, || None);
+        worker.handle(ProxyAction::Enable(Consent::GrantedByUser), &snap, || {
+            Err("not owned".into())
+        });
         assert_eq!(fake.activates.get(), 0);
         assert!(snap.lock().unwrap().system_proxy_error.is_some());
         worker.handle(ProxyAction::Enable(Consent::GrantedByUser), &snap, || {
-            Some(LIVE_PORT)
+            Ok(LIVE_PORT)
         });
         assert_eq!(fake.activates.get(), 1);
         assert_eq!(snap.lock().unwrap().system_proxy, ProxyState::On(LIVE_PORT));
@@ -195,7 +205,9 @@ mod tests {
         let (worker, fake, snap) = fixture(Status::Off);
         let mut first = true;
         worker.handle(ProxyAction::Enable(Consent::GrantedByUser), &snap, || {
-            std::mem::replace(&mut first, false).then_some(LIVE_PORT)
+            std::mem::replace(&mut first, false)
+                .then_some(LIVE_PORT)
+                .ok_or_else(|| "listener stopped".into())
         });
         assert_eq!(fake.activates.get(), 1);
         assert_eq!(fake.restores.get(), 1);
@@ -221,7 +233,7 @@ mod tests {
     fn conflicts_are_visible_and_fail_the_clean_shutdown_gate() {
         let (worker, fake, snap) = fixture(Status::Off);
         worker.handle(ProxyAction::Enable(Consent::GrantedByUser), &snap, || {
-            Some(LIVE_PORT)
+            Ok(LIVE_PORT)
         });
         fake.status.set(Status::InterruptedOrChanged);
         assert!(!worker.restore_current(&snap));

@@ -44,6 +44,7 @@ fn managed_proxy_worker_uses_only_fixture_desktop() {
         .env("MEOW_BIN", meow)
         .env("PAW_TEST_PROXY_FIXTURE", dir.path())
         .env("PAW_TEST_GSETTINGS_STATE", fake_state)
+        .env("PAW_TEST_FOREIGN_MARKER", dir.path().join("foreign-port"))
         .env("XDG_CURRENT_DESKTOP", "GNOME")
         .env(
             "DBUS_SESSION_BUS_ADDRESS",
@@ -122,6 +123,64 @@ fn fixture_child(dir: &Path) {
     assert_eq!(stopped.system_proxy, ProxyState::Off);
     assert_eq!(state(), "{}");
     assert!(!dir.join("system-proxy/recovery.json").exists());
+    drop(worker);
+    reject_foreign_listener(dir);
+}
+
+fn reject_foreign_listener(dir: &Path) {
+    use std::{
+        net::{Ipv4Addr, TcpListener},
+        os::unix::fs::PermissionsExt,
+    };
+
+    let executable = dir.join("fake-meow");
+    fs::write(&executable, include_str!("fixtures/fake_meow_foreign.py")).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let worker = Desktop::with_desktop_proxy(Some(executable), 0, Some(dir.to_owned())).unwrap();
+    wait(&worker, |s| s.system_proxy == ProxyState::Off);
+    worker.start(dir.join("profile.yaml")).unwrap();
+
+    // The fake engine publishes the requested port only after Paw released
+    // its reservation. Hold it in this test process, not the owned child.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let port = loop {
+        if let Some(port) = fs::read_to_string(dir.join("foreign-port"))
+            .ok()
+            .and_then(|raw| raw.parse::<u16>().ok())
+        {
+            break port;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Fake engine never reached its run path: {:?}",
+            worker.snapshot()
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    let foreign = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+    // Legacy TCP connect readiness passes with the unrelated listener plus
+    // the launched child's authenticated controller. Proxy export must not.
+    wait(
+        &worker,
+        |s| matches!(s.engine, EngineStatus::Running { mixed_port } if mixed_port == port),
+    );
+    worker.enable_system_proxy(Consent::GrantedByUser).unwrap();
+    let rejected = wait(&worker, |s| s.system_proxy_error.is_some());
+    assert!(
+        rejected
+            .system_proxy_error
+            .unwrap()
+            .contains("mixed listener ownership")
+    );
+    assert_eq!(rejected.system_proxy, ProxyState::Off);
+    assert_eq!(
+        fs::read_to_string(dir.join("gsettings.json")).unwrap(),
+        "{}"
+    );
+    assert!(!dir.join("system-proxy/recovery.json").exists());
+    assert_eq!(foreign.local_addr().unwrap().port(), port);
+    worker.stop();
+    wait(&worker, |s| s.stop_result == Some(true));
 }
 
 fn wait(worker: &Desktop, pred: impl Fn(&Snapshot) -> bool) -> Snapshot {

@@ -45,7 +45,8 @@ before each native write and verifies results afterward.
 The backend unit tests simulate restart and conflict without writing the
 running desktop proxy. Use **Settings → Meow Engine → System proxy** in the desktop app. Enabling
 is never remembered as a launch preference. The control checks the currently
-owned Meow process, authenticated loopback controller, and actual mixed port
+owned Meow process, authenticated loopback controller, and kernel socket ownership of its exact
+IPv4 loopback mixed port
 before applying and rechecks after applying. Stop and explicit Quit attempt
 restoration before shutting down the listener. Native window close without a\nready tray follows the same path; when the tray is available, close still only\nhides the window. A restoration conflict keeps the
 session running and is shown in Settings. If the owned core exits unexpectedly,
