@@ -1,0 +1,55 @@
+Meow Paw Windows portable bundle: baseline third-party notices
+==============================================================
+
+This is a partial inventory, not a release audit. It does not identify every
+dependency or data set linked into the two executables. It does not authorize
+redistribution of the baseline ZIP. The separate Paw and Meow notices come
+from LICENSE at the exact Paw commit and pinned Meow gitlink in manifest.json.
+
+Verified notice sources
+-----------------------
+
+- GPUI Kit 0.11.0 (Apache-2.0): gpui-base and gpui-component published crate
+  LICENSE-APACHE are identical. The published gpui-kit and gpui-kit-assets
+  manifests also identify Apache-2.0.
+  https://github.com/longbridge/gpui-kit
+- GPUI pre 0.3.14 (Apache-2.0): the gpui-pre published crate LICENSE-APACHE
+  includes the Zed Industries copyright. The inspected 0.3.14 companion
+  crate copies were identical.
+  https://github.com/zed-industries/zed
+- Icons from gpui-kit-assets 0.11.0: the complete published LICENSE-LUCIDE
+  includes both the Lucide ISC notice and the Feather-derived icons' MIT
+  notice and attribution.
+  https://crates.io/crates/gpui-kit-assets/0.11.0
+- option-ext 0.2.0 (MPL-2.0) appears in the locked x86_64-pc-windows-msvc
+  Paw desktop normal dependency graph. The published source snapshot is:
+  https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate
+  Cargo.lock archive SHA-256:
+  04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d
+  Check that the covered source in the actual executable, including any
+  modifications, is made available before distribution under MPL section 3.2.
+- webpki-roots 1.0.11 (CDLA-Permissive-2.0) also appears in that graph.
+  Its published LICENSE accompanies the certificate data notice.
+  https://crates.io/crates/webpki-roots/1.0.11
+- WireGuard LLC Wintun 0.14.1: the pinned default/full Windows Meow build can
+  embed the signed prebuilt DLL even when there is no top-level wintun.dll.
+  This is the Prebuilt Binaries License copied verbatim from wintun/LICENSE.txt
+  in the official archive. It is not the GPL-2.0 license for Wintun source.
+  https://www.wintun.net/builds/wintun-0.14.1.zip
+  Official archive SHA-256:
+  07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
+  The embedded-only packaging layout has not been confirmed under the
+  prebuilt terms governing distribution alongside software using the
+  permitted API. Including the text does not resolve that question.
+
+Still requires artifact-specific review
+----------------------------------------
+
+Resolve the locked normal dependency graph for both executables and the actual
+Windows target and features. Also inventory linked native libraries, copied
+or embedded assets, build-script payloads, and source availability obligations.
+The offline Meow graph was not fully resolved here. If self_cell 1.3.0 is
+present in the shipped graph, use its published Apache-2.0 option, not its
+alternative GPL-2.0-only option, and include the corresponding notices.
+Use an audited release notice inventory; do not treat this baseline or its
+manifest hashes as a complete inventory, permissions review, or attestation.

@@ -8,21 +8,26 @@ session. These instructions are not evidence of a successful Windows run.
 
 ## Portable package and provenance
 
-The packaging tool creates a ZIP containing exactly `meow-paw.exe`, `meow.exe`,
-and `manifest.json`. The manifest identifies the clean Paw commit and its core
-gitlink, and records the size and SHA-256 of each executable. It contains no
-build paths, preferences, profiles, subscriptions, credentials, or signing keys.
-The core remains a separate executable; this workflow does not copy its source or
-assets into Paw. Check the applicable licenses and distribution obligations of
-both binaries and their dependencies before any eventual distribution.
+The packaging tool creates a **local baseline** ZIP with exactly
+`meow-paw.exe`, `meow.exe`, `manifest.json`, `THIRD-PARTY-NOTICES.txt`, and
+the required files under `LICENSES/`. This includes the exact MIT notices at
+the committed Paw root and pinned Meow gitlink, GPUI Kit and GPUI pre notices,
+the complete Lucide/Feather notice, the known Paw MPL/CDLA notices, and the
+official Wintun 0.14.1 Prebuilt Binaries License. The core remains a separate
+executable. The package declares `notice_coverage: "baseline_only"`; **do not
+publish or distribute the baseline ZIP**.
 
-On a Windows build machine, start from a clean, committed Paw checkout with an
-initialized core checkout at its committed gitlink. Check both worktrees and
-record the commits independently. The baseline for this work is Paw
-`5e5fbc4645c009c5d30491d6ca5a6eb983d22044`, whose core gitlink is
-`e3bfb51ea8b07935cb95126dbf755581470eb2cd`; a checkout containing the packaging
-tool must have its own committed Paw revision. With prerequisites and locked
-dependencies already available, build the pinned pair and create the package:
+The manifest identifies the clean Paw commit and its core gitlink and records
+the size and SHA-256 of each executable and notice. No build paths,
+preferences, subscriptions, credentials, or signing keys are included.
+Source notices are read directly from committed regular Git blobs, so line
+endings are preserved. The third-party originals are pinned byte for byte;
+the Wintun text preserves the CRLF of the official ZIP.
+
+On a Windows build machine, start from a clean, committed Paw checkout with
+an initialized core at its committed gitlink. With prerequisites and locked
+dependencies already available, build the pinned pair and create the local
+package:
 
 ```powershell
 git rev-parse HEAD
@@ -33,26 +38,76 @@ git -C vendor/meow-rs status --porcelain
 python tools/build-with-core.py --jobs 1
 python tools/package-windows.py create --output .paw-local/meow-paw-portable.zip
 python tools/package-windows.py verify .paw-local/meow-paw-portable.zip
+python tools/package-windows.py verify --source-root . .paw-local/meow-paw-portable.zip
 ```
 
-Create the output parent before invoking the packaging tool; the output ZIP
-must not already exist. The build script checks that the core is initialized, clean, and matches the *committed* gitlink;
-the packaging tool also requires a clean Paw checkout. Use an output location
-outside the checkout or ignored by Git. The Python standard library is sufficient for the packaging tool. Its verification
-command checks package contents and hashes without extracting or running either
-executable. Run the
-synthetic contract tests with `python -m unittest discover -s tests -p
-"test_package_windows.py"` on Windows or a neutral host.
+Create the output parent first; the output ZIP must not already exist. Use a
+location outside the checkout or ignored by Git. The Python standard library
+is sufficient. Verification checks the exact member list and hashes without
+extracting or running the executables. Optional `--source-root` checks the
+archive's two source commits and matches **every notice** against the clean
+committed sources. It also detects a replacement Paw/Meow notice with an
+updated manifest. Verification without a trusted source checkout cannot
+independently authenticate those notices or the authored index.
 
-The manifest binds the supplied bytes to their recorded hashes and records source
-revisions; it cannot prove that the binaries were built from those revisions,
-that they are Windows executables, or that they contain no secrets. Build inputs,
-toolchain and environment need independent review. No signature or trust chain
-is supplied, and byte-for-byte reproducible builds are not established. Do not
-include local paths or private data in evidence. The offline contract tests
-do not establish a native Windows build or GUI launch. The package is local
-only: no installer, signing,
-upload, delivery, or release job is provided.
+Run the synthetic contract tests with
+`python -m unittest discover -s tests -p "test_package_windows.py"` on Windows
+or a neutral host. The format is `paw-windows-portable-v2`; legacy notice-free
+archives do not pass this verifier.
+
+The manifest cannot prove that the supplied executables were built from the
+listed revisions, that they are Windows executables, that they contain no
+secrets, or that their license obligations have been met. No signature or
+trust chain is supplied, and reproducible executables are not established.
+The offline fixture tests do not establish a native Windows build or launch.
+There is no installer, signing, upload, delivery, or public release job.
+
+### Required license check before any Windows distribution
+
+1. Record the **actual** Windows target triple, locked Paw and Meow commits,
+   feature sets, Cargo/Rust/toolchain versions, artifact hashes, and any
+   patched/embedded inputs. The default build script uses Paw's desktop
+   feature and Meow app's defaults (Full). Do not use a Linux inventory, the
+   unfiltered lockfile, or a different feature set as the release evidence.
+2. From those same sources, resolve both target-specific dependency graphs
+   and review the licenses and copyrights from the exact crate/source
+   archives. For an ordinary x86-64 MSVC default build start with:
+
+   ```powershell
+   cargo tree --locked --target x86_64-pc-windows-msvc --features desktop -e normal
+   cargo tree --locked --manifest-path vendor/meow-rs/Cargo.toml -p meow-app --target x86_64-pc-windows-msvc -e normal
+   ```
+
+   Use the same target and features as the actual build, including any
+   dependency overrides. Check build-script-generated content separately.
+   Reconcile the graph with both final binaries and the archive, including
+   native libraries, embedded or runtime-extracted DLLs, certificates and
+   data/asset copies. Record the final license choices and source
+   availability for everything redistributed. The baseline only verifies a
+   subset of the GPUI and Paw x86-64 target graph and does not resolve
+   Meow's complete graph. If `self_cell 1.3.0` is present, elect and record
+   Apache-2.0, not its alternate GPL-2.0-only terms.
+3. Preserve the required original text and notices. For MPL-2.0
+   `option-ext`, verify the corresponding exact covered source (including
+   local modifications, if any) is available to recipients and tell them how
+   to obtain it under the terms of [MPL-2.0 §3.2](https://www.mozilla.org/en-US/MPL/2.0/).
+   Retain the CDLA-Permissive-2.0 text for `webpki-roots` certificate data
+   as applicable to the shipped snapshot. See the
+   [baseline inventory and source references](../licenses/windows/THIRD-PARTY-NOTICES.txt).
+4. For a default/full Windows Meow build, inventory Wintun even when the
+   outer ZIP has no separate DLL. Use the exact matching, signed official
+   binary and its Prebuilt Binaries License from [wintun.net](https://www.wintun.net/);
+   the separately available Wintun source has different GPL-2.0 terms. The
+   prebuilt terms refer to redistribution alongside software using the
+   permitted API. Do not assume that an embedded-only payload satisfies
+   this condition. Document a verified packaging/runtime strategy under
+   the applicable terms or keep that artifact out of distribution.
+5. Have the artifact-specific inventory and all notices/source offers
+   checked and ship them with the real package. The baseline tool does not
+   accept or certify a release notice set. Until the audited notice set and
+   Wintun disposition are reflected in the actual release artifact, keep
+   this tool's ZIP local. Rerun the audit when target, dependency locks, pin,
+   features, native code or asset inputs change.
 
 ## Clean-machine and first-launch validation
 

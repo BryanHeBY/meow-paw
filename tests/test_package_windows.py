@@ -12,7 +12,11 @@ import unittest
 import zipfile
 
 
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "package-windows.py"
+ROOT = Path(__file__).resolve().parents[1]
+TOOL = ROOT / "tools" / "package-windows.py"
+PAW_LICENSE = "LICENSES/Paw-MIT.txt"
+CORE_LICENSE = "LICENSES/Meow-MIT.txt"
+WINTUN_LICENSE = "LICENSES/wintun-0.14.1-prebuilt.txt"
 
 
 class WindowsPackageTest(unittest.TestCase):
@@ -40,17 +44,28 @@ class WindowsPackageTest(unittest.TestCase):
         self.git(self.source, "init", "-q")
         self.git(self.core, "init", "-q")
         (self.core / "Cargo.toml").write_text("[package]\nname = 'fixture-core'\n", encoding="utf-8")
-        self.git(self.core, "add", "Cargo.toml")
+        paw_license = (ROOT / "LICENSE").read_bytes().replace(b"\r\n", b"\n")
+        core_license = b"Copyright (c) Fixture Core\n" + paw_license.split(b"\n", 1)[1]
+        (self.core / "LICENSE").write_bytes(core_license)
+        self.git(self.core, "add", "Cargo.toml", "LICENSE")
         self.git(self.core, "commit", "-qm", "core fixture")
         self.core_commit = self.git(self.core, "rev-parse", "HEAD").strip()
         (self.source / "README.md").write_text("fixture source\n", encoding="utf-8")
-        self.git(self.source, "add", "README.md")
+        (self.source / "LICENSE").write_bytes(paw_license)
+        shutil.copyfile(ROOT / ".gitattributes", self.source / ".gitattributes")
+        shutil.copytree(ROOT / "licenses" / "windows", self.source / "licenses" / "windows")
+        self.git(self.source, "add", "README.md", "LICENSE", ".gitattributes", "licenses")
         self.git(self.source, "update-index", "--add", "--cacheinfo", "160000", self.core_commit, "vendor/meow-rs")
         self.git(self.source, "commit", "-qm", "paw fixture")
         self.paw_commit = self.git(self.source, "rev-parse", "HEAD").strip()
         self.payloads = {"meow-paw.exe": b"synthetic paw executable\n", "meow.exe": b"synthetic core executable\n"}
         for name, data in self.payloads.items():
             (self.binaries / name).write_bytes(data)
+        self.notices = {PAW_LICENSE: paw_license, CORE_LICENSE: core_license}
+        for path in (ROOT / "licenses" / "windows").glob("*.txt"):
+            name = path.name if path.name == "THIRD-PARTY-NOTICES.txt" else f"LICENSES/{path.name}"
+            self.notices[name] = path.read_bytes()
+        self.members = self.payloads | self.notices
 
     def git(self, cwd, *args):
         return subprocess.run(
@@ -77,20 +92,26 @@ class WindowsPackageTest(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(self.output.read_bytes(), second_path.read_bytes())
         with zipfile.ZipFile(self.output) as archive:
-            self.assertEqual(set(archive.namelist()), {"manifest.json", *self.payloads})
-            self.assertEqual(len(archive.namelist()), 3)
+            self.assertEqual(set(archive.namelist()), {"manifest.json", *self.members})
+            self.assertEqual(len(archive.namelist()), len(self.members) + 1)
             manifest_bytes = archive.read("manifest.json")
             self.assertNotIn(secret.encode(), manifest_bytes)
             self.assertNotIn(str(self.base).encode(), manifest_bytes)
             manifest = json.loads(manifest_bytes)
-            self.assertEqual(manifest["format"], "paw-windows-portable-v1")
+            self.assertEqual(manifest["format"], "paw-windows-portable-v2")
+            self.assertEqual(manifest["notice_coverage"], "baseline_only")
+            self.assertIn(b"Feather project", archive.read("LICENSES/gpui-kit-assets-0.11.0-lucide-feather.txt"))
+            self.assertIn(b"Cole Bemis", archive.read("LICENSES/gpui-kit-assets-0.11.0-lucide-feather.txt"))
+            self.assertIn(b"\r\n", archive.read(WINTUN_LICENSE))
+            self.assertEqual(hashlib.sha256(archive.read(WINTUN_LICENSE)).hexdigest(),
+                             "183adac21e7d96c508c8fd34d394b7b6708bc81564ad1bad61ab66143a008cd2")
             self.assertEqual(manifest["provenance"], {
                 "paw_commit": self.paw_commit,
                 "core_commit": self.core_commit,
                 "binary_origin": "not_attested",
             })
-            self.assertEqual(set(manifest["files"]), set(self.payloads))
-            for name, data in self.payloads.items():
+            self.assertEqual(set(manifest["files"]), set(self.members))
+            for name, data in self.members.items():
                 self.assertEqual(archive.read(name), data)
                 self.assertEqual(manifest["files"][name], {
                     "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
@@ -98,6 +119,9 @@ class WindowsPackageTest(unittest.TestCase):
         before = sorted(str(path.relative_to(self.base)) for path in self.base.rglob("*"))
         verified = self.run_tool("verify", self.output)
         self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertIn("baseline only", verified.stdout)
+        strict = self.run_tool("verify", "--source-root", self.source, self.output)
+        self.assertEqual(strict.returncode, 0, strict.stderr)
         self.assertEqual(before, sorted(str(path.relative_to(self.base)) for path in self.base.rglob("*")))
 
     def test_verify_rejects_tampering_and_unexpected_archive_contents(self):
@@ -113,6 +137,9 @@ class WindowsPackageTest(unittest.TestCase):
             "extra file": [*entries.items(), ("preferences.json", b"secret")],
             "traversal": [*entries.items(), ("../escape", b"secret")],
             "missing executable": [(name, data) for name, data in entries.items() if name != "meow.exe"],
+            "missing notice": [(name, data) for name, data in entries.items() if name != CORE_LICENSE],
+            "tampered notice": [(name, b"replaced" if name == WINTUN_LICENSE else data) for name, data in entries.items()],
+            "duplicate notice": [*entries.items(), (CORE_LICENSE, b"second")],
             "duplicate executable": [*entries.items(), ("meow.exe", b"second")],
             "bad manifest": [(name, b"not json" if name == "manifest.json" else data) for name, data in entries.items()],
             "duplicate manifest key": [(name, b'{"format":1,"format":2}' if name == "manifest.json" else data) for name, data in entries.items()],
@@ -121,6 +148,8 @@ class WindowsPackageTest(unittest.TestCase):
             ("extra manifest field", lambda value: value.update({"private_path": "secret"})),
             ("invalid commit", lambda value: value["provenance"].update({"core_commit": "123"})),
             ("boolean size", lambda value: value["files"]["meow.exe"].update({"size": True})),
+            ("false audit claim", lambda value: value.update({"notice_coverage": "complete"})),
+            ("missing notice hash", lambda value: value["files"].pop(CORE_LICENSE)),
         ):
             value = json.loads(entries["manifest.json"])
             modify(value)
@@ -156,6 +185,48 @@ class WindowsPackageTest(unittest.TestCase):
             for name, data in entries.items():
                 archive.writestr(name, data)
         self.assertNotEqual(self.run_tool("verify", compressed).returncode, 0)
+
+    def test_rehashed_upstream_notice_and_malformed_text_are_rejected(self):
+        result = self.create()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.output) as archive:
+            entries = {name: archive.read(name) for name in archive.namelist()}
+        for which, text, accepted_without_source in [
+            (WINTUN_LICENSE, entries[WINTUN_LICENSE] + b"tampered\r\n", False),
+            (PAW_LICENSE, b"plain text but not a license", False),
+            (PAW_LICENSE, entries[PAW_LICENSE] + b"\x00", False),
+            (PAW_LICENSE, entries[PAW_LICENSE] + b"\xff", False),
+            (CORE_LICENSE, entries[CORE_LICENSE].replace(b"Fixture Core", b"Forged Author"), True),
+        ]:
+            with self.subTest(which=which, text=text[-35:]):
+                forged = dict(entries)
+                manifest = json.loads(forged["manifest.json"])
+                manifest["files"][which] = {"size": len(text), "sha256": hashlib.sha256(text).hexdigest()}
+                forged["manifest.json"] = json.dumps(manifest).encode()
+                forged[which] = text
+                path = self.base / "rehashed.zip"
+                with zipfile.ZipFile(path, "w") as archive:
+                    for name, data in forged.items():
+                        archive.writestr(name, data)
+                ordinary = self.run_tool("verify", path)
+                self.assertEqual(ordinary.returncode == 0, accepted_without_source, ordinary.stderr)
+                strict = self.run_tool("verify", "--source-root", self.source, path)
+                self.assertNotEqual(strict.returncode, 0)
+
+    def test_create_refuses_a_missing_empty_or_replaced_committed_notice(self):
+        path = "licenses/windows/wintun-0.14.1-prebuilt.txt"
+        for text in (None, b"", b"replacement notice\r\n"):
+            with self.subTest(text=text):
+                if text is None:
+                    self.git(self.source, "rm", "-q", path)
+                else:
+                    (self.source / path).write_bytes(text)
+                    self.git(self.source, "add", path)
+                self.git(self.source, "commit", "-qm", "changed fixture notice")
+                result = self.create()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.output.exists())
+                self.git(self.source, "checkout", "-q", "--detach", self.paw_commit)
 
     def test_create_does_not_write_to_source_tool_or_home_directories(self):
         tool_dir = self.base / "tools"
