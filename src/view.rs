@@ -3806,14 +3806,18 @@ impl Paw {
                         .subscription_info
                         .as_ref()
                         .map(|usage| {
-                            format!(
-                                "↑ {}  ↓ {}  / {}",
-                                bytes(usage.upload),
-                                bytes(usage.download),
-                                bytes(usage.total)
-                            )
+                            let transfer =
+                                format!("↑ {}  ↓ {}", bytes(usage.upload), bytes(usage.download));
+                            if usage.total == 0 {
+                                transfer
+                            } else {
+                                format!("{transfer}  / {}", bytes(usage.total))
+                            }
                         })
                         .unwrap_or_else(|| self.locale.message(Message::ProviderNoUsage).into());
+                    let quota = status.subscription_info.as_ref().and_then(|usage| {
+                        provider_quota_fraction(usage.upload, usage.download, usage.total)
+                    });
                     let updated = status.updated_at.clone().unwrap_or_else(|| {
                         self.locale.message(Message::ProviderAwaitingUpdate).into()
                     });
@@ -3863,7 +3867,25 @@ impl Paw {
                                         .text_xs()
                                         .text_color(rgb(FAINT))
                                         .child(format!("{updated} · {usage}")),
-                                ),
+                                )
+                                .when_some(quota, |details, fraction| {
+                                    details.child(
+                                        div()
+                                            .mt_2()
+                                            .w_full()
+                                            .h(px(4.))
+                                            .overflow_hidden()
+                                            .rounded_full()
+                                            .bg(rgb(SOFT_BLUE))
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .w(relative(fraction))
+                                                    .rounded_full()
+                                                    .bg(rgb(BLUE)),
+                                            ),
+                                    )
+                                }),
                         )
                         .when(status.vehicle_type.eq_ignore_ascii_case("http"), |row| {
                             row.child(
@@ -6052,6 +6074,11 @@ fn traffic_bars(samples: &[Option<meow_paw::app::TrafficRate>], height: f32) -> 
 }
 
 #[cfg(any(target_os = "linux", windows))]
+fn provider_quota_fraction(upload: u64, download: u64, total: u64) -> Option<f32> {
+    (total > 0).then(|| upload.saturating_add(download).min(total) as f32 / total as f32)
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn bytes(value: u64) -> String {
     if value < 1024 {
         return format!("{value} B");
@@ -6075,6 +6102,19 @@ fn paw_badge(size: f32) -> Div {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn provider_quota_keeps_unknown_zero_and_overage_distinct() {
+        assert_eq!(super::provider_quota_fraction(5, 8, 0), None);
+        assert_eq!(super::provider_quota_fraction(0, 0, 20), Some(0.));
+        assert_eq!(super::provider_quota_fraction(1, 4, 20), Some(0.25));
+        assert_eq!(super::provider_quota_fraction(10, 15, 20), Some(1.));
+        assert_eq!(
+            super::provider_quota_fraction(u64::MAX, u64::MAX, 20),
+            Some(1.)
+        );
+    }
+
     #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn rule_set_text_hides_url_like_and_control_values() {
