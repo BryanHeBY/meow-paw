@@ -45,8 +45,13 @@ pub enum Message {
     OverviewProxyReviewError,
     OverviewStarting,
     OverviewNeedsAttention,
+    OverviewEngineError,
+    OverviewEngineErrorHint,
+    OverviewEngineErrorDetails,
     OverviewStopped,
     OverviewNoListener,
+    OverviewUnknownListener,
+    OverviewUnknownProfile,
     OverviewCopied,
     OverviewNoRunningProfile,
     OverviewUnconfirmedProfile,
@@ -483,8 +488,13 @@ fn english(key: Message) -> &'static str {
         Message::OverviewProxyReviewError => "Review error",
         Message::OverviewStarting => "Starting…",
         Message::OverviewNeedsAttention => "Needs attention",
+        Message::OverviewEngineError => "Meow reported an error",
+        Message::OverviewEngineErrorHint => "Check the details before retrying.",
+        Message::OverviewEngineErrorDetails => "Engine error details",
         Message::OverviewStopped => "Stopped",
         Message::OverviewNoListener => "No listener",
+        Message::OverviewUnknownListener => "Listener status unconfirmed",
+        Message::OverviewUnknownProfile => "Applied profile unconfirmed",
         Message::OverviewCopied => "Copied",
         Message::OverviewNoRunningProfile => "No running profile",
         Message::OverviewUnconfirmedProfile => "Running profile unconfirmed",
@@ -854,8 +864,13 @@ fn chinese(key: Message) -> &'static str {
         Message::OverviewProxyReviewError => "查看错误",
         Message::OverviewStarting => "正在启动…",
         Message::OverviewNeedsAttention => "需要处理",
+        Message::OverviewEngineError => "Meow 遇到错误",
+        Message::OverviewEngineErrorHint => "重试前可先查看错误详情。",
+        Message::OverviewEngineErrorDetails => "核心错误详情",
         Message::OverviewStopped => "已停止",
         Message::OverviewNoListener => "未监听",
+        Message::OverviewUnknownListener => "监听状态尚未确认",
+        Message::OverviewUnknownProfile => "已应用的配置尚未确认",
         Message::OverviewCopied => "已复制",
         Message::OverviewNoRunningProfile => "没有运行中的配置",
         Message::OverviewUnconfirmedProfile => "运行中的配置尚未确认",
@@ -1380,6 +1395,40 @@ mod tests {
             assert_eq!(Locale::select(Some("unsupported"), None).message(key), en);
         }
     }
+    #[test]
+    fn overview_engine_error_copy_is_localized() {
+        for (key, en, zh) in [
+            (
+                Message::OverviewUnknownListener,
+                "Listener status unconfirmed",
+                "监听状态尚未确认",
+            ),
+            (
+                Message::OverviewUnknownProfile,
+                "Applied profile unconfirmed",
+                "已应用的配置尚未确认",
+            ),
+            (
+                Message::OverviewEngineError,
+                "Meow reported an error",
+                "Meow 遇到错误",
+            ),
+            (
+                Message::OverviewEngineErrorHint,
+                "Check the details before retrying.",
+                "重试前可先查看错误详情。",
+            ),
+            (
+                Message::OverviewEngineErrorDetails,
+                "Engine error details",
+                "核心错误详情",
+            ),
+        ] {
+            assert_eq!(Locale::En.message(key), en);
+            assert_eq!(Locale::ZhCn.message(key), zh);
+        }
+    }
+
     #[test]
     fn overview_route_excess_is_localized() {
         assert_eq!(Locale::En.overview_route_excess(1), "1 more group");

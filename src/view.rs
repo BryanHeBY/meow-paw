@@ -570,6 +570,8 @@ pub struct Paw {
     #[cfg(any(target_os = "linux", windows))]
     proxy_providers_focus: FocusHandle,
     #[cfg(any(target_os = "linux", windows))]
+    home_engine_details_focus: FocusHandle,
+    #[cfg(any(target_os = "linux", windows))]
     proxy_probe_settings_open: bool,
     #[cfg(any(target_os = "linux", windows))]
     locate_route: Option<(String, String)>,
@@ -842,6 +844,8 @@ pub fn open(
             #[cfg(any(target_os = "linux", windows))]
             proxy_providers_focus: cx.focus_handle(),
             #[cfg(any(target_os = "linux", windows))]
+            home_engine_details_focus: cx.focus_handle(),
+            #[cfg(any(target_os = "linux", windows))]
             proxy_probe_settings_open: false,
             #[cfg(any(target_os = "linux", windows))]
             locate_route: None,
@@ -1072,12 +1076,20 @@ impl Paw {
         }
     }
 
+    fn engine_error(&self) -> Option<&str> {
+        #[cfg(any(target_os = "linux", windows))]
+        if let meow_paw::app::EngineStatus::Error(error) = &self.snapshot.engine {
+            return Some(error);
+        }
+        None
+    }
+
     fn issue(&self) -> Option<String> {
+        if let Some(error) = self.engine_error() {
+            return Some(error.to_owned());
+        }
         #[cfg(any(target_os = "linux", windows))]
         {
-            if let meow_paw::app::EngineStatus::Error(error) = &self.snapshot.engine {
-                return Some(error.clone());
-            }
             if self.snapshot.provider_error.is_some() {
                 return self.snapshot.provider_error.clone();
             }
@@ -1892,6 +1904,106 @@ impl Paw {
         {
             false
         }
+    }
+
+    fn page_issue_banner(&self, cx: &mut Context<Self>) -> Option<Div> {
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let _ = cx;
+        #[cfg(any(target_os = "linux", windows))]
+        if self.page == Page::Overview && self.engine_error().is_some() {
+            return Some(self.overview_engine_error(cx));
+        }
+        self.issue().map(|issue| {
+            div()
+                .p_3()
+                .mb_3()
+                .rounded_md()
+                .bg(rgb(0xffece9))
+                .text_color(rgb(0xa83a33))
+                .child(issue)
+        })
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    fn overview_engine_error(&self, cx: &mut Context<Self>) -> Div {
+        let locale = self.locale;
+        div()
+            .p_3()
+            .mb_3()
+            .rounded_md()
+            .bg(rgb(0xffece9))
+            .text_color(rgb(0xa83a33))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(locale.message(Message::OverviewEngineError)),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(locale.message(Message::OverviewEngineErrorHint)),
+                    ),
+            )
+            .child(
+                semantic_secondary_button(
+                    "home-engine-error-details",
+                    locale.message(Message::OverviewEngineErrorDetails),
+                )
+                .track_focus(&self.home_engine_details_focus)
+                .on_click(cx.listener(|this, event, window, cx| {
+                    if matches!(event, ClickEvent::Keyboard(_)) {
+                        cx.stop_propagation();
+                    }
+                    let Some(error) = this.engine_error().map(str::to_owned) else {
+                        return;
+                    };
+                    this.home_engine_details_focus.focus(window, cx);
+                    let locale = this.locale;
+                    window.open_dialog(cx, move |dialog, window, _| {
+                        let details = error.clone();
+                        dialog
+                            .title(locale.message(Message::OverviewEngineErrorDetails))
+                            .w(px(520.))
+                            .bg(rgb(SURFACE))
+                            .text_color(rgb(INK))
+                            .child(
+                                div()
+                                    .id("home-engine-error-text")
+                                    .key_context(HOME_ENGINE_ERROR_CONTEXT)
+                                    .max_h(window.viewport_size().height * 0.45)
+                                    .overflow_y_scroll()
+                                    .text_sm()
+                                    .child(error.clone()),
+                            )
+                            .footer(
+                                div().key_context(HOME_ENGINE_ERROR_CONTEXT).child(
+                                    semantic_secondary_button(
+                                        "home-engine-error-copy",
+                                        locale.message(Message::Copy),
+                                    )
+                                    .on_click(
+                                        move |event, _, cx| {
+                                            if matches!(event, ClickEvent::Keyboard(_)) {
+                                                cx.stop_propagation();
+                                            }
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                details.clone(),
+                                            ));
+                                        },
+                                    ),
+                                ),
+                            )
+                    });
+                })),
+            )
     }
 
     fn overview(&self, wide: bool, cx: &mut Context<Self>) -> Div {
@@ -5526,6 +5638,8 @@ impl Paw {
 
 #[cfg(any(target_os = "linux", windows))]
 const PROVIDER_PANEL_CONTEXT: &str = "PawProviderPanel";
+#[cfg(any(target_os = "linux", windows))]
+const HOME_ENGINE_ERROR_CONTEXT: &str = "PawHomeEngineError";
 
 #[cfg(any(target_os = "linux", windows))]
 struct ProviderPanelKeys;
@@ -5539,11 +5653,10 @@ fn install_provider_panel_keys(cx: &mut App) {
         // The dialog's default Enter confirms/dismisses before a focused
         // native Button can activate. Scope the unbinding to this panel;
         // Escape, the focus trap, and focus restoration remain toolkit-owned.
-        cx.bind_keys([KeyBinding::new(
-            "enter",
-            NoAction,
-            Some(PROVIDER_PANEL_CONTEXT),
-        )]);
+        cx.bind_keys([
+            KeyBinding::new("enter", NoAction, Some(PROVIDER_PANEL_CONTEXT)),
+            KeyBinding::new("enter", NoAction, Some(HOME_ENGINE_ERROR_CONTEXT)),
+        ]);
         cx.set_global(ProviderPanelKeys);
     }
 }
@@ -5980,17 +6093,7 @@ impl Render for Paw {
                                             px(12.)
                                         })
                                     })
-                                    .when_some(self.issue(), |pane, issue| {
-                                        pane.child(
-                                            div()
-                                                .p_3()
-                                                .mb_3()
-                                                .rounded_md()
-                                                .bg(rgb(0xffece9))
-                                                .text_color(rgb(0xa83a33))
-                                                .child(issue),
-                                        )
-                                    })
+                                    .children(self.page_issue_banner(cx))
                                     .when_some(self.preference_warning.as_ref(), |pane, warning| {
                                         pane.child(
                                             div()
@@ -6332,6 +6435,8 @@ fn overview_missing_profile_message(phase: &str, running: bool) -> Message {
         Message::OverviewAwaitingProfile
     } else if phase == "Stopping" {
         Message::Stopping
+    } else if phase == "Needs attention" {
+        Message::OverviewUnknownProfile
     } else if running {
         Message::OverviewUnconfirmedProfile
     } else {
@@ -6340,10 +6445,10 @@ fn overview_missing_profile_message(phase: &str, running: bool) -> Message {
 }
 
 fn overview_missing_listener_message(phase: &str) -> Message {
-    if phase == "Stopping" {
-        Message::Stopping
-    } else {
-        Message::OverviewNoListener
+    match phase {
+        "Stopping" => Message::Stopping,
+        "Needs attention" => Message::OverviewUnknownListener,
+        _ => Message::OverviewNoListener,
     }
 }
 
@@ -7483,7 +7588,7 @@ mod tests {
             ("Running", true, Message::OverviewUnconfirmedProfile),
             ("Stopped", false, Message::OverviewNoRunningProfile),
             ("Stopping", false, Message::Stopping),
-            ("Needs attention", false, Message::OverviewNoRunningProfile),
+            ("Needs attention", false, Message::OverviewUnknownProfile),
         ] {
             assert_eq!(overview_current_profile(running, false, None), None);
             assert_eq!(overview_missing_profile_message(phase, running), expected);
@@ -7491,6 +7596,10 @@ mod tests {
         assert_eq!(
             overview_missing_listener_message("Stopping"),
             Message::Stopping
+        );
+        assert_eq!(
+            overview_missing_listener_message("Needs attention"),
+            Message::OverviewUnknownListener
         );
         assert_eq!(
             overview_missing_listener_message("Stopped"),
@@ -8671,3 +8780,6 @@ mod routing_tests;
 
 #[cfg(all(test, feature = "visual-test", target_os = "linux"))]
 mod connection_action_tests;
+
+#[cfg(all(test, feature = "visual-test", target_os = "linux"))]
+mod home_engine_error_tests;
