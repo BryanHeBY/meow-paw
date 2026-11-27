@@ -195,6 +195,8 @@ fn sorting_from_proxy_header_does_not_collapse_group(cx: &mut TestAppContext) {
             window.find("group-compare:Daily Proxy").role(),
             Some(gpui_kit::Role::Button)
         );
+        window.click("group-compare:Daily Proxy", cx);
+        assert!(paw.read(cx).expanded_groups.contains("Daily Proxy"));
         window.click("proxy-order:Daily Proxy", cx);
         let state = paw.read(cx);
         assert!(state.proxy_order.contains_key("Daily Proxy"));

@@ -3103,6 +3103,11 @@ impl Paw {
             } else {
                 Default::default()
             };
+            let route_kinds = if ownership_available {
+                unambiguous_route_kinds(inventory)
+            } else {
+                Default::default()
+            };
             let mut probe_candidates = std::collections::HashMap::new();
             for node in &inventory.nodes {
                 probe_candidates
@@ -3298,7 +3303,14 @@ impl Paw {
                                     .flex_wrap()
                                     .items_center()
                                     .gap_1()
-                                    .child(compare_button)
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "compare-control:{name}"
+                                            )))
+                                            .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
+                                            .child(compare_button),
+                                    )
                                     .child(sort_button),
                             )
                         })
@@ -3495,7 +3507,26 @@ impl Paw {
                                                         div()
                                                             .min_w_0()
                                                             .text_sm()
-                                                            .child(member.to_owned()),
+                                                            .child(
+                                                                div()
+                                                                    .truncate()
+                                                                    .child(member.to_owned()),
+                                                            )
+                                                            .when_some(
+                                                                route_kinds
+                                                                    .get(member)
+                                                                    .copied()
+                                                                    .flatten(),
+                                                                |detail, kind| {
+                                                                    detail.child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .text_color(rgb(FAINT))
+                                                                            .truncate()
+                                                                            .child(kind.to_owned()),
+                                                                    )
+                                                                },
+                                                            ),
                                                     )
                                                     .when_some(
                                                         route_delay(&delays, member),
@@ -5285,6 +5316,36 @@ impl ProxyOrder {
 type RouteDelayMap<'a> = std::collections::HashMap<&'a str, Option<u32>>;
 
 #[cfg(any(target_os = "linux", windows))]
+fn unambiguous_route_kinds(
+    inventory: &meow_paw::engine::controller::Inventory,
+) -> HashMap<&str, Option<&str>> {
+    let mut kinds = HashMap::new();
+    for (name, proxy) in inventory
+        .groups
+        .iter()
+        .map(|(name, proxy)| (name.as_str(), proxy))
+        .chain(
+            inventory
+                .nodes
+                .iter()
+                .map(|node| (node.name.as_str(), &node.proxy)),
+        )
+    {
+        let kind = proxy.kind.trim();
+        let valid = !kind.is_empty()
+            && kind.len() <= 24
+            && kind
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_+".contains(&b));
+        kinds
+            .entry(name)
+            .and_modify(|kind| *kind = None)
+            .or_insert(valid.then_some(kind));
+    }
+    kinds
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn unambiguous_route_delays(
     inventory: &meow_paw::engine::controller::Inventory,
 ) -> RouteDelayMap<'_> {
@@ -6665,6 +6726,43 @@ mod tests {
             (1921., 5),
         ] {
             assert_eq!(super::route_columns(super::px(width)), columns);
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn route_kinds_require_a_unique_known_controller_entry() {
+        use meow_paw::engine::controller::{Inventory, Node, Origin, Proxy};
+        let proxy = |kind: &str| Proxy {
+            kind: kind.into(),
+            ..Proxy::default()
+        };
+        let node = |name: &str, kind: &str| Node {
+            name: name.into(),
+            origin: Origin::Local,
+            proxy: proxy(kind),
+        };
+        let inventory = Inventory {
+            groups: [
+                ("Group".into(), proxy("Selector")),
+                ("Collision".into(), proxy("Selector")),
+            ]
+            .into(),
+            nodes: vec![
+                node("Tokyo", "Socks5"),
+                node("Collision", "Socks5"),
+                node("Duplicate", "Direct"),
+                node("Duplicate", "Direct"),
+                node("Bad", "TCP\ninvalid"),
+                node("Empty", "   "),
+            ],
+            ..Inventory::default()
+        };
+        let kinds = super::unambiguous_route_kinds(&inventory);
+        assert_eq!(kinds["Tokyo"], Some("Socks5"));
+        assert_eq!(kinds["Group"], Some("Selector"));
+        for name in ["Collision", "Duplicate", "Bad", "Empty", "Missing"] {
+            assert_eq!(kinds.get(name).copied().flatten(), None, "{name}");
         }
     }
 
