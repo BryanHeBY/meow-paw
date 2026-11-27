@@ -3,7 +3,12 @@ use gpui_kit::{
 };
 use meow_paw::i18n::{Locale, Message, system_locale};
 use std::path::PathBuf;
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 mod brand;
 mod preferences;
@@ -105,6 +110,12 @@ fn main() {
     let app: Application = gpui_kit::application().with_assets(brand::PawAssets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
+        // Every last-window close is decided by our native pre-close hook.
+        // GPUI must not independently abandon the worker while it verifies
+        // or restores desktop proxy ownership.
+        cx.set_quit_mode(QuitMode::Explicit);
+        let tray = use_tray.then(|| tray::start(locale));
+        let initial_tray = tray.clone();
         let (_handle, paw) = gpui_kit::open_window(window_options(cx), cx, move |window, cx| {
             window.set_window_title(locale.message(Message::AppTitle));
             let paw = view::open(
@@ -116,6 +127,7 @@ fn main() {
                 window,
                 cx,
             );
+            install_close_guard(window, cx, &paw, initial_tray);
             #[cfg(feature = "visual-test")]
             if proxy_fixture {
                 view::seed_proxy_fixture(&paw, cx);
@@ -124,8 +136,8 @@ fn main() {
         })
         .expect("could not open Meow Paw");
         cx.activate(true);
-        if use_tray {
-            retain_when_tray_is_ready(_handle, paw, locale, cx);
+        if let Some(tray) = tray {
+            retain_when_tray_is_ready(_handle, paw, locale, tray, cx);
         }
         #[cfg(feature = "visual-test")]
         if let Some(path) = screenshot {
@@ -181,13 +193,57 @@ fn window_options(cx: &mut App) -> WindowOptions {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeClose {
+    HideToTray,
+    BeginCleanQuit,
+    KeepWindow,
+}
+
+fn native_close(tray_ready: bool, quit_pending: bool) -> NativeClose {
+    if quit_pending {
+        NativeClose::KeepWindow
+    } else if tray_ready {
+        NativeClose::HideToTray
+    } else {
+        NativeClose::BeginCleanQuit
+    }
+}
+
+fn install_close_guard(
+    window: &gpui_kit::Window,
+    app: &App,
+    paw: &gpui_kit::Entity<view::Paw>,
+    tray: Option<Arc<tray::Signals>>,
+) {
+    let weak = paw.downgrade();
+    window.on_window_should_close(app, move |_, app| {
+        let Some(paw) = weak.upgrade() else {
+            return false;
+        };
+        match native_close(
+            tray.as_ref().is_some_and(|tray| tray.ready()),
+            paw.read(app).quit_pending(),
+        ) {
+            NativeClose::HideToTray => true,
+            NativeClose::KeepWindow => false,
+            NativeClose::BeginCleanQuit => {
+                // Return the veto to the native window first. If restoration
+                // fails, the unchanged window can show the recovery controls.
+                app.defer(move |app| paw.update(app, |view, cx| view.request_quit(cx)));
+                false
+            }
+        }
+    });
+}
+
 fn retain_when_tray_is_ready(
     initial: AnyWindowHandle,
     paw: gpui_kit::Entity<view::Paw>,
     locale: Locale,
+    signals: Arc<tray::Signals>,
     cx: &mut App,
 ) {
-    let signals = tray::start(locale);
     let visible = Rc::new(Cell::new(Some(initial)));
     let closed = visible.clone();
     let observer = cx.on_window_closed(move |_, id| {
@@ -195,7 +251,7 @@ fn retain_when_tray_is_ready(
             closed.set(None);
         }
     });
-    let mut retained = false;
+    let mut retry_reopen = Instant::now();
     cx.spawn(async move |cx| {
         let _observer = observer;
         loop {
@@ -206,10 +262,11 @@ fn retain_when_tray_is_ready(
                 let quit = signals.take_quit();
                 let available = signals.ready();
                 let show = (signals.take_show() && available) || (quit && visible.get().is_none());
-                let restore = retained && !available && visible.get().is_none();
-                if available && !retained {
-                    cx.set_quit_mode(QuitMode::Explicit);
-                }
+                // The tray may disappear after the close callback checked
+                // it but before our next poll. Reopen our controls regardless
+                // of whether this timer had previously observed availability.
+                let restore =
+                    !available && visible.get().is_none() && Instant::now() >= retry_reopen;
                 if show || restore {
                     let activated = visible.get().is_some_and(|handle| {
                         handle
@@ -220,21 +277,19 @@ fn retain_when_tray_is_ready(
                         let result = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
                             window.set_window_title(locale.message(Message::AppTitle));
                             view::rebind_window(&paw, window, cx);
+                            install_close_guard(window, cx, &paw, Some(Arc::clone(&signals)));
                             paw.clone()
                         });
                         if let Ok((handle, _)) = result {
                             visible.set(Some(handle));
                             cx.activate(true);
                         } else if restore {
-                            // No tray and no window means no remaining control.
-                            cx.quit();
+                            // Retain the process/listener while there is no
+                            // control surface; retry instead of force quitting.
+                            retry_reopen = Instant::now() + Duration::from_secs(1);
                         }
                     }
                 }
-                if retained && !available {
-                    cx.set_quit_mode(QuitMode::Default);
-                }
-                retained = available;
                 if quit {
                     paw.update(cx, |view, cx| view.request_quit(cx));
                 }
@@ -248,6 +303,14 @@ fn retain_when_tray_is_ready(
 mod bundled_tests {
     use super::*;
     use preferences::LanguagePreference;
+
+    #[test]
+    fn native_close_veto_does_not_depend_on_a_stale_tray_poll() {
+        assert_eq!(native_close(false, false), NativeClose::BeginCleanQuit);
+        assert_eq!(native_close(true, false), NativeClose::HideToTray);
+        assert_eq!(native_close(false, true), NativeClose::KeepWindow);
+        assert_eq!(native_close(true, true), NativeClose::KeepWindow);
+    }
 
     #[test]
     fn launch_language_uses_cli_then_saved_then_system() {

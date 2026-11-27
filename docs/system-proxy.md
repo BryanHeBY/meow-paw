@@ -47,7 +47,7 @@ running desktop proxy. Use **Settings → Meow Engine → System proxy** in the 
 is never remembered as a launch preference. The control checks the currently
 owned Meow process, authenticated loopback controller, and actual mixed port
 before applying and rechecks after applying. Stop and explicit Quit attempt
-restoration before shutting down the listener; a restoration conflict keeps the
+restoration before shutting down the listener. Native window close without a\nready tray follows the same path; when the tray is available, close still only\nhides the window. A restoration conflict keeps the
 session running and is shown in Settings. If the owned core exits unexpectedly,
 Paw attempts the same guarded restoration. An old journal is only restored by
 the separate explicit recovery action.
@@ -56,3 +56,8 @@ A Linux smoke test drives the real desktop worker with a local Meow process and
 private fake GSettings commands (never the running user's desktop):
 
     MEOW_BIN=/absolute/path/to/meow cargo test --test system_proxy_worker -- --ignored
+
+For the native Close regression, build the desktop binary and run this Linux
+Xvfb smoke test with only the fixture desktop settings:
+
+    MEOW_BIN=/absolute/path/to/meow xvfb-run -a -s '-screen 0 1300x1024x24 -ac' python3 -B tools/system-proxy-close-smoke.py

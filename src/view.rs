@@ -891,6 +891,13 @@ pub fn open(
 }
 
 impl Paw {
+    pub fn quit_pending(&self) -> bool {
+        #[cfg(any(target_os = "linux", windows))]
+        return self.quit_after_stop;
+        #[cfg(not(any(target_os = "linux", windows)))]
+        false
+    }
+
     pub fn request_quit(&mut self, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "linux", windows))]
         if let Some(desktop) = &self.desktop {
