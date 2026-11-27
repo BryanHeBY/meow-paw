@@ -180,6 +180,33 @@ impl Preferences {
         &self.selected.profiles
     }
 
+    /// Hold the preferences guard while an unreferenced subscription is removed.
+    /// Re-read the saved selections so another cooperating Paw's changes win.
+    pub fn with_unreferenced_profile<T>(
+        &self,
+        path: &Path,
+        action: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        let Some(file) = self.file.as_ref() else {
+            return Err(io::Error::other("Preferences unavailable"));
+        };
+        let _guard = write_guard(file)?;
+        let current = Self::open(file.clone())?;
+        if current.selected.profile.as_deref() == Some(path)
+            || current
+                .selected
+                .profiles
+                .iter()
+                .any(|candidate| candidate == path)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Profile is referenced",
+            ));
+        }
+        action()
+    }
+
     /// Whether selections can be written to a persistent preferences file.
     pub fn has_persistent_file(&self) -> bool {
         self.file.is_some()
@@ -212,8 +239,20 @@ impl Preferences {
     }
 
     pub fn remember(&mut self, engine: bool, path: &Path) -> io::Result<()> {
+        self.remember_checked(engine, path, || Ok(()))
+    }
+
+    /// Validate a managed record while holding the preferences guard, before
+    /// publishing its path. Removal takes the same guards in the same order.
+    pub fn remember_checked(
+        &mut self,
+        engine: bool,
+        path: &Path,
+        validate: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
         let path = std::path::absolute(path)?;
         self.persist(|next| {
+            validate()?;
             if engine {
                 next.engine = Some(path);
             } else {
@@ -238,6 +277,20 @@ impl Preferences {
             if next.profile.as_deref() == Some(path) {
                 next.profile = None;
             }
+            Ok(())
+        })
+    }
+
+    /// Detach only a remembered profile that is not the saved selection.
+    pub fn detach_inactive_profile(&mut self, path: &Path) -> io::Result<()> {
+        self.persist(|next| {
+            if next.profile.as_deref() == Some(path) || !next.profiles.iter().any(|p| p == path) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "Profile is selected or no longer remembered",
+                ));
+            }
+            next.profiles.retain(|candidate| candidate != path);
             Ok(())
         })
     }
@@ -722,5 +775,146 @@ mod tests {
         assert_eq!(prefs.language(), LanguagePreference::System);
         assert_eq!(fs::read(file).unwrap(), b"{}\n");
         assert_eq!(fs::read(target).unwrap(), b"untouched");
+    }
+
+    #[test]
+    fn removal_rechecks_saved_references_and_holds_preference_guard() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let profile = root.path().join("subscriptions/record.json");
+        let stale = Preferences::open(file.clone()).unwrap();
+        let mut other = Preferences::open(file.clone()).unwrap();
+        let mut invoked = false;
+        stale
+            .with_unreferenced_profile(&profile, || {
+                invoked = true;
+                assert_eq!(
+                    other.remember(false, &profile).unwrap_err().kind(),
+                    io::ErrorKind::WouldBlock
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert!(invoked);
+        other.remember(false, &profile).unwrap();
+        assert_eq!(
+            stale
+                .with_unreferenced_profile(&profile, || -> io::Result<()> {
+                    panic!("referenced profile must be retained")
+                })
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+    }
+
+    #[test]
+    fn managed_detach_after_switch_and_selection_removal_are_serialized() {
+        use meow_paw::{subscription::Download, subscription_store::SubscriptionStore};
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        let mut other = Preferences::open(file.clone()).unwrap();
+        let mut store = SubscriptionStore::new(root.path().join("subscriptions"));
+        let id = store
+            .import(
+                "https://example.test/sub",
+                Download {
+                    yaml: "proxies: [{name: old, type: direct}]\n".into(),
+                    suggested_interval_minutes: None,
+                },
+                Default::default(),
+            )
+            .unwrap();
+        let path = store.record_path(id);
+        let snapshot = store.prepare_removal(id).unwrap();
+        prefs
+            .remember_checked(false, &path, || store.check_unchanged(id, &snapshot))
+            .unwrap();
+        assert_eq!(
+            other.detach_inactive_profile(&path).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        let next = root.path().join("next.yaml");
+        prefs.remember(false, &next).unwrap();
+        other.detach_inactive_profile(&path).unwrap();
+        let current = Preferences::open(file.clone()).unwrap();
+        assert_eq!(
+            current.resolve(None, None).1.as_deref(),
+            Some(next.as_path())
+        );
+        assert!(!current.profiles().contains(&path));
+        let snapshot = store.prepare_removal(id).unwrap();
+        current
+            .with_unreferenced_profile(&path, || {
+                assert_eq!(
+                    prefs
+                        .remember_checked(false, &path, || Ok(()))
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::WouldBlock
+                );
+                store.remove_if_unchanged(id, &snapshot)
+            })
+            .unwrap();
+        assert_eq!(
+            prefs
+                .remember_checked(false, &path, || store.check_unchanged(id, &snapshot))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            Preferences::open(file).unwrap().resolve(None, None).1,
+            Some(next)
+        );
+    }
+
+    #[test]
+    fn managed_selection_rechecks_identity_under_preferences_guard() {
+        use meow_paw::{subscription::Download, subscription_store::SubscriptionStore};
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("preferences.json");
+        let mut prefs = Preferences::open(file.clone()).unwrap();
+        let mut store = SubscriptionStore::new(root.path().join("subscriptions"));
+        let id = store
+            .import(
+                "https://example.test/sub",
+                Download {
+                    yaml: "proxies: [{name: old, type: direct}]\n".into(),
+                    suggested_interval_minutes: None,
+                },
+                Default::default(),
+            )
+            .unwrap();
+        let path = store.record_path(id);
+        let snapshot = store.prepare_removal(id).unwrap();
+        store.rename(id, "changed").unwrap();
+        assert_eq!(
+            prefs
+                .remember_checked(false, &path, || store.check_unchanged(id, &snapshot))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let current = Preferences::open(file.clone()).unwrap();
+        assert!(current.profiles().is_empty());
+        let fresh = store.prepare_removal(id).unwrap();
+        prefs
+            .remember_checked(false, &path, || {
+                assert_eq!(
+                    current
+                        .with_unreferenced_profile(&path, || Ok(()))
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::WouldBlock
+                );
+                store.check_unchanged(id, &fresh)
+            })
+            .unwrap();
+        assert_eq!(
+            Preferences::open(file).unwrap().resolve(None, None).1,
+            Some(path)
+        );
     }
 }

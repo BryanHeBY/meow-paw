@@ -183,6 +183,14 @@ pub enum Message {
     ImportSubscription,
     CancelSubscription,
     RenameSubscription,
+    RemoveSubscription,
+    DetachSubscription,
+    SubscriptionDetached,
+    ConfirmRemoveSubscription,
+    RemoveSubscriptionDetail,
+    SubscriptionRemoveBlocked,
+    SubscriptionRemoveFailed,
+    SubscriptionRemoved,
     SubscriptionName,
     SubscriptionNameTooLong,
     SaveSubscriptionName,
@@ -626,6 +634,22 @@ fn english(key: Message) -> &'static str {
         Message::ImportSubscription => "Import subscription",
         Message::CancelSubscription => "Cancel",
         Message::RenameSubscription => "Rename",
+        Message::RemoveSubscription => "Remove subscription",
+        Message::DetachSubscription => "Forget profile reference",
+        Message::SubscriptionDetached => {
+            "The profile reference was forgotten. You can now remove the subscription."
+        }
+        Message::ConfirmRemoveSubscription => "Remove local subscription",
+        Message::RemoveSubscriptionDetail => {
+            "Remove this saved subscription and its downloaded copy from Paw? Nothing will be sent to the provider. This cannot be undone."
+        }
+        Message::SubscriptionRemoveBlocked => {
+            "Stop the engine, select another profile, and forget this profile reference before removing the subscription."
+        }
+        Message::SubscriptionRemoveFailed => {
+            "Could not remove the saved subscription. It has been retained where possible."
+        }
+        Message::SubscriptionRemoved => "The saved subscription was removed from Paw.",
         Message::SubscriptionName => "Local name, up to 80 characters (blank uses the ID)",
         Message::SubscriptionNameTooLong => "Enter a name of 80 characters or fewer.",
         Message::SaveSubscriptionName => "Save",
@@ -940,6 +964,18 @@ fn chinese(key: Message) -> &'static str {
         Message::ImportSubscription => "导入订阅",
         Message::CancelSubscription => "取消",
         Message::RenameSubscription => "重命名",
+        Message::RemoveSubscription => "移除订阅",
+        Message::DetachSubscription => "忘记配置引用",
+        Message::SubscriptionDetached => "已忘记配置引用。现在可以移除订阅。",
+        Message::ConfirmRemoveSubscription => "移除本地订阅",
+        Message::RemoveSubscriptionDetail => {
+            "要从 Paw 移除此已保存的订阅及其下载副本吗？不会向提供者发送任何信息。此操作无法撤销。"
+        }
+        Message::SubscriptionRemoveBlocked => {
+            "移除订阅前，请停止引擎、选择其他配置并忘记此配置引用。"
+        }
+        Message::SubscriptionRemoveFailed => "无法移除已保存的订阅，Paw 会尽可能保留它。",
+        Message::SubscriptionRemoved => "已从 Paw 移除保存的订阅。",
         Message::SubscriptionName => "本地名称，最多 80 个字符（留空则使用 ID）",
         Message::SubscriptionNameTooLong => "名称不能超过 80 个字符。",
         Message::SaveSubscriptionName => "保存",
@@ -1524,6 +1560,24 @@ mod tests {
         ] {
             assert_eq!(Locale::En.message(message), en);
             assert_eq!(Locale::ZhCn.message(message), zh);
+        }
+    }
+
+    #[test]
+    fn subscription_removal_controls_are_localized() {
+        for message in [
+            Message::RemoveSubscription,
+            Message::DetachSubscription,
+            Message::SubscriptionDetached,
+            Message::ConfirmRemoveSubscription,
+            Message::RemoveSubscriptionDetail,
+            Message::SubscriptionRemoveBlocked,
+            Message::SubscriptionRemoveFailed,
+            Message::SubscriptionRemoved,
+        ] {
+            assert!(!Locale::En.message(message).is_empty());
+            assert!(!Locale::ZhCn.message(message).is_empty());
+            assert_ne!(Locale::En.message(message), Locale::ZhCn.message(message));
         }
     }
 

@@ -11,7 +11,8 @@ use gpui_kit::*;
 use meow_paw::i18n::{Locale, Message};
 use meow_paw::subscription;
 use meow_paw::subscription_store::{
-    DisplayInterval, RefreshPolicy, SubscriptionId, SubscriptionMetadata, SubscriptionStore,
+    DisplayInterval, RefreshPolicy, RemovalSnapshot, SubscriptionId, SubscriptionMetadata,
+    SubscriptionStore,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -204,6 +205,19 @@ fn subscription_form_status(
     if busy { Some(pending) } else { notice }
 }
 
+fn removal_has_profile_reference(
+    path: &std::path::Path,
+    selected: Option<&std::path::Path>,
+    remembered: &[PathBuf],
+    running: Option<&std::path::Path>,
+    applying: Option<&std::path::Path>,
+) -> bool {
+    selected == Some(path)
+        || remembered.iter().any(|candidate| candidate == path)
+        || running == Some(path)
+        || applying == Some(path)
+}
+
 #[cfg(test)]
 #[path = "view/profile_form_tests.rs"]
 mod profile_form_tests;
@@ -222,10 +236,13 @@ const METADATA_BATCH_SIZE: usize = 8;
 // A manual result, including a failed metadata read, wins over an older batch.
 fn merge_subscription_metadata(
     current: &mut HashMap<PathBuf, Option<SubscriptionMetadata>>,
+    known_paths: &[PathBuf],
     batch: Vec<(PathBuf, Option<SubscriptionMetadata>)>,
 ) {
     for (path, metadata) in batch {
-        current.entry(path).or_insert(metadata);
+        if known_paths.contains(&path) {
+            current.entry(path).or_insert(metadata);
+        }
     }
 }
 
@@ -473,6 +490,10 @@ pub struct Paw {
     subscription_busy: bool,
     subscription_busy_message: Message,
     subscription_rename: Option<PathBuf>,
+    subscription_removal: Option<(PathBuf, RemovalSnapshot)>,
+    subscription_removal_focus: FocusHandle,
+    #[cfg(any(target_os = "linux", windows))]
+    subscription_removal_start_pending: bool,
     subscription_name: Entity<InputState>,
     subscription_notice: Option<Message>,
     subscription_entry_open: bool,
@@ -826,6 +847,10 @@ pub fn open(
             subscription_busy: false,
             subscription_busy_message: Message::DownloadingSubscription,
             subscription_rename: None,
+            subscription_removal: None,
+            subscription_removal_focus: cx.focus_handle(),
+            #[cfg(any(target_os = "linux", windows))]
+            subscription_removal_start_pending: false,
             subscription_name,
             subscription_notice,
             subscription_entry_open: false,
@@ -964,6 +989,9 @@ impl Paw {
             } else {
                 desktop.start(profile)
             };
+            if result.is_ok() {
+                self.subscription_removal_start_pending = true;
+            }
             self.error = result.err().map(|e| e.to_string());
         }
         #[cfg(not(any(target_os = "linux", windows)))]
@@ -983,6 +1011,9 @@ impl Paw {
         #[cfg(any(target_os = "linux", windows))]
         if let Some(desktop) = &self.desktop {
             let snap = desktop.snapshot();
+            if !matches!(snap.engine, meow_paw::app::EngineStatus::Stopped) {
+                self.subscription_removal_start_pending = false;
+            }
             if self.snapshot.revision != snap.revision {
                 if !matches!(&snap.engine, meow_paw::app::EngineStatus::Running { .. }) {
                     self.rule_sets_read_failed = false;
@@ -2523,7 +2554,11 @@ impl Paw {
                     matching += usize::from(matches);
                     profile_card_visible(
                         matches,
-                        self.subscription_rename.as_ref() == Some(profile),
+                        self.subscription_rename.as_ref() == Some(profile)
+                            || self
+                                .subscription_removal
+                                .as_ref()
+                                .is_some_and(|(path, _)| path == profile),
                     )
                     .then_some((profile, name))
                 })
@@ -2559,6 +2594,8 @@ impl Paw {
                 let apply_path = profile.clone();
                 let use_path = profile.clone();
                 let forget_path = profile.clone();
+                let detach_path = profile.clone();
+                let remove_path = profile.clone();
                 let subscription = self.subscription_for(profile).map(|(_, id)| id);
                 let unreadable = subscription.is_some()
                     && self
@@ -2710,6 +2747,64 @@ impl Paw {
                                 ),
                         )
                     })
+                    .when(
+                        self.subscription_removal
+                            .as_ref()
+                            .is_some_and(|(path, _)| path == profile),
+                        |card| {
+                            card.child(
+                                div()
+                                    .id(action_id("removal-confirmation"))
+                                    .on_key_down(cx.listener(|paw, event: &KeyDownEvent, _, cx| {
+                                        if event.keystroke.key == "escape"
+                                            && !event.keystroke.modifiers.modified()
+                                        {
+                                            paw.subscription_removal = None;
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(self.locale.message(Message::RemoveSubscriptionDetail))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .child(
+                                                subscription_button(
+                                                    action_id("removal-confirm"),
+                                                    self.locale.message(
+                                                        Message::ConfirmRemoveSubscription,
+                                                    ),
+                                                    false,
+                                                    cx,
+                                                )
+                                                .on_click(cx.listener(|paw, _, _, cx| {
+                                                    paw.confirm_subscription_removal(cx)
+                                                })),
+                                            )
+                                            .child(
+                                                subscription_button(
+                                                    action_id("removal-cancel"),
+                                                    self.locale
+                                                        .message(Message::CancelSubscription),
+                                                    false,
+                                                    cx,
+                                                )
+                                                .track_focus(&self.subscription_removal_focus)
+                                                .on_click(cx.listener(|paw, _, _, cx| {
+                                                    paw.subscription_removal = None;
+                                                    paw.subscription_notice = None;
+                                                    cx.notify();
+                                                })),
+                                            ),
+                                    ),
+                            )
+                        },
+                    )
                     .child(
                         div()
                             .flex()
@@ -2894,6 +2989,65 @@ impl Paw {
                                         ),
                                     )
                                 },
+                            )
+                            .when(
+                                subscription.is_some()
+                                    && self.preferences.profiles().contains(profile)
+                                    && !self.subscription_detach_blocked(profile)
+                                    && !self.subscription_busy
+                                    && self.subscription_removal.is_none(),
+                                |el| {
+                                    el.child(
+                                        profile_action_button(
+                                            action_id("profile-detach-subscription"),
+                                            self.locale.message(Message::DetachSubscription),
+                                            &name,
+                                        )
+                                        .on_click(cx.listener(move |paw, event, _, cx| {
+                                            if matches!(event, ClickEvent::Keyboard(_)) {
+                                                cx.stop_propagation();
+                                            }
+                                            if paw.subscription_detach_blocked(&detach_path) {
+                                                paw.subscription_notice = Some(Message::SubscriptionRemoveBlocked);
+                                            } else {
+                                                paw.subscription_notice = Some(match paw.preferences.detach_inactive_profile(&detach_path) {
+                                                    Ok(()) => Message::SubscriptionDetached,
+                                                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Message::SubscriptionRemoveBlocked,
+                                                    Err(error) => subscription_write_feedback(error, Message::SubscriptionRemoveFailed),
+                                                });
+                                            }
+                                            cx.notify();
+                                        })),
+                                    )
+                                },
+                            )
+                            .when(
+                                subscription.is_some()
+                                    && !self.subscription_busy
+                                    && self.subscription_rename.is_none()
+                                    && !self.subscription_entry_open
+                                    && self.subscription_removal.is_none(),
+                                |el| {
+                                    el.child(
+                                        profile_action_button(
+                                            action_id("profile-remove-subscription"),
+                                            self.locale.message(Message::RemoveSubscription),
+                                            &name,
+                                        )
+                                        .on_click(
+                                            cx.listener(move |paw, event, window, cx| {
+                                                if matches!(event, ClickEvent::Keyboard(_)) {
+                                                    cx.stop_propagation();
+                                                }
+                                                paw.prepare_subscription_removal(
+                                                    remove_path.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }),
+                                        ),
+                                    )
+                                },
                             ),
                     )
             });
@@ -2981,7 +3135,7 @@ impl Paw {
             for chunk in paths.chunks(METADATA_BATCH_SIZE) {
                 let chunk = chunk.to_vec();
                 let dir = dir.clone();
-                let batch = cx
+                let batch: Vec<_> = cx
                     .background_executor()
                     .spawn(async move {
                         let store = SubscriptionStore::new(dir);
@@ -2998,7 +3152,11 @@ impl Paw {
                     .await;
                 if weak
                     .update(cx, |paw, cx| {
-                        merge_subscription_metadata(&mut paw.subscription_metadata, batch);
+                        merge_subscription_metadata(
+                            &mut paw.subscription_metadata,
+                            &paw.subscription_paths,
+                            batch,
+                        );
                         cx.notify();
                     })
                     .is_err()
@@ -3008,6 +3166,118 @@ impl Paw {
             }
         })
         .detach();
+    }
+
+    fn subscription_removal_blocked(&self, path: &std::path::Path) -> bool {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(desktop) = &self.desktop {
+            let snapshot = desktop.snapshot();
+            if self.subscription_removal_start_pending
+                || !matches!(snapshot.engine, meow_paw::app::EngineStatus::Stopped)
+                || removal_has_profile_reference(
+                    path,
+                    self.profile.as_deref(),
+                    self.preferences.profiles(),
+                    snapshot.profile.as_deref(),
+                    snapshot.applying_profile.as_deref(),
+                )
+            {
+                return true;
+            }
+        }
+        removal_has_profile_reference(
+            path,
+            self.profile.as_deref(),
+            self.preferences.profiles(),
+            None,
+            None,
+        )
+    }
+
+    fn subscription_detach_blocked(&self, path: &std::path::Path) -> bool {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(desktop) = &self.desktop {
+            let snapshot = desktop.snapshot();
+            if self.subscription_removal_start_pending
+                || !matches!(snapshot.engine, meow_paw::app::EngineStatus::Stopped)
+                || removal_has_profile_reference(
+                    path,
+                    self.profile.as_deref(),
+                    &[],
+                    snapshot.profile.as_deref(),
+                    snapshot.applying_profile.as_deref(),
+                )
+            {
+                return true;
+            }
+        }
+        removal_has_profile_reference(path, self.profile.as_deref(), &[], None, None)
+    }
+
+    fn prepare_subscription_removal(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.subscription_busy
+            || self.subscription_removal.is_some()
+            || self.subscription_rename.is_some()
+            || self.subscription_entry_open
+        {
+            return;
+        }
+        self.subscription_notice = None;
+        if self.subscription_removal_blocked(&path) {
+            self.subscription_notice = Some(Message::SubscriptionRemoveBlocked);
+        } else if let Some((mut store, id)) = self.subscription_for(&path) {
+            match store.prepare_removal(id) {
+                Ok(snapshot) => {
+                    self.subscription_removal = Some((path, snapshot));
+                    self.subscription_removal_focus.focus(window, cx);
+                }
+                Err(error) => {
+                    self.subscription_notice = Some(subscription_write_feedback(
+                        error,
+                        Message::SubscriptionRemoveFailed,
+                    ))
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn confirm_subscription_removal(&mut self, cx: &mut Context<Self>) {
+        let Some((path, snapshot)) = self.subscription_removal.take() else {
+            return;
+        };
+        if self.subscription_busy {
+            self.subscription_notice = Some(Message::SubscriptionWriteConflict);
+        } else if self.subscription_removal_blocked(&path) {
+            self.subscription_notice = Some(Message::SubscriptionRemoveBlocked);
+        } else if let Some((mut store, id)) = self.subscription_for(&path) {
+            match self
+                .preferences
+                .with_unreferenced_profile(&path, || store.remove_if_unchanged(id, &snapshot))
+            {
+                Ok(()) => {
+                    self.subscription_paths.retain(|p| p != &path);
+                    self.subscription_metadata.remove(&path);
+                    self.subscription_notice = Some(Message::SubscriptionRemoved);
+                }
+                Err(error) => {
+                    self.subscription_notice =
+                        Some(if error.kind() == std::io::ErrorKind::AlreadyExists {
+                            Message::SubscriptionRemoveBlocked
+                        } else {
+                            subscription_write_feedback(error, Message::SubscriptionRemoveFailed)
+                        });
+                }
+            }
+        } else {
+            self.subscription_notice = Some(Message::SubscriptionRemoveFailed);
+        }
+        cx.notify();
     }
 
     fn cancel_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3298,7 +3568,22 @@ impl Paw {
             return;
         }
         let path = std::path::absolute(&path).unwrap_or(path);
-        self.remember_selection(false, &path);
+        if let Some((mut store, id)) = self.subscription_for(&path) {
+            let result = store.prepare_removal(id).and_then(|snapshot| {
+                self.preferences
+                    .remember_checked(false, &path, || store.check_unchanged(id, &snapshot))
+            });
+            if result.is_err() {
+                self.error = Some(
+                    self.locale
+                        .message(Message::SubscriptionWriteConflict)
+                        .into(),
+                );
+                return;
+            }
+        } else {
+            self.remember_selection(false, &path);
+        }
         #[cfg(any(target_os = "linux", windows))]
         if self.profile.as_ref() != Some(&path) {
             self.log_review.reset_pause();
@@ -6812,6 +7097,49 @@ mod tests {
     }
 
     #[test]
+    fn removal_preserves_selected_remembered_running_and_applying_profiles() {
+        use super::removal_has_profile_reference;
+        use std::path::{Path, PathBuf};
+        let path = Path::new("subscription.json");
+        let other = Path::new("other.json");
+        assert!(!removal_has_profile_reference(
+            path,
+            Some(other),
+            &[PathBuf::from(other)],
+            Some(other),
+            Some(other)
+        ));
+        assert!(removal_has_profile_reference(
+            path,
+            Some(path),
+            &[],
+            None,
+            None
+        ));
+        assert!(removal_has_profile_reference(
+            path,
+            None,
+            &[path.to_path_buf()],
+            None,
+            None
+        ));
+        assert!(removal_has_profile_reference(
+            path,
+            None,
+            &[],
+            Some(path),
+            None
+        ));
+        assert!(removal_has_profile_reference(
+            path,
+            None,
+            &[],
+            None,
+            Some(path)
+        ));
+    }
+
+    #[test]
     fn older_metadata_batches_cannot_replace_manual_results() {
         use super::{DisplayInterval, SubscriptionMetadata, merge_subscription_metadata};
         use std::{collections::HashMap, path::PathBuf};
@@ -6819,6 +7147,7 @@ mod tests {
         let refreshed = PathBuf::from("refreshed.json");
         let failed = PathBuf::from("failed.json");
         let untouched = PathBuf::from("untouched.json");
+        let removed = PathBuf::from("removed.json");
         let old = Some(SubscriptionMetadata {
             name: None,
             interval: Some(DisplayInterval::Provider(60)),
@@ -6830,15 +7159,18 @@ mod tests {
         let mut current = HashMap::from([(refreshed.clone(), new.clone()), (failed.clone(), None)]);
         merge_subscription_metadata(
             &mut current,
+            &[refreshed.clone(), failed.clone(), untouched.clone()],
             vec![
                 (refreshed.clone(), old.clone()),
                 (failed.clone(), old.clone()),
                 (untouched.clone(), old.clone()),
+                (removed.clone(), old.clone()),
             ],
         );
         assert_eq!(current[&refreshed], new);
         assert_eq!(current[&failed], None);
         assert_eq!(current[&untouched], old);
+        assert!(!current.contains_key(&removed));
     }
 
     #[test]

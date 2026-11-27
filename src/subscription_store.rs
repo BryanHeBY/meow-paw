@@ -5,10 +5,12 @@ use crate::{
     subscription::{Download, parse_url},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fmt, fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tempfile::NamedTempFile;
 
@@ -66,11 +68,15 @@ pub struct SubscriptionMetadata {
     pub interval: Option<DisplayInterval>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavedSubscription {
     // No Debug implementation: the URL and YAML can both contain credentials.
     url: String,
+    #[serde(skip)]
+    identity: Option<Arc<fs::File>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    incarnation: Option<[u8; 16]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     yaml: String,
@@ -112,6 +118,12 @@ impl SavedSubscription {
     }
 }
 
+/// Opaque identity captured before a removal confirmation.
+pub struct RemovalSnapshot {
+    identity: Arc<fs::File>,
+    digest: [u8; 32],
+}
+
 pub struct SubscriptionStore {
     dir: PathBuf,
 }
@@ -137,6 +149,8 @@ impl SubscriptionStore {
         let id = SubscriptionId(bytes);
         let record = SavedSubscription {
             url: url.into(),
+            identity: None,
+            incarnation: None,
             name: None,
             yaml: download.yaml,
             policy,
@@ -154,9 +168,8 @@ impl SubscriptionStore {
 
     pub fn read(&self, id: SubscriptionId) -> io::Result<SavedSubscription> {
         let mut bytes = Vec::new();
-        fs::File::open(self.record_path(id))?
-            .take(MAX_RECORD_BYTES + 1)
-            .read_to_end(&mut bytes)?;
+        let file = fs::File::open(self.record_path(id))?;
+        (&file).take(MAX_RECORD_BYTES + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_RECORD_BYTES {
             return Err(invalid("Subscription record exceeds the size limit"));
         }
@@ -171,6 +184,7 @@ impl SubscriptionStore {
             return Err(invalid("Invalid subscription record"));
         }
         record.name = record.name.as_deref().and_then(sanitize_name);
+        record.identity = Some(Arc::new(file));
         Ok(record)
     }
 
@@ -227,7 +241,8 @@ impl SubscriptionStore {
             && (record.url != expected.url
                 || record.yaml != expected.yaml
                 || record.policy != expected.policy
-                || record.provider_interval_minutes != expected.provider_interval_minutes)
+                || record.provider_interval_minutes != expected.provider_interval_minutes
+                || record.incarnation != expected.incarnation)
         {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -257,6 +272,85 @@ impl SubscriptionStore {
         record.name = sanitize_name(name);
         self.write(id, &record, commit)?;
         Ok(record.metadata())
+    }
+
+    /// Capture the record before confirmation without changing it.
+    pub fn prepare_removal(&mut self, id: SubscriptionId) -> io::Result<RemovalSnapshot> {
+        let _guard = self.write_guard()?;
+        self.require_regular_record(id)?;
+        let record = self.read(id)?;
+        Ok(RemovalSnapshot {
+            identity: record
+                .identity
+                .ok_or_else(|| io::Error::other("Missing record identity"))?,
+            digest: self.record_digest(id)?,
+        })
+    }
+
+    /// Remove only the record confirmed by the user. Cooperating writers use
+    /// the same guard and publish by replacing the record file.
+    pub fn remove_if_unchanged(
+        &mut self,
+        id: SubscriptionId,
+        expected: &RemovalSnapshot,
+    ) -> io::Result<()> {
+        self.remove_checked_with(id, expected, |path| fs::remove_file(path))
+    }
+
+    fn remove_checked_with(
+        &mut self,
+        id: SubscriptionId,
+        expected: &RemovalSnapshot,
+        remove: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let _guard = self.write_guard()?;
+        self.check_snapshot(id, expected)?;
+        remove(&self.record_path(id))
+    }
+
+    /// Verify the exact record observed before selection under the store guard.
+    pub fn check_unchanged(
+        &self,
+        id: SubscriptionId,
+        expected: &RemovalSnapshot,
+    ) -> io::Result<()> {
+        let _guard = self.write_guard()?;
+        self.check_snapshot(id, expected)
+    }
+
+    fn check_snapshot(&self, id: SubscriptionId, expected: &RemovalSnapshot) -> io::Result<()> {
+        self.require_regular_record(id)?;
+        let record = self.read(id)?;
+        if !same_identity(record.identity.as_deref(), Some(expected.identity.as_ref()))?
+            || self.record_digest(id)? != expected.digest
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Subscription changed during confirmation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn record_digest(&self, id: SubscriptionId) -> io::Result<[u8; 32]> {
+        let mut bytes = Vec::new();
+        fs::File::open(self.record_path(id))?
+            .take(MAX_RECORD_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_RECORD_BYTES {
+            return Err(invalid("Subscription record exceeds the size limit"));
+        }
+        Ok(Sha256::digest(&bytes).into())
+    }
+
+    fn require_regular_record(&self, id: SubscriptionId) -> io::Result<()> {
+        if !fs::symlink_metadata(self.record_path(id))?
+            .file_type()
+            .is_file()
+        {
+            return Err(invalid("Subscription record is not a regular file"));
+        }
+        Ok(())
     }
 
     pub fn ids(&self) -> io::Result<Vec<SubscriptionId>> {
@@ -356,7 +450,7 @@ impl SubscriptionStore {
     ) -> io::Result<()> {
         fs::create_dir_all(&self.dir)?;
         let mut staged = NamedTempFile::new_in(&self.dir)?;
-        serde_json::to_writer(&mut staged, record)
+        serde_json::to_writer(&mut staged, &record)
             .map_err(|_| io::Error::other("Cannot write the subscription record"))?;
         staged.flush()?;
         if staged.as_file().metadata()?.len() > MAX_RECORD_BYTES {
@@ -367,6 +461,49 @@ impl SubscriptionStore {
         // write after replacing the last-good record.
         commit(staged, &self.record_path(id))
     }
+}
+
+// Keep the observed file open so its identity cannot be recycled while a
+// confirmation or refresh is pending. Cooperating writes replace the file.
+#[cfg(unix)]
+fn same_identity(a: Option<&fs::File>, b: Option<&fs::File>) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let (Some(a), Some(b)) = (a, b) else {
+        return Ok(false);
+    };
+    let (a, b) = (a.metadata()?, b.metadata()?);
+    Ok(a.dev() == b.dev() && a.ino() == b.ino())
+}
+
+#[cfg(windows)]
+fn same_identity(a: Option<&fs::File>, b: Option<&fs::File>) -> io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    fn identity(file: &fs::File) -> io::Result<(u32, u32, u32)> {
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
+    }
+    let (Some(a), Some(b)) = (a, b) else {
+        return Ok(false);
+    };
+    Ok(identity(a)? == identity(b)?)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_identity(_: Option<&fs::File>, _: Option<&fs::File>) -> io::Result<bool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "File identity unavailable",
+    ))
 }
 
 // Keep display text single-line and bounded, including when reading edited records.
@@ -407,6 +544,290 @@ mod tests {
             yaml: yaml.to_owned(),
             suggested_interval_minutes: Some(minutes),
         }
+    }
+
+    #[test]
+    fn previous_reader_accepts_new_writes_and_round_trips() {
+        // Exact SavedSubscription serialization schema at checked-out 503e1a7.
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PreviousRecord {
+            url: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+            yaml: String,
+            policy: RefreshPolicy,
+            provider_interval_minutes: Option<u32>,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SubscriptionStore::new(dir.path().into());
+        let id = store
+            .import(
+                "https://example.test/sub",
+                download(OLD, 60),
+                Default::default(),
+            )
+            .unwrap();
+        let path = store.record_path(id);
+        let old: PreviousRecord = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(store.read(id).unwrap().yaml(), OLD);
+        store.rename(id, "New name").unwrap();
+        let mut old_again: PreviousRecord =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(old_again.name.as_deref(), Some("New name"));
+        old_again.name = Some("Old writer".into());
+        fs::write(&path, serde_json::to_vec(&old_again).unwrap()).unwrap();
+        assert_eq!(
+            store.metadata(id).unwrap().name.as_deref(),
+            Some("Old writer")
+        );
+    }
+
+    #[test]
+    fn incarnation_records_round_trip_through_view_rename_refresh_and_removal() {
+        // Compatibility schema for records that carry the optional field.
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct IncarnationRecord {
+            url: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            incarnation: Option<[u8; 16]>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+            yaml: String,
+            policy: RefreshPolicy,
+            provider_interval_minutes: Option<u32>,
+        }
+
+        for incarnation in [
+            None,
+            Some([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 255]),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = SubscriptionStore::new(dir.path().into());
+            let id = store
+                .import(
+                    "https://example.test/sub",
+                    download(OLD, 60),
+                    Default::default(),
+                )
+                .unwrap();
+            let path = store.record_path(id);
+            let fixture = IncarnationRecord {
+                url: "https://example.test/sub".into(),
+                incarnation,
+                name: Some("Original".into()),
+                yaml: OLD.into(),
+                policy: Default::default(),
+                provider_interval_minutes: Some(60),
+            };
+            let bytes = serde_json::to_vec(&fixture).unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&bytes).contains("\"incarnation\""),
+                incarnation.is_some()
+            );
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                store.metadata(id).unwrap().name.as_deref(),
+                Some("Original")
+            );
+            assert_eq!(store.read(id).unwrap().yaml(), OLD);
+
+            let prior = store.read(id).unwrap();
+            store.rename(id, "Renamed").unwrap();
+            store
+                .refresh_if_unchanged(id, &prior, download(NEW, 120))
+                .unwrap();
+            let old_reader: IncarnationRecord =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(old_reader.incarnation, incarnation);
+            assert_eq!(old_reader.name.as_deref(), Some("Renamed"));
+            assert_eq!(old_reader.yaml, NEW);
+            assert_eq!(old_reader.provider_interval_minutes, Some(120));
+
+            let snapshot = store.prepare_removal(id).unwrap();
+            store.remove_if_unchanged(id, &snapshot).unwrap();
+            assert!(store.ids().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn removal_requires_confirmation_snapshot_and_leaves_other_files_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let external = dir.path().join("external.yaml");
+        fs::write(&external, OLD).unwrap();
+        let mut store = SubscriptionStore::new(dir.path().join("subscriptions"));
+        let id = store
+            .import(
+                "https://example.test/sub",
+                download(OLD, 60),
+                Default::default(),
+            )
+            .unwrap();
+        let original = fs::read(store.record_path(id)).unwrap();
+        let snapshot = store.prepare_removal(id).unwrap();
+        // Dropping confirmation is cancellation: the record remains readable.
+        drop(snapshot);
+        assert_eq!(fs::read(store.record_path(id)).unwrap(), original);
+        assert_eq!(store.read(id).unwrap().yaml(), OLD);
+        let snapshot = store.prepare_removal(id).unwrap();
+        store.remove_if_unchanged(id, &snapshot).unwrap();
+        assert!(store.ids().unwrap().is_empty());
+        assert_eq!(fs::read_to_string(external).unwrap(), OLD);
+    }
+
+    #[test]
+    fn removal_rejects_aba_and_in_flight_refresh_cannot_resurrect() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SubscriptionStore::new(dir.path().into());
+        let id = store
+            .import(
+                "https://example.test/sub",
+                download(OLD, 60),
+                Default::default(),
+            )
+            .unwrap();
+        let before_refresh = store.read(id).unwrap();
+        let confirmation = store.prepare_removal(id).unwrap();
+        store.rename(id, "temporary").unwrap();
+        store.rename(id, "").unwrap();
+        assert_eq!(
+            store
+                .remove_if_unchanged(id, &confirmation)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(store.read(id).unwrap().yaml(), OLD);
+        let confirmation = store.prepare_removal(id).unwrap();
+        store.refresh(id, download(NEW, 120)).unwrap();
+        store.refresh(id, download(OLD, 60)).unwrap();
+        assert_eq!(
+            store
+                .remove_if_unchanged(id, &confirmation)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let confirmation = store.prepare_removal(id).unwrap();
+        store.remove_if_unchanged(id, &confirmation).unwrap();
+        assert_eq!(
+            store
+                .refresh_if_unchanged(id, &before_refresh, download(NEW, 120))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(store.ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn removal_rejects_replacement_contention_and_legacy_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SubscriptionStore::new(dir.path().into());
+        let id = store
+            .import(
+                "https://example.test/sub",
+                download(OLD, 60),
+                Default::default(),
+            )
+            .unwrap();
+        let legacy = store.read(id).unwrap();
+        fs::write(store.record_path(id), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let original = fs::read(store.record_path(id)).unwrap();
+        let confirmation = store.prepare_removal(id).unwrap();
+        assert_eq!(fs::read(store.record_path(id)).unwrap(), original);
+        // A legacy record may be removed directly after a fresh confirmation.
+        drop(confirmation);
+        let confirmed_legacy = store.prepare_removal(id).unwrap();
+        store.remove_if_unchanged(id, &confirmed_legacy).unwrap();
+        fs::write(store.record_path(id), &original).unwrap();
+        let confirmation = store.prepare_removal(id).unwrap();
+        let legacy = store.read(id).unwrap();
+        store
+            .refresh_if_unchanged(id, &legacy, download(NEW, 120))
+            .unwrap();
+        assert_eq!(
+            store
+                .remove_if_unchanged(id, &confirmation)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let confirmation = store.prepare_removal(id).unwrap();
+        let guard = store.write_guard().unwrap();
+        assert_eq!(
+            store
+                .remove_if_unchanged(id, &confirmation)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(guard);
+        let replacement = store.read(id).unwrap();
+        store
+            .write(id, &replacement, |staged, path| {
+                staged.persist(path).map(|_| ()).map_err(|e| e.error)
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .remove_if_unchanged(id, &confirmation)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(store.read(id).unwrap().yaml(), NEW);
+    }
+
+    #[test]
+    fn removal_failure_keeps_the_record_and_can_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SubscriptionStore::new(dir.path().into());
+        let id = store
+            .import(
+                "https://example.test/sub",
+                download(OLD, 60),
+                Default::default(),
+            )
+            .unwrap();
+        let confirmation = store.prepare_removal(id).unwrap();
+        let before = fs::read(store.record_path(id)).unwrap();
+        assert!(
+            store
+                .remove_checked_with(id, &confirmation, |_| Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "synthetic failure"
+                )))
+                .is_err()
+        );
+        assert_eq!(fs::read(store.record_path(id)).unwrap(), before);
+        store.remove_if_unchanged(id, &confirmation).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removal_rejects_symlink_and_preserves_target() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("store");
+        let mut store = SubscriptionStore::new(dir);
+        let id = store
+            .import(
+                "https://example.test/sub",
+                download(OLD, 60),
+                Default::default(),
+            )
+            .unwrap();
+        let snapshot = store.prepare_removal(id).unwrap();
+        let target = root.path().join("external.yaml");
+        fs::write(&target, OLD).unwrap();
+        fs::remove_file(store.record_path(id)).unwrap();
+        symlink(&target, store.record_path(id)).unwrap();
+        assert!(store.remove_if_unchanged(id, &snapshot).is_err());
+        assert!(store.prepare_removal(id).is_err());
+        assert_eq!(fs::read_to_string(target).unwrap(), OLD);
     }
 
     #[test]
