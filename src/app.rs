@@ -415,6 +415,8 @@ pub struct Snapshot {
     pub inventory: Option<Arc<Inventory>>,
     pub inventory_stale: bool,
     pub mode: Option<RoutingMode>,
+    /// Changes whenever the confirmed routing mode changes.
+    pub selector_revision: u64,
     pub rules: Option<Arc<Vec<Rule>>>,
     pub rule_providers: Option<Arc<BTreeMap<String, RuleProviderStatus>>>,
     pub rule_provider_error: Option<String>,
@@ -435,6 +437,13 @@ pub struct Snapshot {
     pub group_probe: Option<GroupComparison>,
     group_run_id: u64,
     pub unlock: unlock::State,
+}
+
+impl Snapshot {
+    /// True from apply submission until its reservation is released.
+    pub fn apply_pending(&self) -> bool {
+        self.apply_reservation.is_some() || self.applying_profile.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -698,6 +707,9 @@ enum Command {
     Start(ProfileInput),
     ApplyProfile(ProfileInput, ApplyReservation),
     Select {
+        epoch: u64,
+        selector_revision: u64,
+        mode: RoutingMode,
         group: String,
         member: String,
     },
@@ -808,8 +820,21 @@ impl Desktop {
         self.submit_apply(ProfileInput::Subscription { store, id })
     }
 
-    pub fn select(&self, group: String, member: String) -> io::Result<()> {
-        self.send(Command::Select { group, member })
+    pub fn select(
+        &self,
+        epoch: u64,
+        selector_revision: u64,
+        mode: RoutingMode,
+        group: String,
+        member: String,
+    ) -> io::Result<()> {
+        self.send(Command::Select {
+            epoch,
+            selector_revision,
+            mode,
+            group,
+            member,
+        })
     }
 
     pub fn set_mode(&self, mode: RoutingMode) -> io::Result<()> {
@@ -1209,7 +1234,7 @@ fn run(
                         logs = Some(LogWorker::start(active.controller.clone(), history.clone()));
                         change(snapshot, |s| {
                             s.logs = Some(history);
-                            s.mode = mode;
+                            set_confirmed_mode(s, mode);
                             s.engine = EngineStatus::Running {
                                 mixed_port: active.mixed_port,
                             }
@@ -1267,35 +1292,37 @@ fn run(
                 });
                 next_sample = Instant::now();
             }
-            Ok(Command::Select { group, member }) => {
+            Ok(Command::Select {
+                epoch,
+                selector_revision,
+                mode,
+                group,
+                member,
+            }) => {
                 if let Some(active) = &session {
-                    if snapshot.lock().expect("snapshot poisoned").inventory_stale {
-                        change(snapshot, |s| {
-                            s.action_error = Some("Route inventory is stale".into())
-                        });
-                        continue;
-                    }
-                    let result = active.controller.select(&group, &member);
-                    change(snapshot, |s| {
-                        s.action_error = result.err().map(|e| e.to_string())
-                    });
+                    dispatch_route_selection(
+                        snapshot,
+                        generation,
+                        epoch,
+                        selector_revision,
+                        mode,
+                        cancelled,
+                        || active.controller.select(&group, &member),
+                    );
                     next_sample = Instant::now();
                 }
             }
             Ok(Command::SetMode(mode)) => {
                 change(snapshot, |s| s.group_probe = None);
                 if let Some(active) = &session {
-                    let result = active.controller.set_mode(mode);
-                    let actual = if result.is_ok() && !cancelled() {
-                        active.controller.mode().ok().or(Some(mode))
-                    } else {
-                        None
-                    };
-                    change(snapshot, |s| {
-                        if actual.is_some() {
-                            s.mode = actual;
-                        }
-                        s.action_error = result.err().map(|e| e.to_string());
+                    dispatch_mode_change(snapshot, || {
+                        let result = active.controller.set_mode(mode);
+                        let actual = if result.is_ok() && !cancelled() {
+                            active.controller.mode().ok().or(Some(mode))
+                        } else {
+                            None
+                        };
+                        (actual, result.err().map(|e| e.to_string()))
                     });
                     next_sample = Instant::now();
                 }
@@ -1639,7 +1666,7 @@ fn finish_apply(
     match result {
         Ok(()) => {
             snapshot.profile = Some(path);
-            snapshot.mode = mode;
+            set_confirmed_mode(snapshot, mode);
             snapshot.inventory = None;
             snapshot.inventory_stale = false;
             snapshot.rules = None;
@@ -1647,7 +1674,7 @@ fn finish_apply(
         Err(error) => {
             if !error.rejected() {
                 snapshot.profile = None;
-                snapshot.mode = None;
+                set_confirmed_mode(snapshot, None);
                 snapshot.rules = None;
             }
             snapshot.action_error = Some(error.message());
@@ -1686,6 +1713,86 @@ fn retain_inventory(snapshot: &mut Snapshot, fresh: Option<Arc<Inventory>>) {
     if fresh.is_some() {
         snapshot.inventory = fresh;
     }
+}
+
+fn set_confirmed_mode(snapshot: &mut Snapshot, mode: Option<RoutingMode>) {
+    if snapshot.mode != mode {
+        snapshot.selector_revision = snapshot
+            .selector_revision
+            .checked_add(1)
+            .expect("selector revision exhausted");
+        snapshot.mode = mode;
+    }
+}
+
+fn dispatch_mode_change(
+    snapshot: &Mutex<Snapshot>,
+    set: impl FnOnce() -> (Option<RoutingMode>, Option<String>),
+) {
+    let (actual, error) = set();
+    change(snapshot, |s| {
+        if actual.is_some() {
+            set_confirmed_mode(s, actual);
+        }
+        s.action_error = error;
+    });
+}
+
+// Admission is serialized with stop, quit and apply reservations. The owner
+// worker retains the same session until the admitted controller call finishes;
+// later reservations are handled before another queued command runs.
+fn dispatch_route_selection(
+    snapshot: &Mutex<Snapshot>,
+    generation: u64,
+    epoch: u64,
+    selector_revision: u64,
+    mode: RoutingMode,
+    cancelled: impl Fn() -> bool,
+    select: impl FnOnce() -> Result<(), ControllerError>,
+) {
+    let admitted = {
+        let s = snapshot.lock().expect("snapshot poisoned");
+        route_selection_current(&s, generation, epoch, selector_revision, mode, cancelled())
+    };
+    let error = if admitted {
+        select().err().map(|e| e.to_string())
+    } else {
+        Some("Route selection is no longer available".into())
+    };
+    let mut s = snapshot.lock().expect("snapshot poisoned");
+    // Do not publish an old call's result into a stopping or reserved session,
+    // or report a rejected command against a different session.
+    let same_session = !cancelled()
+        && generation == epoch
+        && s.probe_epoch == epoch
+        && matches!(s.engine, EngineStatus::Running { .. })
+        && !s.apply_pending();
+    if same_session
+        && (!admitted
+            || route_selection_current(&s, generation, epoch, selector_revision, mode, false))
+    {
+        s.action_error = error;
+        s.revision = s.revision.wrapping_add(1);
+    }
+}
+
+fn route_selection_current(
+    snapshot: &Snapshot,
+    generation: u64,
+    epoch: u64,
+    selector_revision: u64,
+    mode: RoutingMode,
+    cancelled: bool,
+) -> bool {
+    !cancelled
+        && epoch == generation
+        && snapshot.probe_epoch == epoch
+        && snapshot.selector_revision == selector_revision
+        && matches!(snapshot.engine, EngineStatus::Running { .. })
+        && !snapshot.apply_pending()
+        && !snapshot.inventory_stale
+        && matches!(mode, RoutingMode::Rule | RoutingMode::Global)
+        && snapshot.mode == Some(mode)
 }
 
 fn clear_connection_history(snapshot: &mut Snapshot) {
@@ -1827,7 +1934,7 @@ fn clear_telemetry(snapshot: &Mutex<Snapshot>, generation: u64, engine: EngineSt
         s.inventory_stale = false;
         s.refreshing_provider = None;
         s.provider_error = None;
-        s.mode = None;
+        set_confirmed_mode(s, None);
         s.rules = None;
         clear_rule_provider_state(s);
         s.logs = None;
@@ -1863,6 +1970,104 @@ fn load_profile(path: &std::path::Path) -> io::Result<Profile> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn route_selection_rejects_changed_session_or_mode() {
+        let mut snapshot = Snapshot {
+            engine: EngineStatus::Running { mixed_port: 1234 },
+            probe_epoch: 7,
+            mode: Some(RoutingMode::Global),
+            ..Default::default()
+        };
+        assert!(route_selection_current(
+            &snapshot,
+            7,
+            7,
+            0,
+            RoutingMode::Global,
+            false
+        ));
+        assert!(!route_selection_current(
+            &snapshot,
+            8,
+            7,
+            0,
+            RoutingMode::Global,
+            false
+        ));
+        snapshot.probe_epoch = 8;
+        assert!(!route_selection_current(
+            &snapshot,
+            7,
+            7,
+            0,
+            RoutingMode::Global,
+            false
+        ));
+        snapshot.probe_epoch = 7;
+        snapshot.mode = Some(RoutingMode::Direct);
+        assert!(!route_selection_current(
+            &snapshot,
+            7,
+            7,
+            0,
+            RoutingMode::Global,
+            false
+        ));
+        assert!(!route_selection_current(
+            &snapshot,
+            7,
+            7,
+            0,
+            RoutingMode::Direct,
+            false
+        ));
+        snapshot.mode = None;
+        assert!(!route_selection_current(
+            &snapshot,
+            7,
+            7,
+            0,
+            RoutingMode::Global,
+            false
+        ));
+        snapshot.mode = Some(RoutingMode::Rule);
+        assert!(route_selection_current(
+            &snapshot,
+            7,
+            7,
+            0,
+            RoutingMode::Rule,
+            false
+        ));
+        snapshot.inventory_stale = true;
+        assert!(!route_selection_current(
+            &snapshot,
+            7,
+            7,
+            0,
+            RoutingMode::Rule,
+            false
+        ));
+        snapshot.inventory_stale = false;
+        assert!(!route_selection_current(
+            &snapshot,
+            7,
+            7,
+            0,
+            RoutingMode::Rule,
+            true
+        ));
+        snapshot.engine = EngineStatus::Stopped;
+        assert!(!route_selection_current(
+            &snapshot,
+            7,
+            7,
+            0,
+            RoutingMode::Rule,
+            false
+        ));
+    }
+
     fn apply_test_desktop(capacity: usize) -> (Desktop, Receiver<Command>) {
         let (command, receiver) = mpsc::sync_channel(capacity);
         let desktop = Desktop {
@@ -1879,6 +2084,240 @@ mod tests {
             worker: None,
         };
         (desktop, receiver)
+    }
+
+    #[derive(Default)]
+    struct FakeRouteController {
+        selections: Vec<(String, String)>,
+        modes: Vec<RoutingMode>,
+    }
+
+    // Feed the real command queue through the same dispatch functions as the
+    // owner loop, with an in-memory controller and no sockets or core process.
+    fn dispatch_fake_route_command(
+        desktop: &Desktop,
+        receiver: &Receiver<Command>,
+        generation: u64,
+        controller: &mut FakeRouteController,
+    ) {
+        match receiver.try_recv().expect("queued route command") {
+            Command::SetMode(mode) => dispatch_mode_change(&desktop.snapshot, || {
+                controller.modes.push(mode);
+                (Some(mode), None)
+            }),
+            Command::Select {
+                epoch,
+                selector_revision,
+                mode,
+                group,
+                member,
+            } => {
+                dispatch_route_selection(
+                    &desktop.snapshot,
+                    generation,
+                    epoch,
+                    selector_revision,
+                    mode,
+                    || false,
+                    || {
+                        controller.selections.push((group, member));
+                        Ok(())
+                    },
+                );
+            }
+            _ => panic!("expected route command"),
+        }
+    }
+
+    #[test]
+    fn queued_selection_cannot_survive_mode_aba_and_valid_modes_dispatch() {
+        let (desktop, receiver) = apply_test_desktop(8);
+        desktop.snapshot.lock().unwrap().mode = Some(RoutingMode::Rule);
+        let old = desktop.snapshot();
+        let mut controller = FakeRouteController::default();
+        desktop.set_mode(RoutingMode::Direct).unwrap();
+        desktop.set_mode(RoutingMode::Rule).unwrap();
+        desktop
+            .select(
+                old.probe_epoch,
+                old.selector_revision,
+                RoutingMode::Rule,
+                "G".into(),
+                "old".into(),
+            )
+            .unwrap();
+        for _ in 0..3 {
+            dispatch_fake_route_command(&desktop, &receiver, 7, &mut controller);
+        }
+        assert_eq!(controller.modes, [RoutingMode::Direct, RoutingMode::Rule]);
+        assert!(controller.selections.is_empty());
+        let current = desktop.snapshot();
+        assert_eq!(current.selector_revision, old.selector_revision + 2);
+        assert!(current.action_error.is_some());
+        desktop
+            .select(
+                7,
+                current.selector_revision,
+                RoutingMode::Rule,
+                "G".into(),
+                "rule".into(),
+            )
+            .unwrap();
+        dispatch_fake_route_command(&desktop, &receiver, 7, &mut controller);
+        desktop.set_mode(RoutingMode::Global).unwrap();
+        dispatch_fake_route_command(&desktop, &receiver, 7, &mut controller);
+        let current = desktop.snapshot();
+        desktop
+            .select(
+                7,
+                current.selector_revision,
+                RoutingMode::Global,
+                "GLOBAL".into(),
+                "global".into(),
+            )
+            .unwrap();
+        dispatch_fake_route_command(&desktop, &receiver, 7, &mut controller);
+        assert_eq!(
+            controller.selections,
+            [
+                ("G".into(), "rule".into()),
+                ("GLOBAL".into(), "global".into())
+            ]
+        );
+        desktop.set_mode(RoutingMode::Direct).unwrap();
+        dispatch_fake_route_command(&desktop, &receiver, 7, &mut controller);
+        let direct = desktop.snapshot();
+        desktop
+            .select(
+                7,
+                direct.selector_revision,
+                RoutingMode::Direct,
+                "G".into(),
+                "direct".into(),
+            )
+            .unwrap();
+        dispatch_fake_route_command(&desktop, &receiver, 7, &mut controller);
+        assert_eq!(controller.selections.len(), 2);
+    }
+
+    #[test]
+    fn queued_selection_observes_reserved_apply_and_epoch() {
+        let (desktop, receiver) = apply_test_desktop(8);
+        desktop.snapshot.lock().unwrap().mode = Some(RoutingMode::Rule);
+        let old = desktop.snapshot();
+        let mut controller = FakeRouteController::default();
+        desktop
+            .select(
+                7,
+                old.selector_revision,
+                RoutingMode::Rule,
+                "G".into(),
+                "pending".into(),
+            )
+            .unwrap();
+        desktop.apply_profile("b.yaml".into()).unwrap();
+        let pending = desktop.snapshot();
+        assert!(pending.apply_pending());
+        assert!(pending.applying_profile.is_none());
+        dispatch_fake_route_command(&desktop, &receiver, 7, &mut controller);
+        assert!(controller.selections.is_empty());
+        let (_, reservation) = queued_apply(&receiver);
+        release_apply(&mut desktop.snapshot.lock().unwrap(), reservation);
+        assert!(!desktop.snapshot().apply_pending());
+        desktop
+            .select(
+                7,
+                old.selector_revision,
+                RoutingMode::Rule,
+                "G".into(),
+                "old epoch".into(),
+            )
+            .unwrap();
+        desktop.snapshot.lock().unwrap().probe_epoch = 8;
+        dispatch_fake_route_command(&desktop, &receiver, 8, &mut controller);
+        assert!(controller.selections.is_empty());
+    }
+
+    #[test]
+    fn delayed_selection_does_not_block_snapshot_stop_or_apply_admission() {
+        // The controller stays blocked until after the other thread reports
+        // admission. A timeout still releases it so a regression cannot hang.
+        for action in ["apply", "stop", "new session"] {
+            let (desktop, receiver) = apply_test_desktop(8);
+            let desktop = Arc::new(desktop);
+            {
+                let mut s = desktop.snapshot.lock().unwrap();
+                s.mode = Some(RoutingMode::Rule);
+                s.action_error = Some("current state".into());
+            }
+            desktop
+                .select(7, 0, RoutingMode::Rule, "G".into(), "node".into())
+                .unwrap();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let worker_desktop = Arc::clone(&desktop);
+            let worker = thread::spawn(move || {
+                let Command::Select {
+                    epoch,
+                    selector_revision,
+                    mode,
+                    ..
+                } = receiver.recv().unwrap()
+                else {
+                    panic!("expected queued selection");
+                };
+                dispatch_route_selection(
+                    &worker_desktop.snapshot,
+                    7,
+                    epoch,
+                    selector_revision,
+                    mode,
+                    || {
+                        worker_desktop.stop.load(Ordering::Acquire)
+                            || worker_desktop.quit.load(Ordering::Acquire)
+                    },
+                    || {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Err(ControllerError::Unreachable)
+                    },
+                );
+                receiver
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let (done_tx, done_rx) = mpsc::channel();
+            let action_desktop = Arc::clone(&desktop);
+            let admission = thread::spawn(move || {
+                assert_eq!(action_desktop.snapshot().probe_epoch, 7);
+                match action {
+                    "apply" => action_desktop.apply_profile("b.yaml".into()).unwrap(),
+                    "stop" => action_desktop.stop(),
+                    "new session" => {
+                        change(&action_desktop.snapshot, |s| s.probe_epoch = 8);
+                    }
+                    _ => unreachable!(),
+                }
+                done_tx.send(()).unwrap();
+            });
+            let completed_while_delayed = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+            release_tx.send(()).unwrap();
+            admission.join().unwrap();
+            let receiver = worker.join().unwrap();
+            assert!(
+                completed_while_delayed,
+                "{action} blocked on controller I/O"
+            );
+            let snapshot = desktop.snapshot();
+            assert_eq!(snapshot.action_error.as_deref(), Some("current state"));
+            if action == "apply" {
+                assert!(snapshot.apply_pending());
+                let _ = queued_apply(&receiver);
+            } else if action == "stop" {
+                assert!(desktop.stop.load(Ordering::Acquire));
+            } else {
+                assert_eq!(snapshot.probe_epoch, 8);
+            }
+        }
     }
 
     fn queued_apply(receiver: &Receiver<Command>) -> (ProfileInput, ApplyReservation) {

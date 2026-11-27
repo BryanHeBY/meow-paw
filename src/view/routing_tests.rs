@@ -738,6 +738,131 @@ fn locating_the_selected_route_expands_its_group_and_scrolls(cx: &mut TestAppCon
     });
 }
 
+#[gpui_kit::test]
+fn proxy_groups_follow_mode_transitions_without_losing_selections(cx: &mut TestAppContext) {
+    use meow_paw::engine::controller::{Inventory, Proxy};
+    cx.update(gpui_kit::init);
+    for locale in [Locale::En, Locale::ZhCn] {
+        let holder = Rc::new(RefCell::new(None));
+        let result = holder.clone();
+        let (_, ui) = cx.add_window_view(move |window, cx| {
+            let paw = open(
+                None,
+                None,
+                (Page::Proxies, locale),
+                false,
+                (Preferences::discover(false).0, None),
+                window,
+                cx,
+            );
+            let group = |selected: &str, members: &[&str]| Proxy {
+                kind: "Selector".into(),
+                now: Some(selected.into()),
+                all: Some(members.iter().map(|member| (*member).into()).collect()),
+                ..Proxy::default()
+            };
+            paw.update(cx, |paw, _| {
+                paw.snapshot.engine = EngineStatus::Running { mixed_port: 1234 };
+                paw.snapshot.mode = Some(RoutingMode::Global);
+                paw.snapshot.inventory = Some(Arc::new(Inventory {
+                    groups: [
+                        ("GLOBAL".into(), group("Work", &["Work", "DIRECT"])),
+                        ("Work".into(), group("Node B", &["Node A", "Node B"])),
+                    ]
+                    .into(),
+                    ..Inventory::default()
+                }));
+                paw.expanded_groups.insert("Work".into());
+            });
+            *result.borrow_mut() = Some(paw.clone());
+            gpui_kit::base::Root::new(paw, window, cx)
+        });
+        let paw = holder.borrow_mut().take().unwrap();
+        ui.update(|window, cx| {
+            window.activate_window();
+            window.render_frame(cx);
+            assert!(window.try_find("proxy:GLOBAL:0").is_some());
+            assert!(window.try_find("proxy:Work:1").is_some());
+        });
+        for mode in [
+            RoutingMode::Direct,
+            RoutingMode::Rule,
+            RoutingMode::Direct,
+            RoutingMode::Global,
+        ] {
+            paw.update(ui, |paw, cx| {
+                paw.snapshot.mode = Some(mode);
+                cx.notify();
+            });
+            ui.update(|window, cx| {
+                window.render_frame(cx);
+                assert_eq!(
+                    window.try_find("proxy-direct-explanation").is_some(),
+                    mode == RoutingMode::Direct
+                );
+                assert_eq!(
+                    window.try_find("proxy:GLOBAL:0").is_some(),
+                    mode == RoutingMode::Global
+                );
+                assert_eq!(
+                    window.try_find("proxy:Work:1").is_some(),
+                    mode != RoutingMode::Direct
+                );
+                if mode != RoutingMode::Direct {
+                    assert_eq!(window.find("proxy:Work:1").checked(), Some(true));
+                    assert_eq!(window.find("proxy:Work:0").checked(), Some(false));
+                }
+                if mode == RoutingMode::Global {
+                    assert_eq!(window.find("proxy:GLOBAL:0").checked(), Some(true));
+                }
+                assert!(window.try_find("proxy-providers-toggle").is_some());
+                assert!(window.try_find(("routing-mode", 0usize)).is_some());
+                assert!(window.try_find(("routing-mode", 1usize)).is_some());
+                let inventory = paw.read(cx).snapshot.inventory.as_ref().unwrap();
+                assert_eq!(inventory.groups["GLOBAL"].now.as_deref(), Some("Work"));
+                assert_eq!(inventory.groups["Work"].now.as_deref(), Some("Node B"));
+            });
+        }
+        for (mode, stale, engine) in [
+            (
+                Some(RoutingMode::Direct),
+                true,
+                EngineStatus::Running { mixed_port: 1234 },
+            ),
+            (Some(RoutingMode::Direct), false, EngineStatus::Stopped),
+            (None, false, EngineStatus::Running { mixed_port: 1234 }),
+        ] {
+            paw.update(ui, |paw, cx| {
+                paw.snapshot.mode = mode;
+                paw.snapshot.inventory_stale = stale;
+                paw.snapshot.engine = engine;
+                cx.notify();
+            });
+            ui.update(|window, cx| {
+                window.render_frame(cx);
+                assert!(window.try_find("proxy-direct-explanation").is_none());
+                if mode.is_none() {
+                    assert_eq!(window.find("proxy:Work:0").disabled(), Some(true));
+                }
+            });
+        }
+        paw.update(ui, |paw, cx| {
+            paw.snapshot.engine = EngineStatus::Running { mixed_port: 1234 };
+            paw.snapshot.mode = Some(RoutingMode::Direct);
+            paw.snapshot.inventory_stale = false;
+            paw.snapshot.applying_profile = Some("pending.yaml".into());
+            cx.notify();
+        });
+        ui.update(|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("proxy-direct-explanation").is_none());
+            assert!(window.try_find("proxy-apply-pending").is_some());
+            assert!(window.try_find("proxy:GLOBAL:0").is_none());
+            assert!(window.try_find("proxy:Work:0").is_none());
+        });
+    }
+}
+
 fn quote(path: &Path) -> String {
     format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"))
 }

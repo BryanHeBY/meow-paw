@@ -3665,6 +3665,8 @@ impl Paw {
             let probe_busy = self.snapshot.probe_busy
                 || self.snapshot.group_probe.as_ref().is_some_and(|g| g.active);
             let epoch = self.snapshot.probe_epoch;
+            let selection_mode = self.snapshot.mode;
+            let selector_revision = self.snapshot.selector_revision;
             let groups = mode_groups(inventory, self.snapshot.mode)
                 .into_iter()
                 .filter_map(|(name, group)| {
@@ -3947,6 +3949,9 @@ impl Paw {
                             .child(div().flex_1().min_w_0().child(Input::new(&state.input).cleanable(true))))
                     });
                     let mutable = !self.snapshot.inventory_stale
+                        && !self.snapshot.apply_pending()
+                        && matches!(self.snapshot.engine, meow_paw::app::EngineStatus::Running { .. })
+                        && matches!(self.snapshot.mode, Some(meow_paw::engine::controller::RoutingMode::Rule | meow_paw::engine::controller::RoutingMode::Global))
                         && group.kind.eq_ignore_ascii_case("selector");
                     Some(
                         div()
@@ -4113,8 +4118,12 @@ impl Paw {
                                                                     this.error = this
                                                                         .desktop
                                                                         .as_ref()
-                                                                        .and_then(|d| {
+                                                                        .zip(selection_mode)
+                                                                        .and_then(|(d, mode)| {
                                                                             d.select(
+                                                                                epoch,
+                                                                                selector_revision,
+                                                                                mode,
                                                                                 g.clone(),
                                                                                 n.clone(),
                                                                             )
@@ -4441,7 +4450,21 @@ impl Paw {
                     ))
                 })
                 .when(self.proxy_probe_settings_open, |page| page.child(probe_settings()));
-            return if groups.is_empty() {
+            return if self.snapshot.apply_pending() {
+                page.child(proxy_apply_pending(self.locale))
+            } else if proxy_direct_active(&self.snapshot) {
+                page.child(direct_proxy_explanation(self.locale))
+            } else if groups.is_empty()
+                && self.snapshot.mode == Some(meow_paw::engine::controller::RoutingMode::Direct)
+            {
+                page.child(empty_state(
+                    self.locale.message(Message::OverviewRouteUnavailable),
+                    match self.locale {
+                        Locale::En => "Waiting for current route information.",
+                        Locale::ZhCn => "正在等待当前路线信息。",
+                    },
+                ))
+            } else if groups.is_empty() {
                 page.child(empty_state(
                     self.locale.message(Message::NoMatchingGroups),
                     self.locale.message(Message::TryAnotherRoute),
@@ -4451,6 +4474,14 @@ impl Paw {
             };
         }
         let _ = (window, cx, navigator);
+        #[cfg(any(target_os = "linux", windows))]
+        if self.snapshot.apply_pending() {
+            return proxy_apply_pending(self.locale);
+        }
+        #[cfg(any(target_os = "linux", windows))]
+        if proxy_direct_active(&self.snapshot) {
+            return direct_proxy_explanation(self.locale);
+        }
         #[cfg(any(target_os = "linux", windows))]
         if self.snapshot.inventory_stale {
             return empty_state(
@@ -6283,7 +6314,9 @@ fn mode_groups(
         .iter()
         .filter(|(name, group)| name.as_str() != "GLOBAL" && !group.hidden)
         .collect();
-    if matches!(mode, Some(RoutingMode::Global | RoutingMode::Direct)) {
+    if mode == Some(RoutingMode::Direct) {
+        visible.clear();
+    } else if mode == Some(RoutingMode::Global) {
         visible.clear();
         if let Some((key, group)) = global {
             visible.push((key, group));
@@ -6299,6 +6332,52 @@ fn mode_groups(
         visible.extend(global);
     }
     visible
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn proxy_direct_active(snapshot: &meow_paw::app::Snapshot) -> bool {
+    matches!(snapshot.engine, meow_paw::app::EngineStatus::Running { .. })
+        && !snapshot.apply_pending()
+        && !snapshot.inventory_stale
+        && snapshot.mode == Some(meow_paw::engine::controller::RoutingMode::Direct)
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn proxy_apply_pending(locale: Locale) -> Div {
+    let message = match locale {
+        Locale::En => "Profile apply pending. Waiting for current route information.",
+        Locale::ZhCn => "配置应用尚未完成，正在等待当前路线信息。",
+    };
+    div().child(
+        div()
+            .id("proxy-apply-pending")
+            .test_support()
+            .role(Role::Label)
+            .aria_label(message)
+            .text_sm()
+            .text_color(rgb(FAINT))
+            .child(message),
+    )
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn direct_proxy_explanation(locale: Locale) -> Div {
+    let explanation = match locale {
+        Locale::En => {
+            "Direct mode sends traffic directly. Switch to Rule or Global to use proxy group selections."
+        }
+        Locale::ZhCn => "直连模式下流量直接连接。切换到规则或全局模式后，可使用代理分组选择。",
+    };
+    div().child(
+        div()
+            .id("proxy-direct-explanation")
+            .test_support()
+            .role(Role::Label)
+            .aria_label(explanation)
+            .text_sm()
+            .text_color(rgb(FAINT))
+            .child(explanation),
+    )
 }
 
 #[cfg(any(target_os = "linux", windows))]
