@@ -396,6 +396,37 @@ fn log_review_context_changed(
 }
 
 #[cfg(any(target_os = "linux", windows))]
+fn log_stream_guidance(
+    state: meow_paw::app::LogStreamState,
+    locale: Locale,
+) -> Option<(&'static str, &'static str)> {
+    use meow_paw::app::LogStreamState::*;
+    match (state, locale) {
+        (Connected, _) => None,
+        (Connecting, Locale::En) => Some((
+            "Connecting to logs",
+            "Connecting to the current Meow session.",
+        )),
+        (Connecting, Locale::ZhCn) => Some(("正在连接日志", "正在连接当前 Meow 会话。")),
+        (Reconnecting, Locale::En) => Some((
+            "Reconnecting to logs",
+            "The log stream was interrupted. Paw is trying again.",
+        )),
+        (Reconnecting, Locale::ZhCn) => Some(("正在重新连接日志", "日志流已中断，Paw 正在重试。")),
+        (Unsupported, Locale::En) => Some((
+            "Logs unavailable",
+            "This controller does not support the log endpoint.",
+        )),
+        (Unsupported, Locale::ZhCn) => Some(("日志不可用", "此控制器不支持日志接口。")),
+        (Unavailable, Locale::En) => Some((
+            "Logs unavailable",
+            "Paw could not reconnect. Retry the log stream.",
+        )),
+        (Unavailable, Locale::ZhCn) => Some(("日志不可用", "Paw 无法重新连接。请重试日志流。")),
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn filter_logs<'a>(
     entries: &'a [meow_paw::engine::controller::LogEntry],
     query: &str,
@@ -1586,6 +1617,30 @@ impl Paw {
             let query = self.log_filter.read(cx).value();
             let visible = self.log_review.visible(&entries, &query, self.log_level);
             let paused = self.log_review.paused.is_some();
+            let guidance = log_stream_guidance(history.state(), self.locale);
+            let retry_context = self.snapshot.clone();
+            let retry_history = history.clone();
+            let retry = subscription_button(
+                "retry-logs",
+                match self.locale {
+                    Locale::En => "Retry",
+                    Locale::ZhCn => "重试",
+                },
+                false,
+                cx,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.refresh();
+                if !log_review_context_changed(&retry_context, &this.snapshot)
+                    && let Some(desktop) = &this.desktop
+                {
+                    this.error = desktop
+                        .retry_logs(retry_context.probe_epoch, retry_history.clone())
+                        .err()
+                        .map(|e| e.to_string());
+                }
+                cx.notify();
+            }));
             let pause_context = self.snapshot.clone();
             let pause = subscription_button(
                 "log-pause",
@@ -1666,7 +1721,14 @@ impl Paw {
                             .text_color(rgb(FAINT))
                             .child(self.locale.message(Message::LogsPausedCaption)),
                     )
-                });
+                })
+                .when_some(guidance, |panel, (title, detail)| {
+                    panel.child(empty_state(title, detail))
+                })
+                .when(
+                    history.state() == meow_paw::app::LogStreamState::Unavailable,
+                    |panel| panel.child(retry),
+                );
             let panel = panel
                 .child(
                     div()
@@ -1711,7 +1773,7 @@ impl Paw {
                             }),
                     ),
                 );
-            if entries.is_empty() {
+            if entries.is_empty() && (paused || guidance.is_none()) {
                 return panel.child(empty_state(
                     self.locale.message(if paused {
                         Message::PausedLogsEmpty
@@ -1724,6 +1786,9 @@ impl Paw {
                         Message::WaitingForLogsDetail
                     }),
                 ));
+            }
+            if entries.is_empty() {
+                return panel;
             }
             if visible.is_empty() {
                 return panel.child(empty_state(
@@ -7674,6 +7739,21 @@ mod tests {
         assert!(!Level::Info.matches("information"));
         assert!(filter_logs(&[], "", Level::All).is_empty());
         assert_eq!(entries, original);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn log_stream_guidance_distinguishes_health_in_both_locales() {
+        use meow_paw::app::LogStreamState::*;
+        for locale in [super::Locale::En, super::Locale::ZhCn] {
+            assert!(super::log_stream_guidance(Connected, locale).is_none());
+            let connecting = super::log_stream_guidance(Connecting, locale).unwrap();
+            let reconnecting = super::log_stream_guidance(Reconnecting, locale).unwrap();
+            let unsupported = super::log_stream_guidance(Unsupported, locale).unwrap();
+            let unavailable = super::log_stream_guidance(Unavailable, locale).unwrap();
+            assert_ne!(connecting, reconnecting);
+            assert_ne!(unsupported, unavailable);
+        }
     }
     #[test]
     #[cfg(any(target_os = "linux", windows))]

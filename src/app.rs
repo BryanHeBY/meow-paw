@@ -496,15 +496,33 @@ impl GroupComparison {
 }
 
 const LOG_CAPACITY: usize = 256;
+const LOG_RETRY_LIMIT: usize = 5;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LogStreamState {
+    #[default]
+    Connecting,
+    Connected,
+    Reconnecting,
+    Unsupported,
+    Unavailable,
+}
+
+#[derive(Debug, Default)]
+struct LogData {
+    entries: VecDeque<LogEntry>,
+    state: LogStreamState,
+}
 
 #[derive(Clone, Debug, Default)]
-pub struct LogHistory(Arc<Mutex<VecDeque<LogEntry>>>);
+pub struct LogHistory(Arc<Mutex<LogData>>);
 
 impl LogHistory {
     pub fn recent(&self) -> Vec<LogEntry> {
         self.0
             .lock()
             .expect("log history poisoned")
+            .entries
             .iter()
             .rev()
             .cloned()
@@ -512,15 +530,23 @@ impl LogHistory {
     }
 
     pub fn clear(&self) {
-        self.0.lock().expect("log history poisoned").clear();
+        self.0.lock().expect("log history poisoned").entries.clear();
+    }
+
+    pub fn state(&self) -> LogStreamState {
+        self.0.lock().expect("log history poisoned").state
+    }
+
+    fn set_state(&self, state: LogStreamState) {
+        self.0.lock().expect("log history poisoned").state = state;
     }
 
     fn push(&self, entry: LogEntry) {
         let mut history = self.0.lock().expect("log history poisoned");
-        if history.len() == LOG_CAPACITY {
-            history.pop_front();
+        if history.entries.len() == LOG_CAPACITY {
+            history.entries.pop_front();
         }
-        history.push_back(entry);
+        history.entries.push_back(entry);
     }
 }
 
@@ -536,25 +562,66 @@ impl LogWorker {
             .name("paw-meow-logs".into())
             .spawn({
                 let stop = stop.clone();
+                let history = history.clone();
                 move || {
-                    let cancelled = || stop.load(Ordering::Acquire);
-                    while !cancelled() {
-                        let result =
-                            controller.read_log_stream(|entry| history.push(entry), cancelled);
-                        if matches!(
-                            result,
-                            Err(crate::engine::controller::ControllerError::Status(404))
-                        ) {
-                            break;
-                        }
-                        if !cancelled() {
-                            thread::park_timeout(Duration::from_millis(250));
-                        }
-                    }
+                    run_log_worker(&history, &stop, |history, cancelled| {
+                        let opened = std::cell::Cell::new(None);
+                        let received = std::cell::Cell::new(false);
+                        let result = controller.read_log_stream_with_connected(
+                            |entry| {
+                                received.set(true);
+                                history.push(entry);
+                            },
+                            cancelled,
+                            || {
+                                opened.set(Some(Instant::now()));
+                                history.set_state(LogStreamState::Connected);
+                            },
+                        );
+                        // A long-lived stream or a received entry resets consecutive failures;
+                        // immediate EOFs and failed connections still exhaust the retry budget.
+                        let healthy = received.get()
+                            || opened
+                                .get()
+                                .is_some_and(|t| t.elapsed() >= Duration::from_secs(3));
+                        (result, healthy)
+                    });
                 }
             })
             .ok();
+        if worker.is_none() {
+            history.set_state(LogStreamState::Unavailable);
+        }
         Self { stop, worker }
+    }
+}
+
+fn run_log_worker(
+    history: &LogHistory,
+    stop: &AtomicBool,
+    mut read: impl FnMut(&LogHistory, &dyn Fn() -> bool) -> (Result<(), ControllerError>, bool),
+) {
+    let cancelled = || stop.load(Ordering::Acquire);
+    let mut failures = 0;
+    while !cancelled() {
+        let (result, healthy) = read(history, &cancelled);
+        if cancelled() {
+            break;
+        }
+        if matches!(result, Err(ControllerError::Status(404))) {
+            history.set_state(LogStreamState::Unsupported);
+            break;
+        }
+        if healthy {
+            failures = 0;
+        }
+        failures += 1;
+        if failures >= LOG_RETRY_LIMIT {
+            history.set_state(LogStreamState::Unavailable);
+            break;
+        }
+        history.set_state(LogStreamState::Reconnecting);
+        thread::park_timeout(Duration::from_millis(250 * (1 << (failures - 1))));
     }
 }
 
@@ -565,6 +632,36 @@ impl Drop for LogWorker {
             worker.thread().unpark();
             let _ = worker.join();
         }
+    }
+}
+
+fn log_retry_eligible(
+    snapshot: &Snapshot,
+    generation: u64,
+    epoch: u64,
+    history: &LogHistory,
+) -> bool {
+    epoch == generation
+        && epoch == snapshot.probe_epoch
+        && snapshot.applying_profile.is_none()
+        && matches!(snapshot.engine, EngineStatus::Running { .. })
+        && snapshot.logs.as_ref().is_some_and(|current| {
+            Arc::ptr_eq(&current.0, &history.0) && current.state() == LogStreamState::Unavailable
+        })
+}
+
+fn retry_log_worker(
+    snapshot: &Snapshot,
+    generation: u64,
+    epoch: u64,
+    history: LogHistory,
+    controller: &crate::engine::controller::Controller,
+    worker: &mut Option<LogWorker>,
+) {
+    if log_retry_eligible(snapshot, generation, epoch, &history) {
+        worker.take();
+        history.set_state(LogStreamState::Connecting);
+        *worker = Some(LogWorker::start(controller.clone(), history));
     }
 }
 
@@ -615,6 +712,7 @@ enum Command {
     },
     RunUnlock(u64, unlock::Job),
     CloseConnection(String),
+    RetryLogs(u64, LogHistory),
 }
 
 pub struct Desktop {
@@ -680,6 +778,10 @@ impl Desktop {
 
     pub fn snapshot(&self) -> Snapshot {
         self.snapshot.lock().expect("snapshot poisoned").clone()
+    }
+
+    pub fn retry_logs(&self, epoch: u64, history: LogHistory) -> io::Result<()> {
+        self.send(Command::RetryLogs(epoch, history))
     }
 
     pub fn start(&self, path: PathBuf) -> io::Result<()> {
@@ -1035,6 +1137,19 @@ fn run(
                 }
             }
             Ok(_) if cancelled() => continue,
+            Ok(Command::RetryLogs(epoch, history)) => {
+                if let Some(active) = session.as_ref() {
+                    let s = snapshot.lock().expect("snapshot poisoned");
+                    retry_log_worker(
+                        &s,
+                        generation,
+                        epoch,
+                        history,
+                        &active.controller,
+                        &mut logs,
+                    );
+                }
+            }
             Ok(Command::SystemProxy(action)) => {
                 proxy.handle(action, snapshot, || {
                     if cancelled() {
@@ -2796,6 +2911,374 @@ mod tests {
         assert_eq!(entries[LOG_CAPACITY - 1].message, "3");
         history.clear();
         assert!(history.recent().is_empty());
+    }
+
+    fn wait_for_log_state(history: &LogHistory, state: LogStreamState) {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while history.state() != state {
+            assert!(
+                Instant::now() < deadline,
+                "expected {state:?}, got {:?}",
+                history.state()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn log_retry_requires_current_exhausted_session_and_history() {
+        let history = LogHistory::default();
+        history.push(LogEntry {
+            time: "now".into(),
+            level: "info".into(),
+            message: "kept".into(),
+        });
+        history.set_state(LogStreamState::Unavailable);
+        let mut snapshot = Snapshot::default();
+        snapshot.engine = EngineStatus::Running { mixed_port: 1234 };
+        snapshot.probe_epoch = 7;
+        snapshot.logs = Some(history.clone());
+        assert!(log_retry_eligible(&snapshot, 7, 7, &history));
+        assert!(!log_retry_eligible(&snapshot, 8, 7, &history));
+        assert!(!log_retry_eligible(&snapshot, 7, 6, &history));
+        let other = LogHistory::default();
+        other.set_state(LogStreamState::Unavailable);
+        assert!(!log_retry_eligible(&snapshot, 7, 7, &other));
+        snapshot.applying_profile = Some("other.yaml".into());
+        assert!(!log_retry_eligible(&snapshot, 7, 7, &history));
+        snapshot.applying_profile = None;
+        history.set_state(LogStreamState::Unsupported);
+        assert!(!log_retry_eligible(&snapshot, 7, 7, &history));
+        history.set_state(LogStreamState::Connected);
+        assert!(!log_retry_eligible(&snapshot, 7, 7, &history));
+        assert_eq!(history.recent()[0].message, "kept");
+        snapshot.engine = EngineStatus::Stopped;
+        history.set_state(LogStreamState::Unavailable);
+        assert!(!log_retry_eligible(&snapshot, 7, 7, &history));
+    }
+
+    #[test]
+    fn log_retry_reuses_authenticated_session_and_history() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let controller = crate::engine::controller::Controller::new(
+            listener.local_addr().unwrap(),
+            "fake-secret".into(),
+        )
+        .unwrap();
+        let (release, wait) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for attempt in 0..=LOG_RETRY_LIMIT {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with("GET /logs?format=structured HTTP/"));
+                let mut authorized = false;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    authorized |= line
+                        .trim()
+                        .eq_ignore_ascii_case("authorization: Bearer fake-secret");
+                }
+                assert!(authorized);
+                if attempt < LOG_RETRY_LIMIT {
+                    stream
+                        .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                        .unwrap();
+                } else {
+                    stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n{\"time\":\"now\",\"level\":\"info\",\"message\":\"recovered\"}\n").unwrap();
+                    wait.recv_timeout(Duration::from_secs(8)).unwrap();
+                }
+            }
+        });
+        let history = LogHistory::default();
+        history.push(LogEntry {
+            time: "before".into(),
+            level: "info".into(),
+            message: "retained".into(),
+        });
+        let mut worker = Some(LogWorker::start(controller.clone(), history.clone()));
+        wait_for_log_state(&history, LogStreamState::Unavailable);
+        let mut snapshot = Snapshot::default();
+        snapshot.engine = EngineStatus::Running { mixed_port: 1234 };
+        snapshot.probe_epoch = 7;
+        snapshot.logs = Some(history.clone());
+        retry_log_worker(&snapshot, 7, 7, history.clone(), &controller, &mut worker);
+        wait_for_log_state(&history, LogStreamState::Connected);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while history.recent().len() < 2 {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(history.recent()[1].message, "retained");
+        assert_eq!(snapshot.probe_epoch, 7);
+        assert!(matches!(
+            snapshot.engine,
+            EngineStatus::Running { mixed_port: 1234 }
+        ));
+        history.clear();
+        assert!(history.recent().is_empty());
+        release.send(()).unwrap();
+        drop(worker);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn log_worker_scripted_health_and_retry_budget() {
+        let history = LogHistory::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (advance, gate) = mpsc::channel();
+        let worker = thread::spawn({
+            let history = history.clone();
+            let stop = stop.clone();
+            move || {
+                let mut attempt = 0;
+                run_log_worker(&history, &stop, |history, _| {
+                    attempt += 1;
+                    match attempt {
+                        1 => (Err(ControllerError::Unreachable), false),
+                        2 => {
+                            history.set_state(LogStreamState::Connected);
+                            gate.recv_timeout(Duration::from_secs(5)).unwrap();
+                            history.push(LogEntry {
+                                time: "now".into(),
+                                level: "info".into(),
+                                message: "retained".into(),
+                            });
+                            (Ok(()), true)
+                        }
+                        3 => (Err(ControllerError::Status(404)), false),
+                        _ => panic!("unexpected retry"),
+                    }
+                });
+            }
+        });
+        wait_for_log_state(&history, LogStreamState::Reconnecting);
+        wait_for_log_state(&history, LogStreamState::Connected);
+        assert!(history.recent().is_empty());
+        advance.send(()).unwrap();
+        wait_for_log_state(&history, LogStreamState::Reconnecting);
+        assert_eq!(history.recent()[0].message, "retained");
+        wait_for_log_state(&history, LogStreamState::Unsupported);
+        worker.join().unwrap();
+        history.clear();
+        assert_eq!(history.state(), LogStreamState::Unsupported);
+
+        let history = LogHistory::default();
+        let stop = AtomicBool::new(false);
+        let mut attempts = 0;
+        run_log_worker(&history, &stop, |_, _| {
+            attempts += 1;
+            (Err(ControllerError::Unreachable), false)
+        });
+        assert_eq!(attempts, LOG_RETRY_LIMIT);
+        assert_eq!(history.state(), LogStreamState::Unavailable);
+    }
+
+    fn log_fixture_request(listener: &std::net::TcpListener) -> std::net::TcpStream {
+        use std::io::{BufRead, BufReader};
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(&stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.starts_with("GET /logs?format=structured HTTP/"));
+        loop {
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        stream
+    }
+
+    #[test]
+    fn log_worker_reports_recovery_empty_and_unsupported_preserving_history() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let controller = crate::engine::controller::Controller::new(
+            listener.local_addr().unwrap(),
+            String::new(),
+        )
+        .unwrap();
+        let (send_entry, entry_signal) = mpsc::channel();
+        let (close_stream, close_signal) = mpsc::channel();
+        let (close_recovered, recovered_signal) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut first = log_fixture_request(&listener);
+            first
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            let mut second = log_fixture_request(&listener);
+            second
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
+                .unwrap();
+            entry_signal.recv_timeout(Duration::from_secs(8)).unwrap();
+            second
+                .write_all(b"{\"time\":\"now\",\"level\":\"info\",\"message\":\"retained\"}\n")
+                .unwrap();
+            close_signal.recv_timeout(Duration::from_secs(8)).unwrap();
+            drop(second);
+            let mut third = log_fixture_request(&listener);
+            third
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
+                .unwrap();
+            recovered_signal
+                .recv_timeout(Duration::from_secs(8))
+                .unwrap();
+            drop(third);
+            let mut fourth = log_fixture_request(&listener);
+            fourth
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let history = LogHistory::default();
+        let worker = LogWorker::start(controller, history.clone());
+        wait_for_log_state(&history, LogStreamState::Reconnecting);
+        wait_for_log_state(&history, LogStreamState::Connected);
+        assert!(history.recent().is_empty());
+        let idle_until = Instant::now() + Duration::from_millis(4500);
+        while Instant::now() < idle_until {
+            assert_eq!(history.state(), LogStreamState::Connected);
+            assert!(history.recent().is_empty());
+            thread::sleep(Duration::from_millis(20));
+        }
+        send_entry.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while history.recent().is_empty() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        close_stream.send(()).unwrap();
+        wait_for_log_state(&history, LogStreamState::Reconnecting);
+        assert_eq!(history.recent()[0].message, "retained");
+        wait_for_log_state(&history, LogStreamState::Connected);
+        close_recovered.send(()).unwrap();
+        wait_for_log_state(&history, LogStreamState::Unsupported);
+        assert_eq!(history.recent()[0].message, "retained");
+        history.clear();
+        assert!(history.recent().is_empty());
+        assert_eq!(history.state(), LogStreamState::Unsupported);
+        drop(worker);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn log_worker_limits_failures_and_stops_promptly_during_backoff() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let controller = crate::engine::controller::Controller::new(
+            listener.local_addr().unwrap(),
+            String::new(),
+        )
+        .unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..LOG_RETRY_LIMIT {
+                let mut stream = log_fixture_request(&listener);
+                stream
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+            }
+        });
+        let history = LogHistory::default();
+        let worker = LogWorker::start(controller, history.clone());
+        wait_for_log_state(&history, LogStreamState::Unavailable);
+        drop(worker);
+        server.join().unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let controller = crate::engine::controller::Controller::new(
+            listener.local_addr().unwrap(),
+            String::new(),
+        )
+        .unwrap();
+        let server = thread::spawn(move || {
+            let mut stream = log_fixture_request(&listener);
+            stream
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let history = LogHistory::default();
+        let worker = LogWorker::start(controller, history.clone());
+        wait_for_log_state(&history, LogStreamState::Reconnecting);
+        let start = Instant::now();
+        drop(worker);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn log_worker_bounds_refused_connections_and_empty_eof_retries() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let controller = crate::engine::controller::Controller::new(
+            listener.local_addr().unwrap(),
+            String::new(),
+        )
+        .unwrap();
+        drop(listener);
+        let history = LogHistory::default();
+        let worker = LogWorker::start(controller, history.clone());
+        wait_for_log_state(&history, LogStreamState::Reconnecting);
+        wait_for_log_state(&history, LogStreamState::Unavailable);
+        drop(worker);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let controller = crate::engine::controller::Controller::new(
+            listener.local_addr().unwrap(),
+            String::new(),
+        )
+        .unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..LOG_RETRY_LIMIT {
+                let mut stream = log_fixture_request(&listener);
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+            }
+        });
+        let history = LogHistory::default();
+        let worker = LogWorker::start(controller, history.clone());
+        wait_for_log_state(&history, LogStreamState::Unavailable);
+        assert!(history.recent().is_empty());
+        drop(worker);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn log_worker_stops_with_an_idle_open_stream() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let controller = crate::engine::controller::Controller::new(
+            listener.local_addr().unwrap(),
+            String::new(),
+        )
+        .unwrap();
+        let (release, wait) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut stream = log_fixture_request(&listener);
+            stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+            wait.recv_timeout(Duration::from_secs(8)).unwrap();
+        });
+        let history = LogHistory::default();
+        let worker = LogWorker::start(controller, history.clone());
+        wait_for_log_state(&history, LogStreamState::Connected);
+        let start = Instant::now();
+        drop(worker);
+        assert!(start.elapsed() < Duration::from_secs(6));
+        release.send(()).unwrap();
+        server.join().unwrap();
     }
 
     #[test]

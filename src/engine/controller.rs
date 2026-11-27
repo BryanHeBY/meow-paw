@@ -455,8 +455,17 @@ impl Controller {
 
     pub fn read_log_stream(
         &self,
+        sink: impl FnMut(LogEntry),
+        cancelled: impl Fn() -> bool,
+    ) -> Result<(), ControllerError> {
+        self.read_log_stream_with_connected(sink, cancelled, || {})
+    }
+
+    pub(crate) fn read_log_stream_with_connected(
+        &self,
         mut sink: impl FnMut(LogEntry),
         cancelled: impl Fn() -> bool,
+        mut connected: impl FnMut(),
     ) -> Result<(), ControllerError> {
         // A stream needs an idle read deadline, not the short global command deadline.
         let config = ureq::Agent::config_builder()
@@ -476,29 +485,10 @@ impl Controller {
         if response.status().as_u16() != 200 {
             return Err(ControllerError::Status(response.status().as_u16()));
         }
+        connected();
 
-        const MAX_FRAME_BYTES: u64 = 16 * 1024;
         let mut reader = BufReader::new(response.body_mut().as_reader());
-        let mut frame = Vec::new();
-        while !cancelled() {
-            frame.clear();
-            if reader
-                .by_ref()
-                .take(MAX_FRAME_BYTES)
-                .read_until(b'\n', &mut frame)
-                .map_err(|_| ControllerError::Unreachable)?
-                == 0
-            {
-                break;
-            }
-            if frame.last() != Some(&b'\n') {
-                return Err(ControllerError::InvalidResponse);
-            }
-            if let Ok(log) = serde_json::from_slice(&frame) {
-                sink(log);
-            }
-        }
-        Ok(())
+        read_log_frames(&mut reader, &mut sink, &cancelled)
     }
 
     pub fn traffic(&self) -> Result<Traffic, ControllerError> {
@@ -549,6 +539,48 @@ impl Controller {
     }
 }
 
+fn read_log_frames(
+    reader: &mut impl BufRead,
+    sink: &mut impl FnMut(LogEntry),
+    cancelled: &impl Fn() -> bool,
+) -> Result<(), ControllerError> {
+    const MAX_FRAME_BYTES: usize = 16 * 1024;
+    let mut frame = Vec::new();
+    while !cancelled() {
+        let remaining = MAX_FRAME_BYTES - frame.len();
+        if remaining == 0 {
+            return Err(ControllerError::InvalidResponse);
+        }
+        match reader
+            .by_ref()
+            .take(remaining as u64)
+            .read_until(b'\n', &mut frame)
+        {
+            Ok(0) if frame.is_empty() => return Ok(()),
+            Ok(_) if frame.last() == Some(&b'\n') => {
+                if let Ok(log) = serde_json::from_slice(&frame) {
+                    sink(log);
+                }
+                frame.clear();
+            }
+            Ok(_) => return Err(ControllerError::InvalidResponse),
+            Err(error) if is_log_idle_timeout(&error) => continue,
+            Err(_) => return Err(ControllerError::Unreachable),
+        }
+    }
+    Ok(())
+}
+
+fn is_log_idle_timeout(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::TimedOut
+        || matches!(
+            error
+                .get_ref()
+                .and_then(|e| e.downcast_ref::<ureq::Error>()),
+            Some(ureq::Error::Timeout(ureq::Timeout::PerRead))
+        )
+}
+
 fn http_error(error: ureq::Error) -> ControllerError {
     match error {
         ureq::Error::StatusCode(code) => ControllerError::Status(code),
@@ -564,6 +596,69 @@ mod tests {
         net::TcpListener,
         thread,
     };
+
+    #[test]
+    fn log_frames_survive_idle_timeouts_and_keep_partial_frames() {
+        use std::io::{self, Read};
+        struct Script {
+            step: usize,
+        }
+        impl Read for Script {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.step += 1;
+                let data: &[u8] = match self.step {
+                    1 => b"{\"time\":\"now\",\"level\":\"info\",",
+                    2 => return Err(io::Error::new(io::ErrorKind::TimedOut, "idle")),
+                    3 => return Err(ureq::Error::Timeout(ureq::Timeout::PerRead).into_io()),
+                    4 => b"\"message\":\"after idle\"}\n",
+                    _ => return Ok(0),
+                };
+                buf[..data.len()].copy_from_slice(data);
+                Ok(data.len())
+            }
+        }
+        let mut reader = BufReader::new(Script { step: 0 });
+        let mut logs = Vec::new();
+        read_log_frames(&mut reader, &mut |entry| logs.push(entry), &|| false).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "after idle");
+        assert!(!is_log_idle_timeout(&io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "reset"
+        )));
+        assert!(!is_log_idle_timeout(
+            &ureq::Error::Timeout(ureq::Timeout::RecvBody).into_io()
+        ));
+    }
+
+    #[test]
+    fn log_frames_distinguish_eof_failure_and_cancellation() {
+        use std::io::{self, Read};
+        struct Failure;
+        impl Read for Failure {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::ConnectionReset, "reset"))
+            }
+        }
+        assert!(matches!(
+            read_log_frames(&mut BufReader::new(Failure), &mut |_| {}, &|| false),
+            Err(ControllerError::Unreachable)
+        ));
+        assert!(read_log_frames(&mut BufReader::new(Failure), &mut |_| {}, &|| true).is_ok());
+        assert!(read_log_frames(&mut BufReader::new(&b""[..]), &mut |_| {}, &|| false).is_ok());
+        assert!(matches!(
+            read_log_frames(&mut BufReader::new(&b"partial"[..]), &mut |_| {}, &|| false),
+            Err(ControllerError::InvalidResponse)
+        ));
+        assert!(matches!(
+            read_log_frames(
+                &mut BufReader::new(&vec![b'x'; 16 * 1024][..]),
+                &mut |_| {},
+                &|| false
+            ),
+            Err(ControllerError::InvalidResponse)
+        ));
+    }
 
     #[test]
     fn decodes_connection_details_from_snapshot_fixture() {
