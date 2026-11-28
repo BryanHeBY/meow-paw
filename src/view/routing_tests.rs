@@ -36,8 +36,10 @@ impl Render for Header {
 
 struct Connections(Entity<Paw>);
 impl Render for Connections {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.0.update(cx, |paw, cx| paw.connections(cx));
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.0.update(cx, |paw, cx| {
+            paw.connections(window.viewport_size().width, cx)
+        });
         div().size_full().tab_group().child(rows)
     }
 }

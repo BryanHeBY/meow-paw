@@ -27,6 +27,8 @@ mod proxy_group_navigation;
 #[cfg(any(target_os = "linux", windows))]
 mod connection_order;
 #[cfg(any(target_os = "linux", windows))]
+mod connection_table;
+#[cfg(any(target_os = "linux", windows))]
 use connection_order::{ConnectionOrder, matches_connection, matching_connections};
 
 const BG: u32 = 0xeff2f6;
@@ -4864,7 +4866,7 @@ impl Paw {
         }
     }
 
-    fn connections(&self, cx: &mut Context<Self>) -> Div {
+    fn connections(&self, viewport: Pixels, cx: &mut Context<Self>) -> Div {
         #[cfg(any(target_os = "linux", windows))]
         if matches!(
             self.snapshot.engine,
@@ -4985,6 +4987,7 @@ impl Paw {
                 )
                 .child(chip(count, BLUE, SOFT_BLUE))
                 .child(order);
+            let layout = connection_table::Layout::for_viewport(viewport);
             let selected_index = self.connection_detail.as_ref().and_then(|selection| {
                 detail_row_index(selection, &self.snapshot, self.closed_connections_open)
             });
@@ -5001,16 +5004,7 @@ impl Paw {
             } else {
                 card()
                     .p_0()
-                    .child(
-                        connection_row(
-                            section_label(self.locale.message(Message::DestinationColumn)),
-                            section_label(self.locale.message(Message::RouteColumn)),
-                            section_label(self.locale.message(Message::RuleColumn)),
-                            None,
-                            self.closed_connections_open,
-                        )
-                        .bg(rgb(CHROME)),
-                    )
+                    .children(layout.header(self.locale, self.closed_connections_open))
                     .children(results.into_iter().map(|row| {
                         let connection_order::ConnectionListRow { index, connection: c, destination, route } = row;
                         let selected = selected_index == Some(index);
@@ -5063,22 +5057,16 @@ impl Paw {
                                 }),
                             ));
                         }
-                        let row = connection_row(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(destination.clone()),
-                            div().child(if route.is_empty() {
-                                "—".into()
-                            } else {
-                                route.clone()
-                            }),
-                            div().child(if c.rule.is_empty() {
-                                "—".into()
-                            } else {
-                                c.rule.clone()
-                            }),
-                            Some(actions.into_any_element()),
+                        let row = layout.row(
+                            [
+                                connection_table::value(&destination).font_weight(FontWeight::MEDIUM),
+                                connection_table::value(&route),
+                                connection_table::value(&c.rule),
+                                layout.transfers(index, c),
+                            ],
+                            actions.into_any_element(),
                             self.closed_connections_open,
+                            self.locale,
                         );
                         let mut item = div().child(row);
                         if selected {
@@ -5109,7 +5097,7 @@ impl Paw {
             };
             return page.child(toolbar).child(table);
         }
-        let _ = cx;
+        let _ = (viewport, cx);
         empty_state(
             self.locale.message(Message::NoActiveConnections),
             self.locale.message(Message::StartToViewConnections),
@@ -6229,7 +6217,7 @@ impl Render for Paw {
             ),
             Page::Proxies => self.proxies(window, cx, &mut proxy_navigator),
             Page::Profiles => self.profiles(cx),
-            Page::Connections => self.connections(cx),
+            Page::Connections => self.connections(window.viewport_size().width, cx),
             Page::Rules => self.rules(cx),
             Page::Logs => self.logs(cx),
             Page::Unlock => self.unlock(cx),
@@ -7410,28 +7398,6 @@ fn connection_empty_messages(closed: bool, total: usize) -> (Message, Message) {
             Message::ConnectionFilterDetail,
         )
     }
-}
-
-#[cfg(any(target_os = "linux", windows))]
-fn connection_row(a: Div, b: Div, c: Div, action: Option<AnyElement>, closed: bool) -> Div {
-    div()
-        .flex()
-        .gap_3()
-        .items_center()
-        .px_4()
-        .py_3()
-        .border_b_1()
-        .border_color(rgb(LINE))
-        .text_sm()
-        .child(a.flex_1().min_w_0())
-        .child(b.flex_1().min_w_0().text_color(rgb(FAINT)))
-        .child(c.flex_1().min_w_0().text_color(rgb(FAINT)))
-        .child(
-            div()
-                .w(px(if closed { 80. } else { 132. }))
-                .flex_shrink_0()
-                .children(action),
-        )
 }
 
 #[cfg(any(target_os = "linux", windows))]
