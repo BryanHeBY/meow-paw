@@ -120,3 +120,38 @@ reopen, watcher-loss recovery, menu dispatch, and managed engine shutdown.
 It does not establish that a real Waybar or Quickshell panel displays the
 menu, that the window receives keyboard focus on Wayland, or that Fcitx5
 composition works. Check those interactions separately on the target desktop.
+
+## Local YAML import verification on X11
+
+Use an already built, trusted Paw desktop binary. The tests create synthetic
+files and a private Xvfb display. They refuse a namespace with interfaces other
+than loopback and do not use your desktop's settings.
+
+- `x11-file-picker-smoke.py` clicks **Profiles → Import YAML copies**. A private,
+  activation-free D-Bus fixture returns cancel, a non-local URI, and then two
+  local YAML files. Only the last adds managed copies, without modifying the
+  source files or choosing a profile.
+- `x11-xdnd-smoke.py` checks URI priority for mixed X11 drop offers, including
+  both MIME offer orders, a four-type offer, text-only fallback and non-local
+  rejection. Pass `--switch-profiles` before the binary to also use the real
+  controls to choose each saved copy for the next start without launching Meow.
+- `x11-profile-reload-smoke.py` takes trusted Paw and Meow binaries. It imports
+  two managed copies and checks that importing preserves the current session
+  and selection. Applying the copies live then yields DIRECT → REJECT → DIRECT
+  against a local HTTP origin while keeping the same managed Meow process.
+
+```sh
+test_paw="$PWD/target/debug/meow-paw"
+timeout 85s unshare -Urn sh -c 'ip link set lo up && python3 "$@"' sh \
+  "$PWD/tools/x11-file-picker-smoke.py" "$test_paw"
+timeout 85s unshare -Urn sh -c 'ip link set lo up && python3 "$@"' sh \
+  "$PWD/tools/x11-xdnd-smoke.py" "$test_paw"
+timeout 85s unshare -Urn sh -c 'ip link set lo up && python3 "$@"' sh \
+  "$PWD/tools/x11-xdnd-smoke.py" --switch-profiles "$test_paw"
+timeout 105s unshare -Urn sh -c 'ip link set lo up && python3 "$@"' sh \
+  "$PWD/tools/x11-profile-reload-smoke.py" "$test_paw" /path/to/trusted/meow
+```
+
+Along with the namespace and X11 tools above, the fixtures need a C compiler,
+libX11 headers, and, for the picker only, `pkg-config` and GIO headers. This does
+not establish native Wayland, Windows, system-proxy, or TUN behavior.
