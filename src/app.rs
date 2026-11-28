@@ -1,8 +1,10 @@
 //! Window-independent application state for the first managed desktop workflow.
 
 mod system_proxy;
+mod telemetry;
 pub use system_proxy::ProxyState;
 use system_proxy::{ProxyAction, ProxyControl};
+use telemetry::Telemetry;
 
 use crate::subscription_store::{SubscriptionId, SubscriptionStore};
 use crate::{
@@ -1259,7 +1261,7 @@ fn run(
     proxy.publish(snapshot, None);
     let mut logs = None;
     let mut session: Option<Session> = None;
-    let mut next_sample = Instant::now();
+    let mut telemetry = Telemetry::default();
     // Do not block Stop/Quit on a slow remote provider fetch.
     let (refresh_tx, refresh_rx) = mpsc::channel();
     let mut generation = 0_u64;
@@ -1287,6 +1289,7 @@ fn run(
             }
         };
         if stopping {
+            telemetry.invalidate();
             if !proxy.restore_current(snapshot) {
                 change(snapshot, |s| {
                     s.stop_result = Some(false);
@@ -1335,6 +1338,7 @@ fn run(
                 Ok(None) => {}
                 Ok(Some(code)) => {
                     proxy.restore_current(snapshot);
+                    telemetry.invalidate();
                     generation = generation.wrapping_add(1);
                     session.take();
                     logs.take();
@@ -1346,6 +1350,7 @@ fn run(
                 }
                 Err(error) => {
                     proxy.restore_current(snapshot);
+                    telemetry.invalidate();
                     generation = generation.wrapping_add(1);
                     session.take();
                     logs.take();
@@ -1383,7 +1388,7 @@ fn run(
                             .map_err(|e| e.to_string())
                     },
                 );
-                next_sample = Instant::now();
+                telemetry.invalidate();
             }
             Ok(_) if cancelled() => continue,
             Ok(Command::RetryLogs(epoch, history)) => {
@@ -1464,7 +1469,7 @@ fn run(
                             }
                         });
                         session = Some(active);
-                        next_sample = Instant::now();
+                        telemetry.invalidate();
                     }
                     Err(error) if error.kind() == ErrorKind::Interrupted => {}
                     Err(error) => change(snapshot, |s| {
@@ -1503,6 +1508,7 @@ fn run(
                     }
                 }
                 // A pending provider response belongs to the previous profile.
+                telemetry.invalidate();
                 generation = generation.wrapping_add(1);
                 change(snapshot, |s| {
                     s.refreshing_provider = None;
@@ -1531,7 +1537,7 @@ fn run(
                 change(snapshot, |s| {
                     finish_apply(s, reservation, path, mode, result);
                 });
-                next_sample = Instant::now();
+                telemetry.invalidate();
             }
             Ok(Command::Select {
                 epoch,
@@ -1550,7 +1556,7 @@ fn run(
                         cancelled,
                         || active.controller.select(&group, &member),
                     );
-                    next_sample = Instant::now();
+                    telemetry.invalidate();
                 }
             }
             Ok(Command::SetMode(mode)) => {
@@ -1565,7 +1571,7 @@ fn run(
                         };
                         (actual, result.err().map(|e| e.to_string()))
                     });
-                    next_sample = Instant::now();
+                    telemetry.invalidate();
                 }
             }
             Ok(Command::RefreshProviders { epoch, name }) => {
@@ -1701,7 +1707,7 @@ fn run(
                     finish_provider_refresh(s, result);
                 }
             });
-            next_sample = Instant::now();
+            telemetry.invalidate();
         }
 
         if refresh_job
@@ -1819,7 +1825,7 @@ fn run(
                     }
                 }
             });
-            next_sample = Instant::now();
+            telemetry.expedite();
         }
 
         // The lock is held through the dispatch decision and thread creation. URL,
@@ -1898,44 +1904,15 @@ fn run(
         }
 
         if let Some(active) = &session
-            && Instant::now() >= next_sample
             && !cancelled()
         {
-            let inventory = active.controller.inventory().ok().map(Arc::new);
-            if cancelled() {
-                continue;
-            }
-            let connections = active.controller.connections().ok().map(Arc::new);
-            if cancelled() {
-                continue;
-            }
-            let traffic = active.controller.traffic().ok();
-            if cancelled() {
-                continue;
-            }
-            change(snapshot, |s| {
-                let now = Instant::now();
-                s.last_update = (inventory.is_some() || connections.is_some() || traffic.is_some())
-                    .then_some(now);
-                s.traffic_history.record(
-                    now,
-                    traffic.as_ref().map(|t| TrafficRate {
-                        up: t.up,
-                        down: t.down,
-                    }),
-                );
-                // A temporary controller failure must not erase the last good list.
-                retain_inventory(s, inventory);
-                s.connection_history.record(connections.as_ref());
-                s.connections = connections;
-                s.traffic = traffic;
-            });
-            next_sample = Instant::now() + Duration::from_millis(250);
+            telemetry.poll(&active.controller, generation, snapshot, cancelled);
         }
     }
     // Destruction (including tray/window quit) joins this worker. Attempt
     // exact restoration while the owned core still listens, never restore a
     // stale journal encountered at launch without a user action.
+    drop(telemetry);
     proxy.restore_current(snapshot);
     change(snapshot, |s| {
         s.apply_reservation = None;

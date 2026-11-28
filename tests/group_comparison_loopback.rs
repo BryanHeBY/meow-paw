@@ -9,7 +9,7 @@ use meow_paw::{
 };
 use std::{
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -77,6 +77,81 @@ fn setup_fixture(dir: &Path) -> (Desktop, PathBuf) {
     fs::write(&profile, "mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
     let desktop = Desktop::with_mixed_port(binary, 0).unwrap();
     (desktop, profile)
+}
+
+#[test]
+fn an_unresponsive_inventory_read_does_not_own_the_stop_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let (desktop, profile) = setup_fixture(dir.path());
+    fs::write(dir.path().join("hold-inventory-read"), "held").unwrap();
+    desktop.start(profile).unwrap();
+    wait_for_request(dir.path(), "GET /providers/proxies ");
+    let start = Instant::now();
+    desktop.stop();
+    let stopped = wait_for(&desktop, |s| s.stop_result == Some(true));
+    eprintln!("held inventory Stop completed in {:?}", start.elapsed());
+    assert!(matches!(stopped.engine, EngineStatus::Stopped));
+    assert!(stopped.inventory.is_none());
+    assert!(stopped.connections.is_none());
+    assert!(stopped.traffic.is_none());
+    assert!(
+        start.elapsed() < Duration::from_millis(1_500),
+        "stop waited for the held telemetry read: {:?}",
+        start.elapsed(),
+    );
+}
+
+#[test]
+fn a_sample_already_read_before_apply_cannot_repopulate_the_new_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let (desktop, profile) = setup_fixture(dir.path());
+    let before = dir.path().join("old-sample-entered");
+    let after = dir.path().join("new-sample-entered");
+    let replacement = dir.path().join("after.yaml");
+    fs::write(&replacement, "mode: direct\nrules: ['MATCH,DIRECT']\n").unwrap();
+    fs::write(dir.path().join("sample-during-reload"), "enabled").unwrap();
+    desktop.start(profile).unwrap();
+    let old = wait_for(&desktop, |s| {
+        before.exists() && matches!(s.engine, EngineStatus::Running { .. })
+    });
+    let start = Instant::now();
+    desktop.apply_profile(replacement.clone()).unwrap();
+    let applied = wait_for(&desktop, |s| {
+        s.profile.as_deref() == Some(replacement.as_path()) && !s.apply_pending()
+    });
+    assert_ne!(applied.probe_epoch, old.probe_epoch);
+    assert!(applied.action_error.is_none());
+    assert!(
+        start.elapsed() < Duration::from_millis(1_500),
+        "apply waited for the held telemetry read: {:?}",
+        start.elapsed(),
+    );
+    assert_eq!(
+        requests(dir.path())
+            .iter()
+            .filter(|line| line.starts_with("GET /providers/proxies "))
+            .count(),
+        1,
+        "only one read can own a sample buffer until the old read retires"
+    );
+
+    // When the new request reaches the server, the owner has already
+    // handled the old reply. Fresh data remains gated so it cannot mask
+    // a stale publication that briefly overwrites the new profile.
+    fs::write(dir.path().join("release-old-sample"), "go").unwrap();
+    let held = wait_for(&desktop, |_| after.exists());
+    assert!(held.inventory.is_none());
+    assert!(held.connections.is_none());
+
+    fs::write(dir.path().join("release-new-sample"), "go").unwrap();
+    let fresh = wait_for(&desktop, |s| s.inventory.is_some());
+    let inventory = fresh.inventory.unwrap();
+    assert!(inventory.providers.contains_key("NewSample"));
+    assert!(!inventory.providers.contains_key("OldSample"));
+    assert!(!fresh.inventory_stale);
+    assert_eq!(fresh.probe_epoch, applied.probe_epoch);
+    desktop.stop();
+    wait_for(&desktop, |s| s.stop_result == Some(true));
 }
 
 #[test]
@@ -228,6 +303,9 @@ fn uncertain_provider_write_fences_refresh_and_apply_until_fresh_controller() {
 fn explicit_group_comparison_uses_bounded_unambiguous_requests_and_ignores_stale_results() {
     let dir = tempfile::tempdir().unwrap();
     let (desktop, profile) = setup_fixture(dir.path());
+    // Comparison tests require a confirmed Rule or Global controller mode.
+    fs::write(&profile, "mode: rule\nrules: ['MATCH,DIRECT']\n").unwrap();
+    fs::write(dir.path().join("probe-rule-mode"), "enabled").unwrap();
     desktop.start(profile).unwrap();
     let started = wait_for(&desktop, |s| {
         matches!(s.engine, EngineStatus::Running { .. }) && s.inventory.is_some()
@@ -383,6 +461,7 @@ fn serve(mut stream: TcpStream, secret: &str, dir: &Path) {
     reader.read_line(&mut line).unwrap();
     let request = line.trim_end().to_owned();
     let mut authorized = false;
+    let mut content_length = 0;
     loop {
         line.clear();
         if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
@@ -391,6 +470,11 @@ fn serve(mut stream: TcpStream, secret: &str, dir: &Path) {
         authorized |= line
             .trim()
             .eq_ignore_ascii_case(&format!("authorization: Bearer {secret}"));
+        if let Some((field, value)) = line.split_once(':')
+            && field.eq_ignore_ascii_case("Content-Length")
+        {
+            content_length = value.trim().parse().unwrap();
+        }
     }
     assert!(authorized, "{request}");
     {
@@ -406,8 +490,27 @@ fn serve(mut stream: TcpStream, secret: &str, dir: &Path) {
     let path = request.split_whitespace().nth(1).unwrap();
     let (status, body) = if path == "/" {
         ("200 OK", serde_json::json!({"hello":"meow"}))
+    } else if request.starts_with("PUT ")
+        && path == "/configs"
+        && dir.join("sample-during-reload").exists()
+    {
+        // Consume the small request body before sending 204 and closing;
+        // otherwise packet boundaries can decide whether the client sees a reset.
+        assert!((1..=16 * 1024).contains(&content_length));
+        reader.read_exact(&mut vec![0; content_length]).unwrap();
+        fs::write(dir.join("sample-after-reload"), "reload").unwrap();
+        let _ = write!(
+            stream,
+            "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        );
+        return;
     } else if path == "/configs" {
-        ("200 OK", serde_json::json!({"mode":"direct"}))
+        let mode = if dir.join("probe-rule-mode").exists() {
+            "rule"
+        } else {
+            "direct"
+        };
+        ("200 OK", serde_json::json!({"mode":mode}))
     } else if path == "/proxies" {
         let mut routes = serde_json::Map::new();
         for name in ["Alpha", "Failure", "Zero", "Ambiguous"] {
@@ -430,6 +533,26 @@ fn serve(mut stream: TcpStream, secret: &str, dir: &Path) {
             serde_json::json!({"type":"Selector", "all":names}),
         );
         ("200 OK", serde_json::json!({"proxies":routes}))
+    } else if path == "/providers/proxies" && dir.join("sample-during-reload").exists() {
+        let (entered, release, provider) = if dir.join("sample-after-reload").exists() {
+            ("new-sample-entered", "release-new-sample", "NewSample")
+        } else {
+            ("old-sample-entered", "release-old-sample", "OldSample")
+        };
+        fs::write(dir.join(entered), "held").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !dir.join(release).exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        (
+            "200 OK",
+            serde_json::json!({"providers":{(provider):{"vehicleType":"File","proxies":[]}}}),
+        )
+    } else if path == "/providers/proxies" && dir.join("hold-inventory-read").exists() {
+        // Keep the socket open beyond the controller client deadline. Only
+        // the test-owned child is affected; the owner can still stop it.
+        thread::sleep(Duration::from_secs(5));
+        return;
     } else if path == "/providers/proxies" && dir.join("provider-batch").exists() {
         (
             "200 OK",
