@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod file_picker;
+mod home_dashboard;
 mod local_yaml_import;
 #[cfg(any(target_os = "linux", windows))]
 mod proxy_group_navigation;
@@ -1112,7 +1113,7 @@ impl Paw {
     fn sidebar(&self, compact: bool, cx: &mut Context<Self>) -> Div {
         let (up, down, _) = self.traffic();
         div()
-            .w(px(if compact { 62. } else { 204. }))
+            .w(home_dashboard::sidebar_width(compact))
             .h_full()
             .flex_shrink_0()
             .bg(rgb(CHROME))
@@ -2015,10 +2016,8 @@ impl Paw {
             )
     }
 
-    fn overview(&self, wide: bool, cx: &mut Context<Self>) -> Div {
+    fn overview(&self, layout: home_dashboard::Layout, cx: &mut Context<Self>) -> Div {
         let (phase, color, port) = self.state();
-        let metric_row = || div().flex().gap_3().when(!wide, |el| el.flex_col());
-        let width = |card: Div| card.w_full().min_w_0().when(wide, |el| el.flex_1());
         let raw_phase = phase;
         let phase = self.locale.message(match phase {
             "Running" => Message::Running,
@@ -2037,7 +2036,7 @@ impl Paw {
             |p| format!("127.0.0.1:{p}"),
         );
         let copy = if let Some(port) = port {
-            secondary_button(
+            semantic_secondary_button(
                 "copy-listener",
                 if self.copied_listener == Some(port) {
                     self.locale.message(Message::OverviewCopied)
@@ -2079,84 +2078,88 @@ impl Paw {
             self.subscription_for(path)
                 .map(|(_, id)| (id, path.to_owned()))
         });
-        let profile = form_card(self.locale.message(Message::OverviewCurrentProfile))
-            .child(form_row(
-                self.locale.message(Message::OverviewAppliedProfile),
-                current_label,
-                subscription_button(
-                    "home-profiles",
-                    self.locale.message(Message::Profiles),
-                    false,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.navigate_to(Page::Profiles);
-                    this.load_subscription_metadata(cx);
-                    cx.notify();
-                })),
-            ))
-            .child(form_row(
-                self.locale.message(Message::OverviewNextProfile),
-                next_label,
-                div(),
-            ))
-            .when_some(refresh, |card, (id, path)| {
-                card.child(
-                    div()
-                        .px_4()
-                        .pb_4()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(FAINT))
-                                .child(self.locale.message(Message::SubscriptionDetail)),
-                        )
-                        .when(
-                            !self.subscription_busy && self.subscription_rename.is_none(),
-                            |el| {
-                                el.child(
-                                    secondary_button(
-                                        "home-refresh-subscription",
-                                        self.locale.message(Message::OverviewRefreshSubscription),
-                                    )
-                                    .on_click(cx.listener(
-                                        move |paw, _, _, cx| {
-                                            #[cfg(any(target_os = "linux", windows))]
-                                            if overview_current_profile(
-                                                paw.state().2.is_some(),
-                                                paw.snapshot.applying_profile.is_some(),
-                                                paw.snapshot.profile.as_deref(),
-                                            ) == Some(path.as_path())
-                                                && paw.subscription_paths.contains(&path)
-                                            {
-                                                paw.refresh_subscription(id, cx);
-                                            }
-                                            #[cfg(not(any(target_os = "linux", windows)))]
-                                            let _ = (paw, id, &path, cx);
-                                        },
-                                    )),
+        let profile = home_dashboard::card(
+            "home-profile-card",
+            Page::Profiles.icon(),
+            self.locale.message(Message::OverviewCurrentProfile),
+        )
+        .child(form_row(
+            self.locale.message(Message::OverviewAppliedProfile),
+            current_label,
+            subscription_button(
+                "home-profiles",
+                self.locale.message(Message::Profiles),
+                false,
+                cx,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.navigate_to(Page::Profiles);
+                this.load_subscription_metadata(cx);
+                cx.notify();
+            })),
+        ))
+        .child(form_row(
+            self.locale.message(Message::OverviewNextProfile),
+            next_label,
+            div(),
+        ))
+        .when_some(refresh, |card, (id, path)| {
+            card.child(
+                div()
+                    .px_4()
+                    .pb_4()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(FAINT))
+                            .child(self.locale.message(Message::SubscriptionDetail)),
+                    )
+                    .when(
+                        !self.subscription_busy && self.subscription_rename.is_none(),
+                        |el| {
+                            el.child(
+                                secondary_button(
+                                    "home-refresh-subscription",
+                                    self.locale.message(Message::OverviewRefreshSubscription),
                                 )
-                            },
-                        ),
-                )
-            })
-            .when(
-                self.subscription_busy || self.subscription_notice.is_some(),
-                |card| {
-                    card.child(div().px_4().pb_4().text_sm().text_color(rgb(FAINT)).child(
-                        if self.subscription_busy {
-                            self.locale.message(self.subscription_busy_message)
-                        } else {
-                            self.subscription_notice
-                                .map(|notice| self.locale.message(notice))
-                                .unwrap_or_default()
+                                .on_click(cx.listener(
+                                    move |paw, _, _, cx| {
+                                        #[cfg(any(target_os = "linux", windows))]
+                                        if overview_current_profile(
+                                            paw.state().2.is_some(),
+                                            paw.snapshot.applying_profile.is_some(),
+                                            paw.snapshot.profile.as_deref(),
+                                        ) == Some(path.as_path())
+                                            && paw.subscription_paths.contains(&path)
+                                        {
+                                            paw.refresh_subscription(id, cx);
+                                        }
+                                        #[cfg(not(any(target_os = "linux", windows)))]
+                                        let _ = (paw, id, &path, cx);
+                                    },
+                                )),
+                            )
                         },
-                    ))
-                },
-            );
+                    ),
+            )
+        })
+        .when(
+            self.subscription_busy || self.subscription_notice.is_some(),
+            |card| {
+                card.child(div().px_4().pb_4().text_sm().text_color(rgb(FAINT)).child(
+                    if self.subscription_busy {
+                        self.locale.message(self.subscription_busy_message)
+                    } else {
+                        self.subscription_notice
+                            .map(|notice| self.locale.message(notice))
+                            .unwrap_or_default()
+                    },
+                ))
+            },
+        );
         let route = self.overview_route(cx);
         #[cfg(any(target_os = "linux", windows))]
         let (proxy_status, proxy_port) = {
@@ -2212,13 +2215,14 @@ impl Paw {
                 .child(div().min_w_0().flex_1().text_sm().child(value))
                 .child(action)
         };
-        let summary = card()
-            .py_2()
+        let network = div()
+            .px_4()
+            .pb_3()
             .flex()
             .flex_col()
             .child(status_row(
                 self.locale.message(Message::MeowEngine),
-                session_state,
+                div().flex().child(session_state),
                 div().into_any_element(),
             ))
             .child(status_row(
@@ -2241,6 +2245,13 @@ impl Paw {
                 }))
                 .into_any_element(),
             ));
+        let network = home_dashboard::card(
+            "home-network-card",
+            Page::Settings.icon(),
+            self.locale.message(Message::Network),
+        )
+        .child(network);
+        let mode = self.home_mode(cx);
         let usage_toggle = secondary_button(
             "home-toggle-usage",
             if self.show_usage {
@@ -2258,10 +2269,12 @@ impl Paw {
             .flex()
             .flex_col()
             .gap_3()
-            .child(summary)
-            .child(metric_row().child(width(profile)).child(width(route)))
+            .child(layout.row(profile, route))
+            .child(layout.row(network, mode))
             .child(
                 card()
+                    .id("home-traffic-card")
+                    .test_support()
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -2280,6 +2293,8 @@ impl Paw {
                     )
                     .child(
                         div()
+                            .id("home-traffic-rates")
+                            .test_support()
                             .flex()
                             .gap_3()
                             .child(traffic_metric(
@@ -2416,7 +2431,7 @@ impl Paw {
         local_profile_display_name(path)
     }
 
-    fn overview_route(&self, cx: &mut Context<Self>) -> Div {
+    fn overview_route(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         #[cfg(any(target_os = "linux", windows))]
         let (detail, selections, excess) = if self.state().2.is_some()
             && self.snapshot.applying_profile.is_none()
@@ -2447,7 +2462,12 @@ impl Paw {
                 preview = preview.child(self.locale.overview_route_excess(excess));
             }
         }
-        form_card(self.locale.message(Message::OverviewCurrentRoute)).child(form_row_with_detail(
+        home_dashboard::card(
+            "home-route-card",
+            Page::Proxies.icon(),
+            self.locale.message(Message::OverviewCurrentRoute),
+        )
+        .child(form_row_with_detail(
             self.locale.message(detail),
             preview,
             subscription_button(
@@ -6203,7 +6223,10 @@ impl Render for Paw {
         }
         let mut proxy_navigator = None;
         let body = match self.page {
-            Page::Overview => self.overview(window.viewport_size().width >= px(960.), cx),
+            Page::Overview => self.overview(
+                home_dashboard::Layout::from_viewport(window.viewport_size().width, compact),
+                cx,
+            ),
             Page::Proxies => self.proxies(window, cx, &mut proxy_navigator),
             Page::Profiles => self.profiles(cx),
             Page::Connections => self.connections(cx),
@@ -6389,7 +6412,7 @@ fn compact_chip(label: impl Into<SharedString>, foreground: u32, background: u32
     chip(label, foreground, background).px_2().py(px(1.))
 }
 
-// Settings has its own card treatment; the shared form cards also serve other pages.
+// Settings has its own card treatment.
 fn settings_card(title: &'static str, icon: &'static str) -> Div {
     card().p_0().child(
         div()
@@ -6419,18 +6442,6 @@ fn settings_card(title: &'static str, icon: &'static str) -> Div {
                     .text_color(rgb(INK))
                     .child(title),
             ),
-    )
-}
-
-fn form_card(title: &'static str) -> Div {
-    card().p_0().child(
-        div()
-            .px_4()
-            .pt_4()
-            .pb_2()
-            .text_base()
-            .font_weight(FontWeight::BOLD)
-            .child(title),
     )
 }
 
