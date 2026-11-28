@@ -525,6 +525,7 @@ pub struct Paw {
     search: Entity<InputState>,
     _search_changes: Subscription,
     profile_filter: Entity<InputState>,
+    revealed_local_profile_path: Option<PathBuf>,
     _profile_filter_changes: Subscription,
     rule_filter: Entity<InputState>,
     _rule_filter_changes: Subscription,
@@ -892,6 +893,7 @@ pub fn open(
             search,
             _search_changes: search_changes,
             profile_filter,
+            revealed_local_profile_path: None,
             _profile_filter_changes: profile_filter_changes,
             rule_filter,
             _rule_filter_changes: rule_filter_changes,
@@ -2458,16 +2460,106 @@ impl Paw {
         ))
     }
 
+    fn local_profile_path_toggle(
+        &self,
+        profile: &std::path::Path,
+        name: &str,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> SemanticButton {
+        let action = if expanded {
+            Message::HideProfilePath
+        } else {
+            Message::ShowProfilePath
+        };
+        let path = profile.to_owned();
+        semantic_secondary_button(
+            SharedString::from(format!("profile-path-toggle:{profile:?}")),
+            self.locale.message(action),
+        )
+        .accessibility_label(self.locale.profile_action_label(action, name))
+        .aria_expanded(expanded)
+        .flex_shrink_0()
+        .text_xs()
+        .px_2()
+        .on_click(cx.listener(move |paw, event, _, cx| {
+            if matches!(event, ClickEvent::Keyboard(_)) {
+                cx.stop_propagation();
+            }
+            paw.revealed_local_profile_path =
+                (paw.revealed_local_profile_path.as_ref() != Some(&path)).then(|| path.clone());
+            cx.notify();
+        }))
+    }
+
+    fn local_profile_path_details(
+        &self,
+        profile: &std::path::Path,
+        name: &str,
+    ) -> impl IntoElement {
+        use gpui_kit::base::TestTextExt;
+
+        let display: SharedString = profile.to_string_lossy().into_owned().into();
+        let clipboard = display.clone();
+        div()
+            .id(SharedString::from(format!(
+                "profile-path-details:{profile:?}"
+            )))
+            .test_support()
+            .rounded_md()
+            .bg(rgb(BG))
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .min_w_0()
+            .child(
+                div()
+                    .id("path-scroll")
+                    .overflow_x_scroll()
+                    .whitespace_nowrap()
+                    .text_xs()
+                    .text_color(rgb(FAINT))
+                    .child(display.clone().test_text(display)),
+            )
+            .child(
+                div().child(
+                    semantic_secondary_button(
+                        "copy-path",
+                        self.locale.message(Message::CopyProfilePath),
+                    )
+                    .accessibility_label(
+                        self.locale
+                            .profile_action_label(Message::CopyProfilePath, name),
+                    )
+                    .text_xs()
+                    .px_2()
+                    .on_click(move |event, _, cx| {
+                        if matches!(event, ClickEvent::Keyboard(_)) {
+                            cx.stop_propagation();
+                        }
+                        cx.write_to_clipboard(ClipboardItem::new_string(clipboard.to_string()));
+                    }),
+                ),
+            )
+    }
+
+    fn profiles_display_name(&self, path: &std::path::Path) -> String {
+        if path.file_name().is_none() {
+            // An invalid persisted local path has no filename; don't use
+            // the raw path as a substitute for a display name.
+            self.locale.message(Message::NoProfileSelected).to_owned()
+        } else {
+            self.display_profile_name(path)
+        }
+    }
+
     fn profiles(&self, cx: &mut Context<Self>) -> Div {
-        let path = self.profile.as_ref().map_or_else(
+        use gpui_kit::base::TestTextExt;
+
+        let selected_name: SharedString = self.profile.as_ref().map_or_else(
             || self.locale.message(Message::NoProfileSelected).into(),
-            |path| {
-                if self.subscription_for(path).is_some() {
-                    self.display_profile_name(path)
-                } else {
-                    path.display().to_string()
-                }
-            },
+            |path| self.profiles_display_name(path).into(),
         );
         let browse = secondary_button(
             "select-profile",
@@ -2491,7 +2583,9 @@ impl Paw {
                     .text_sm()
                     .text_color(rgb(FAINT))
                     .truncate()
-                    .child(path),
+                    .id("profiles-selected-label")
+                    .test_support()
+                    .child(selected_name.clone().test_text(selected_name)),
             )
             .child(div().flex_shrink_0().child(browse));
         let selected = self.profile.as_ref();
@@ -2648,8 +2742,6 @@ impl Paw {
                 div()
                     .text_sm()
                     .text_color(rgb(FAINT))
-                    .child(self.locale.message(Message::ProfileSelectionDetail))
-                    .child(" ")
                     .child(self.locale.message(Message::LiveApplyWarning)),
             );
         }
@@ -2683,7 +2775,7 @@ impl Paw {
             let profiles = profiles
                 .into_iter()
                 .filter_map(|profile| {
-                    let name = self.display_profile_name(profile);
+                    let name = self.profiles_display_name(profile);
                     let matches = profile_name_matches(&name, &query);
                     matching += usize::from(matches);
                     profile_card_visible(
@@ -2737,11 +2829,8 @@ impl Paw {
                         .get(profile)
                         .is_some_and(Option::is_none);
                 let action_id = |action: &str| SharedString::from(format!("{action}:{profile:?}"));
-                let details = if subscription.is_some() {
-                    self.locale.message(Message::SubscriptionDetail).to_owned()
-                } else {
-                    profile.display().to_string()
-                };
+                let path_expanded = subscription.is_none()
+                    && self.revealed_local_profile_path.as_deref() == Some(profile.as_path());
                 let interval = self
                     .subscription_metadata
                     .get(profile)
@@ -2760,6 +2849,8 @@ impl Paw {
                         })
                     });
                 card()
+                    .id(action_id("profile-card"))
+                    .test_support()
                     .border_color(rgb(profile_card_border(
                         confirmed_active,
                         applying == Some(profile),
@@ -2773,24 +2864,27 @@ impl Paw {
                     .flex_col()
                     .gap_2()
                     .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::BOLD)
-                                    .truncate()
-                                    .child(name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .text_xs()
-                                    .text_color(rgb(FAINT))
-                                    .truncate()
-                                    .child(details),
-                            ),
+                        div().flex().items_center().gap_2().min_w_0().child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .font_weight(FontWeight::BOLD)
+                                .truncate()
+                                .child(name.clone()),
+                        ).when(subscription.is_none(), |row| row.child(
+                            self.local_profile_path_toggle(profile.as_path(), &name, path_expanded, cx),
+                        )),
                     )
+                    .when(path_expanded, |card| card.child(
+                        self.local_profile_path_details(profile.as_path(), &name),
+                    ))
+                    .when(subscription.is_some(), |card| card.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(FAINT))
+                            .truncate()
+                            .child(self.locale.message(Message::SubscriptionDetail)),
+                    ))
                     .when(subscription.is_some(), |card| {
                         card.child(div().text_xs().text_color(rgb(FAINT)).child(
                             self.locale.message(if unreadable {
@@ -3115,6 +3209,11 @@ impl Paw {
                                                 }
                                                 match paw.preferences.forget_profile(&forget_path) {
                                                     Ok(()) => {
+                                                        if paw.revealed_local_profile_path.as_ref()
+                                                            == Some(&forget_path)
+                                                        {
+                                                            paw.revealed_local_profile_path = None;
+                                                        }
                                                         if paw.profile.as_ref()
                                                             == Some(&forget_path)
                                                         {
@@ -3227,6 +3326,7 @@ impl Paw {
 
     fn navigate_to(&mut self, page: Page) {
         if self.page != page {
+            self.revealed_local_profile_path = None;
             self.file_picker.leave_page();
             self.file_picker_task = None;
             self.page = page;

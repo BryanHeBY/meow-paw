@@ -212,7 +212,6 @@ pub enum Message {
     SubscriptionNameSaveFailed,
     DownloadingSubscription,
     LiveApplyWarning,
-    ProfileSelectionDetail,
     NoLocalProfiles,
     ProfileNameFilter,
     NoMatchingProfiles,
@@ -229,6 +228,9 @@ pub enum Message {
     ApplyLive,
     Use,
     UseOnNextStart,
+    ShowProfilePath,
+    HideProfilePath,
+    CopyProfilePath,
     Forget,
     LastStartDiagnostics,
     ChooseYaml,
@@ -707,9 +709,6 @@ fn english(key: Message) -> &'static str {
         Message::SavingSubscriptionName => "Saving name…",
         Message::SubscriptionNameSaveFailed => "Could not save the subscription name",
         Message::DownloadingSubscription => "Downloading subscription…",
-        Message::ProfileSelectionDetail => {
-            "Use selects the next session; Apply live changes the running profile."
-        }
         Message::LiveApplyWarning => {
             "Apply live and Reload keep Meow running, but can disconnect active connections."
         }
@@ -733,6 +732,9 @@ fn english(key: Message) -> &'static str {
         Message::ApplyLive => "Apply live",
         Message::Use => "Use",
         Message::UseOnNextStart => "Use on next start",
+        Message::ShowProfilePath => "Show path",
+        Message::HideProfilePath => "Hide path",
+        Message::CopyProfilePath => "Copy path",
         Message::Forget => "Forget",
         Message::LastStartDiagnostics => "Diagnostics from the last start attempt",
         Message::ChooseYaml => "Choose Meow YAML",
@@ -1061,9 +1063,6 @@ fn chinese(key: Message) -> &'static str {
         Message::SavingSubscriptionName => "正在保存名称…",
         Message::SubscriptionNameSaveFailed => "无法保存订阅名称",
         Message::DownloadingSubscription => "正在下载订阅…",
-        Message::ProfileSelectionDetail => {
-            "使用会选择下次会话的配置；实时应用会更改正在运行的配置。"
-        }
         Message::LiveApplyWarning => "实时应用和重新加载会保持 Meow 运行，但可能断开活动连接。",
         Message::NoLocalProfiles => "暂无本地配置",
         Message::ProfileNameFilter => "筛选配置名称",
@@ -1081,6 +1080,9 @@ fn chinese(key: Message) -> &'static str {
         Message::ApplyLive => "实时应用",
         Message::Use => "使用",
         Message::UseOnNextStart => "下次启动时使用",
+        Message::ShowProfilePath => "查看路径",
+        Message::HideProfilePath => "隐藏路径",
+        Message::CopyProfilePath => "复制路径",
         Message::Forget => "移除",
         Message::LastStartDiagnostics => "上次启动尝试的诊断信息",
         Message::ChooseYaml => "选择 Meow YAML",
@@ -1327,6 +1329,9 @@ mod tests {
                 "Use on next start",
                 "下次启动时使用",
             ),
+            (Message::ShowProfilePath, "Show path", "查看路径"),
+            (Message::HideProfilePath, "Hide path", "隐藏路径"),
+            (Message::CopyProfilePath, "Copy path", "复制路径"),
             (Message::ApplyLive, "Apply live", "实时应用"),
             (Message::Reload, "Reload", "重新加载"),
         ] {
@@ -1821,11 +1826,6 @@ mod tests {
                 Message::DownloadingSubscription,
                 "Downloading subscription…",
                 "正在下载订阅…",
-            ),
-            (
-                Message::ProfileSelectionDetail,
-                "Use selects the next session; Apply live changes the running profile.",
-                "使用会选择下次会话的配置；实时应用会更改正在运行的配置。",
             ),
             (
                 Message::LiveApplyWarning,
