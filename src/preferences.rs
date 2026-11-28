@@ -272,7 +272,6 @@ impl Preferences {
     }
 
     /// Publish staged imports as one list update without selecting any of them.
-    #[allow(dead_code)] // Called by the desktop import workflow.
     pub fn register_local_imports(
         &mut self,
         staged: Vec<meow_paw::profile::local_import::StagedYaml>,

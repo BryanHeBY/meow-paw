@@ -191,6 +191,13 @@ pub enum Message {
     QuitPaw,
     NoProfileSelected,
     Subscription,
+    ImportYamlCopies,
+    DropYamlCopies,
+    AttachLocalYaml,
+    ImportingYamlCopies,
+    PickYamlCopies,
+    LocalYamlImportFailed,
+    LocalYamlPickerFailed,
     ImportLocalYaml,
     AddSubscription,
     SubscriptionUrl,
@@ -681,6 +688,17 @@ fn english(key: Message) -> &'static str {
         Message::QuitPaw => "Quit Meow Paw",
         Message::NoProfileSelected => "No profile selected",
         Message::Subscription => "Subscription",
+        Message::ImportYamlCopies => "Import YAML copies",
+        Message::DropYamlCopies => {
+            "Drop YAML files here to import copies without switching profiles."
+        }
+        Message::AttachLocalYaml => "Use existing file",
+        Message::ImportingYamlCopies => "Importing YAML copies…",
+        Message::PickYamlCopies => "Choose YAML files to import",
+        Message::LocalYamlImportFailed => {
+            "Could not save the imported profiles. No profiles were added."
+        }
+        Message::LocalYamlPickerFailed => "Could not open the YAML file picker.",
         Message::ImportLocalYaml => "Import local YAML",
         Message::AddSubscription => "Add HTTPS subscription",
         Message::SubscriptionUrl => "HTTPS subscription URL",
@@ -1039,6 +1057,13 @@ fn chinese(key: Message) -> &'static str {
         Message::QuitPaw => "退出 Meow Paw",
         Message::NoProfileSelected => "未选择配置",
         Message::Subscription => "订阅",
+        Message::ImportYamlCopies => "导入 YAML 副本",
+        Message::DropYamlCopies => "将 YAML 文件拖到这里，导入副本而不切换配置。",
+        Message::AttachLocalYaml => "使用现有文件",
+        Message::ImportingYamlCopies => "正在导入 YAML 副本…",
+        Message::PickYamlCopies => "选择要导入的 YAML 文件",
+        Message::LocalYamlImportFailed => "无法保存导入的配置，未添加任何配置。",
+        Message::LocalYamlPickerFailed => "无法打开 YAML 文件选择器。",
         Message::ImportLocalYaml => "导入本地 YAML",
         Message::AddSubscription => "添加 HTTPS 订阅",
         Message::SubscriptionUrl => "HTTPS 订阅地址",

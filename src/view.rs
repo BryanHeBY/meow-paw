@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod file_picker;
+mod local_yaml_import;
 #[cfg(any(target_os = "linux", windows))]
 mod proxy_group_navigation;
 
@@ -509,6 +510,7 @@ pub struct Paw {
     _subscription_url_changes: Subscription,
     preference_warning: Option<String>,
     file_picker: file_picker::Picker,
+    local_yaml_import: local_yaml_import::State,
     file_picker_task: Option<Task<()>>,
     language_save_failed: bool,
     motion_save_failed: bool,
@@ -877,6 +879,7 @@ pub fn open(
             _subscription_url_changes: subscription_url_changes,
             preference_warning: warning.map(str::to_owned),
             file_picker: file_picker::Picker::default(),
+            local_yaml_import: local_yaml_import::State::default(),
             file_picker_task: None,
             language_save_failed: false,
             motion_save_failed: false,
@@ -2563,7 +2566,7 @@ impl Paw {
         );
         let browse = secondary_button(
             "select-profile",
-            self.file_picker_caption(file_picker::Kind::Profile, Message::ImportLocalYaml),
+            self.file_picker_caption(file_picker::Kind::Profile, Message::AttachLocalYaml),
         )
         .on_click(cx.listener(|this, _, _, cx| this.choose_file(file_picker::Kind::Profile, cx)));
         let import = div()
@@ -2605,7 +2608,8 @@ impl Paw {
             .flex_col()
             .gap_3()
             .child(import)
-            .children(self.file_picker_status(file_picker::Kind::Profile));
+            .children(self.file_picker_status(file_picker::Kind::Profile))
+            .children(self.local_yaml_import_panel(cx));
         if self.preferences.subscription_dir().is_some() {
             if self.subscription_entry_open {
                 page =
