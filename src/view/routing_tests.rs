@@ -411,6 +411,95 @@ fn sorting_from_proxy_header_does_not_collapse_group(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn proxy_expand_tooltip_tracks_group_with_pointer_still_hovering(cx: &mut TestAppContext) {
+    use gpui_kit::{point, px, size};
+
+    cx.update(gpui_kit::init);
+    let holder = Rc::new(RefCell::new(None));
+    let result = holder.clone();
+    let (_, ui) = cx.add_window_view(move |window, cx| {
+        let paw = open(
+            None,
+            None,
+            (Page::Proxies, Locale::En),
+            false,
+            (Preferences::discover(false).0, None),
+            window,
+            cx,
+        );
+        super::seed_proxy_fixture(&paw, cx);
+        *result.borrow_mut() = Some(paw.clone());
+        gpui_kit::base::Root::new(paw, window, cx)
+    });
+    let paw = holder.borrow_mut().take().unwrap();
+    ui.simulate_resize(size(px(1120.), px(900.)));
+    let button = "group-expand:Daily Proxy";
+    // Complete initial window bounds callbacks before moving the pointer.
+    // GPUI's test platform reports (0, 0) when asked during a bounds change.
+    ui.update(|window, _| window.activate_window());
+    ui.run_until_parked();
+    ui.executor().advance_clock(Duration::from_secs(1));
+    ui.run_until_parked();
+    let at = ui.update(|window, cx| {
+        window.render_frame(cx);
+        window.find(button).bounds().center()
+    });
+    ui.simulate_mouse_move(at, None, Default::default());
+    ui.run_until_parked();
+    ui.executor().advance_clock(Duration::from_secs(1));
+    ui.run_until_parked();
+
+    for (expected, stale, toggle) in [
+        ("Collapse group", "Expand group", true),
+        ("Expand group", "Collapse group", true),
+        ("Collapse group", "Expand group", false),
+    ] {
+        ui.update(|window, cx| {
+            window.render_frame(cx);
+            let control = window.find(button);
+            assert_eq!(control.role(), Some(gpui_kit::Role::Button));
+            assert_eq!(control.label(), Some(expected));
+            let texts = gpui_kit::base::test_support::texts(window);
+            assert_eq!(window.mouse_position(), at, "pointer moved between states");
+            let visible = |label| {
+                texts
+                    .iter()
+                    .any(|text| text.visible() && text.text() == label)
+            };
+            assert!(
+                visible(expected),
+                "expected visible hover hint {expected:?}"
+            );
+            assert!(
+                !visible(stale),
+                "stale hover hint {stale:?} is still visible"
+            );
+            // An expansion can also originate outside the hovered button.
+            // Keep the pointer still so this exercises the already-open popup.
+            if toggle {
+                paw.update(cx, |paw, cx| {
+                    paw.toggle_proxy_group("Daily Proxy");
+                    cx.notify();
+                });
+            }
+        });
+    }
+    ui.simulate_mouse_move(point(px(3.), px(3.)), None, Default::default());
+    ui.executor().advance_clock(Duration::from_secs(1));
+    ui.run_until_parked();
+    ui.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            !gpui_kit::base::test_support::texts(window)
+                .iter()
+                .any(|text| {
+                    text.visible() && matches!(text.text(), "Expand group" | "Collapse group")
+                })
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn proxy_group_actions_align_across_states_and_apply_locally(cx: &mut TestAppContext) {
     use super::GroupRouteField;
     cx.update(gpui_kit::init);

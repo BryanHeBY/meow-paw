@@ -3780,6 +3780,11 @@ impl Paw {
     }
 
     #[cfg(any(target_os = "linux", windows))]
+    fn proxy_group_is_open(&self, name: &str, filtering: bool) -> bool {
+        name == "GLOBAL" || filtering || self.expanded_groups.contains(name)
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
     fn toggle_proxy_group(&mut self, name: &str) {
         if !self.expanded_groups.remove(name) {
             self.expanded_groups.insert(name.to_owned());
@@ -3886,8 +3891,7 @@ impl Paw {
                     let anchor = ScrollAnchor::for_handle(self.proxy_group_scroll.clone());
                     group_anchors.push((name.clone(), anchor.clone()));
                     let expandable = name != "GLOBAL";
-                    let open =
-                        !expandable || !query.is_empty() || self.expanded_groups.contains(name);
+                    let open = self.proxy_group_is_open(name, !query.is_empty());
                     let order = self.proxy_order.get(name).copied().unwrap_or_default();
                     let comparison = self.snapshot.group_probe.as_ref().filter(|g| {
                         open && ownership_available
@@ -4058,11 +4062,7 @@ impl Paw {
                         paw.expanded_groups.insert(filter_group.clone());
                         paw.show_group_route_field(&filter_group, GroupRouteField::Filter, true, window, cx);
                     }));
-                    let expand_label = if open {
-                        localized_proxy_tool(self.locale, "Collapse group", "折叠分组")
-                    } else {
-                        localized_proxy_tool(self.locale, "Expand group", "展开分组")
-                    };
+                    let expand_label = proxy_group_expand_label(self.locale, open);
                     let expand_group = name.clone();
                     let expand_button = proxy_tool_button(
                         format!("group-expand:{name}"), expand_label,
@@ -4126,7 +4126,9 @@ impl Paw {
                                         } else {
                                             format!("{}/{}", members.len(), route_count)
                                         })))
-                                .child(proxy_tool_slot("expand", name, expand_label, expand_button)),
+                                .child(proxy_tool_slot_with_tooltip(
+                                    "expand", name, expand_button, proxy_group_expand_tooltip(cx.weak_entity(), name),
+                                )),
                         );
                     let editor = tools.and_then(|tools| {
                         let field = tools.open?;
@@ -6805,14 +6807,57 @@ fn proxy_tool_slot(
     hint: &'static str,
     button: SemanticButton,
 ) -> impl IntoElement {
+    proxy_tool_slot_with_tooltip(kind, name, button, move |window, cx| {
+        gpui_kit::component::tooltip::Tooltip::new(hint).build(window, cx)
+    })
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn proxy_tool_slot_with_tooltip(
+    kind: &'static str,
+    name: &str,
+    button: SemanticButton,
+    tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
+) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("tool-slot:{name}:{kind}")))
         .flex_shrink_0()
         .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
-        .tooltip(move |window, cx| {
-            gpui_kit::component::tooltip::Tooltip::new(hint).build(window, cx)
-        })
+        .tooltip(tooltip)
         .child(button)
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn proxy_group_expand_label(locale: Locale, open: bool) -> &'static str {
+    if open {
+        localized_proxy_tool(locale, "Collapse group", "折叠分组")
+    } else {
+        localized_proxy_tool(locale, "Expand group", "展开分组")
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn proxy_group_expand_tooltip(
+    paw: WeakEntity<Paw>,
+    name: &str,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let name = name.to_owned();
+    move |window, cx| {
+        let paw = paw.clone();
+        let name = name.clone();
+        // GPUI keeps the tooltip view while the pointer remains on its trigger.
+        // Read the group when that view paints, not while building its trigger
+        // or only when the hover timer first fires.
+        gpui_kit::component::tooltip::Tooltip::element(move |_, cx| {
+            let label = paw.upgrade().map_or("", |paw| {
+                let paw = paw.read(cx);
+                let filtering = !paw.search.read(cx).value().trim().is_empty();
+                proxy_group_expand_label(paw.locale, paw.proxy_group_is_open(&name, filtering))
+            });
+            gpui_kit::base::TestTextExt::test_text(SharedString::from(label), label)
+        })
+        .build(window, cx)
+    }
 }
 
 #[cfg(any(target_os = "linux", windows))]
